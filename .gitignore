@@ -27,5 +27,6 @@ Thumbs.db
 
 # Local config
 sources.toml
+sites.toml
 .env
 .env.local
