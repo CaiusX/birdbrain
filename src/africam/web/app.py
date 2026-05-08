@@ -132,6 +132,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             )
 
+        sites_for_map = [
+            {"name": s.name, "lat": s.lat, "lon": s.lon}
+            for s in sorted(sites.values(), key=lambda s: s.name)
+        ]
+        tiles_for_js = [
+            {
+                "name": t.name,
+                "kind": t.kind,
+                "video_id": t.video_id,
+                "multisite": t.multisite,
+                "url": t.url,
+            }
+            for t in tiles
+        ]
         return TEMPLATES.TemplateResponse(
             request,
             "dashboard.html",
@@ -141,7 +155,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "top_recent": top_recent,
                 "selected_source": None,
                 "tiles": tiles,
+                "tiles_json": tiles_for_js,
                 "sites": sorted(sites.values(), key=lambda s: s.name),
+                "sites_json": sites_for_map,
                 "site_states": _site_states(),
             },
         )

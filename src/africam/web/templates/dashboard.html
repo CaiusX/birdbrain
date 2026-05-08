@@ -1,64 +1,57 @@
 {% extends "base.html" %}
 {% block title %}Africam · dashboard{% endblock %}
 
-{% block content %}
-{% if tiles %}
-<section class="mb-8">
-  <div class="flex items-baseline justify-between mb-3">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Live cameras</h2>
-    <span class="text-xs text-zinc-500">muted by default · click 🔊 on a player to hear it</span>
-  </div>
-  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-    {% for t in tiles %}
-      <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-        <div class="px-4 py-2 flex items-center justify-between border-b border-zinc-800">
-          <div>
-            <span class="font-medium text-sm">{{ t.name }}</span>
-            <span class="ml-2 text-xs text-zinc-500 uppercase tracking-wider">{{ t.kind }}</span>
-            {% if t.multisite %}
-              <span class="ml-2 text-xs text-amber-400/80 uppercase tracking-wider">multisite</span>
-            {% endif %}
-          </div>
-          <a href="{{ t.url }}" target="_blank" rel="noopener" class="text-xs text-zinc-400 hover:text-zinc-200">↗ open</a>
-        </div>
-        {% if t.embed_url %}
-          <div class="aspect-video bg-black">
-            <iframe
-              src="{{ t.embed_url }}"
-              class="w-full h-full"
-              frameborder="0"
-              allow="autoplay; encrypted-media; picture-in-picture"
-              allowfullscreen
-              referrerpolicy="strict-origin-when-cross-origin"
-              loading="lazy"></iframe>
-          </div>
-        {% else %}
-          <div class="aspect-video bg-black flex items-center justify-center text-zinc-500 text-sm px-4 text-center">
-            {% if t.kind == "rtsp" %}
-              RTSP can't be played directly in a browser.<br>
-              Audio still feeds the detector.
-            {% else %}
-              Stream URL isn't embeddable.<br>
-              <code class="text-zinc-400 text-xs break-all">{{ t.url }}</code>
-            {% endif %}
-          </div>
-        {% endif %}
+{% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+{% endblock %}
 
-        {% if t.multisite %}
-          <div id="site-panel-{{ t.name }}"
-               hx-get="/partials/site/{{ t.name }}"
-               hx-trigger="load, every 30s"
-               hx-swap="innerHTML"
-               class="border-t border-zinc-800">
-          </div>
-        {% endif %}
+{% block content %}
+<section class="mb-6">
+  <div class="flex flex-wrap items-center gap-3 mb-4">
+    <label for="active-source" class="text-sm uppercase tracking-wider text-zinc-400">Active source</label>
+    <select id="active-source"
+            class="bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-sm">
+      {% for t in tiles %}
+        <option value="{{ t.name }}">{{ t.name }} · {{ t.kind }}{% if t.multisite %} · multisite{% endif %}</option>
+      {% endfor %}
+      <option value="__all__">— all sources (no video) —</option>
+    </select>
+    <a id="active-open" href="#" target="_blank" rel="noopener"
+       class="text-xs text-zinc-400 hover:text-zinc-200">↗ open original</a>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div id="video-panel" class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+      <div class="aspect-video bg-black">
+        <iframe id="active-video"
+                class="w-full h-full"
+                src="about:blank"
+                frameborder="0"
+                allow="autoplay; encrypted-media; picture-in-picture"
+                allowfullscreen
+                referrerpolicy="strict-origin-when-cross-origin"></iframe>
       </div>
-    {% endfor %}
+      <div id="active-site-panel"
+           class="border-t border-zinc-800"
+           hx-trigger="every 30s"
+           hx-swap="innerHTML">
+      </div>
+    </div>
+
+    <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+      <div class="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
+        <span class="text-sm uppercase tracking-wider text-zinc-400">Sites</span>
+        <span class="text-xs text-zinc-500">click a pin to set the active source's site</span>
+      </div>
+      <div id="map" class="w-full" style="height: 360px;"></div>
+    </div>
   </div>
 </section>
-{% endif %}
 
-<section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+<section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
   <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-5">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Top species · last hour</h2>
     {% if top_recent %}
@@ -82,22 +75,13 @@
   </div>
 
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Filter</h2>
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Detection sources</h2>
     {% if sources %}
-      <div class="flex flex-wrap gap-2">
-        <button
-          class="px-3 py-1 rounded-full text-xs border border-zinc-700 hover:bg-zinc-800"
-          hx-get="/partials/detections?limit=50"
-          hx-target="#detections-list"
-          hx-swap="innerHTML">all</button>
+      <ul class="text-sm space-y-1">
         {% for s in sources %}
-          <button
-            class="px-3 py-1 rounded-full text-xs border border-zinc-700 hover:bg-zinc-800"
-            hx-get="/partials/detections?limit=50&source={{ s }}"
-            hx-target="#detections-list"
-            hx-swap="innerHTML">{{ s }}</button>
+          <li><code class="text-zinc-300">{{ s }}</code></li>
         {% endfor %}
-      </div>
+      </ul>
     {% else %}
       <p class="text-zinc-500 text-sm">No sources have produced detections yet.</p>
     {% endif %}
@@ -106,15 +90,180 @@
 
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Recent detections</h2>
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Recent detections · <span id="rows-source-label">all</span>
+    </h2>
     <span class="text-xs text-zinc-500">auto-refreshes every 5s</span>
   </div>
-  <div
-    id="detections-list"
-    hx-get="/partials/detections?limit=50"
-    hx-trigger="load, every 5s"
-    hx-swap="innerHTML">
+  <div id="detections-list"
+       hx-trigger="every 5s"
+       hx-swap="innerHTML">
     {% include "_detection_rows.html" %}
   </div>
 </section>
+
+<script>
+  const TILES = {{ tiles_json | tojson }};
+  const SITES = {{ sites_json | tojson }};
+  const TILE_BY_NAME = Object.fromEntries(TILES.map(t => [t.name, t]));
+
+  const ACTIVE_KEY = 'africam.activeSource';
+
+  // --- Map setup ---
+  const map = L.map('map', { scrollWheelZoom: true });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap',
+    maxZoom: 18,
+  }).addTo(map);
+
+  const dotIcon = (color) => L.divIcon({
+    className: 'site-pin',
+    html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};` +
+          `border:2px solid #18181b;box-shadow:0 0 0 1px ${color};"></div>`,
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+  const COLOR_DEFAULT = '#71717a';
+  const COLOR_ACTIVE  = '#10b981';
+
+  const markers = {};
+  SITES.forEach(s => {
+    const m = L.marker([s.lat, s.lon], { icon: dotIcon(COLOR_DEFAULT) }).addTo(map);
+    m.bindPopup(() => buildSitePopup(s));
+    markers[s.name] = m;
+  });
+
+  if (SITES.length > 0) {
+    const group = L.featureGroup(Object.values(markers));
+    map.fitBounds(group.getBounds().pad(0.25));
+  } else {
+    map.setView([-24, 31], 6);
+  }
+
+  function buildSitePopup(site) {
+    const active = currentActive();
+    const tile = TILE_BY_NAME[active];
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `<strong>${escapeHtml(site.name)}</strong>
+      <div style="color:#71717a;margin-top:2px;">${site.lat.toFixed(3)}, ${site.lon.toFixed(3)}</div>`;
+    if (tile && tile.multisite) {
+      const btn = document.createElement('button');
+      btn.textContent = `set as current for ${active}`;
+      btn.style.cssText =
+        'margin-top:8px;padding:4px 10px;background:#10b981;color:#fff;' +
+        'border:none;border-radius:4px;font-size:12px;cursor:pointer;';
+      btn.onclick = (e) => {
+        e.preventDefault();
+        overrideSite(active, site.name).then(() => map.closePopup());
+      };
+      wrap.appendChild(btn);
+    } else if (tile) {
+      const note = document.createElement('div');
+      note.style.cssText = 'margin-top:8px;color:#a1a1aa;font-size:11px;';
+      note.textContent = `${active} is not a multisite source.`;
+      wrap.appendChild(note);
+    }
+    return wrap;
+  }
+
+  async function overrideSite(source, site) {
+    const body = new URLSearchParams({ site, ttl_minutes: '60' });
+    const r = await fetch(`/api/sources/${encodeURIComponent(source)}/site`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    if (!r.ok) {
+      console.error('override failed', r.status);
+      return;
+    }
+    refreshSitePanel();
+    highlightActiveSite();
+  }
+
+  // --- Active source switching ---
+
+  function currentActive() {
+    return document.getElementById('active-source').value;
+  }
+
+  function setActive(name) {
+    const dropdown = document.getElementById('active-source');
+    if (dropdown.value !== name) dropdown.value = name;
+    localStorage.setItem(ACTIVE_KEY, name);
+
+    const video = document.getElementById('active-video');
+    const sitePanel = document.getElementById('active-site-panel');
+    const openLink = document.getElementById('active-open');
+    const rowsLabel = document.getElementById('rows-source-label');
+    const rowsList = document.getElementById('detections-list');
+
+    if (name === '__all__') {
+      video.src = 'about:blank';
+      sitePanel.innerHTML = '';
+      sitePanel.removeAttribute('hx-get');
+      openLink.href = '#';
+      openLink.style.visibility = 'hidden';
+      rowsLabel.textContent = 'all sources';
+      rowsList.setAttribute('hx-get', '/partials/detections?limit=50');
+    } else {
+      const tile = TILE_BY_NAME[name];
+      video.src = tile && tile.video_id
+        ? `https://www.youtube.com/embed/${tile.video_id}?autoplay=1&mute=1&controls=1&rel=0`
+        : 'about:blank';
+      openLink.href = tile ? tile.url : '#';
+      openLink.style.visibility = tile ? 'visible' : 'hidden';
+
+      if (tile && tile.multisite) {
+        sitePanel.setAttribute('hx-get', `/partials/site/${encodeURIComponent(name)}`);
+        htmx.ajax('GET', `/partials/site/${encodeURIComponent(name)}`, {target: sitePanel, swap: 'innerHTML'});
+      } else {
+        sitePanel.innerHTML = '';
+        sitePanel.removeAttribute('hx-get');
+      }
+
+      rowsLabel.textContent = name;
+      rowsList.setAttribute('hx-get', `/partials/detections?limit=50&source=${encodeURIComponent(name)}`);
+    }
+    htmx.ajax('GET', rowsList.getAttribute('hx-get'), {target: rowsList, swap: 'innerHTML'});
+    highlightActiveSite();
+  }
+
+  function refreshSitePanel() {
+    const sitePanel = document.getElementById('active-site-panel');
+    const url = sitePanel.getAttribute('hx-get');
+    if (url) htmx.ajax('GET', url, {target: sitePanel, swap: 'innerHTML'});
+  }
+
+  async function highlightActiveSite() {
+    const active = currentActive();
+    Object.values(markers).forEach(m => m.setIcon(dotIcon(COLOR_DEFAULT)));
+    if (active === '__all__' || !TILE_BY_NAME[active]?.multisite) return;
+    try {
+      const r = await fetch(`/api/sources/${encodeURIComponent(active)}/site`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.site && markers[data.site]) {
+        markers[data.site].setIcon(dotIcon(COLOR_ACTIVE));
+      }
+    } catch (e) { /* swallow */ }
+  }
+
+  function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  document.getElementById('active-source').addEventListener('change', (e) => setActive(e.target.value));
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const saved = localStorage.getItem(ACTIVE_KEY);
+    const dropdown = document.getElementById('active-source');
+    const valid = saved && dropdown.querySelector(`option[value="${CSS.escape(saved)}"]`);
+    setActive(valid ? saved : dropdown.value);
+    // Keep map highlight fresh in case OCR or another client updates the override.
+    setInterval(highlightActiveSite, 30_000);
+  });
+</script>
 {% endblock %}

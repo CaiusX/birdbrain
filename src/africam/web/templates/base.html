@@ -9,7 +9,12 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🐦</text></svg>">
   <style>
     .conf-bar { background: linear-gradient(90deg, #16a34a var(--w), transparent var(--w)); }
+    /* Leaflet popups inherit a white background by default — match the dark theme. */
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: #18181b !important; color: #e4e4e7; }
+    .leaflet-popup-content { margin: 10px 14px; font-size: 13px; }
+    .leaflet-container { background: #0c0c0e; }
   </style>
+  {% block head_extra %}{% endblock %}
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans">
   <header class="border-b border-zinc-800">
