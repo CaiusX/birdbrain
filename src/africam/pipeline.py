@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Iterable
 
 from africam.audio import AudioSource, RtspSource, YouTubeSource
@@ -23,7 +24,12 @@ def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
         "chunk_seconds": app.chunk_seconds,
     }
     if cfg.kind == "youtube":
-        return YouTubeSource(url=cfg.url, **common)
+        return YouTubeSource(
+            url=cfg.url,
+            cookies_from_browser=cfg.cookies_from_browser,
+            cookies_file=str(cfg.cookies_file) if cfg.cookies_file else None,
+            **common,
+        )
     if cfg.kind == "rtsp":
         return RtspSource(url=cfg.url, **common)
     raise ValueError(f"Unknown source kind: {cfg.kind!r}")
@@ -56,12 +62,44 @@ def run_source(
     db: Database,
     sites: dict[str, Site],
 ) -> None:
-    """Block, pulling chunks from one source and writing detections."""
+    """Pull chunks from one source and write detections, restarting on errors.
+
+    Wrapped in a retry loop so that a transient failure (yt-dlp bot-check,
+    ffmpeg disconnection, network blip) doesn't kill the worker — we sleep
+    with bounded exponential backoff and try again from scratch.
+    """
     source = build_source(cfg, app)
     resolver = _build_resolver(cfg, source, sites, db)
     slog = log.bind(source=cfg.name, kind=cfg.kind, multisite=cfg.multisite)
     slog.info("pipeline.start")
 
+    backoff = 5.0
+    while True:
+        started = time.monotonic()
+        try:
+            _consume_stream(source, resolver, cfg, app, detector, db, slog)
+            slog.warning("source.eof_reconnect", sleep_s=backoff)
+        except Exception as e:
+            slog.warning("source.error_reconnect", error=str(e)[:300], sleep_s=backoff)
+        # If we were streaming successfully for a while, treat the failure as
+        # fresh and reset the backoff. Otherwise keep doubling, capped at 60s
+        # so the pipeline recovers promptly once the underlying issue is fixed.
+        if time.monotonic() - started > 60:
+            backoff = 5.0
+        else:
+            backoff = min(backoff * 2, 60.0)
+        time.sleep(backoff)
+
+
+def _consume_stream(
+    source: AudioSource,
+    resolver,  # SiteResolver
+    cfg: SourceConfig,
+    app: AppConfig,
+    detector: BirdNetDetector,
+    db: Database,
+    slog,
+) -> None:
     for chunk in source.stream():
         resolved = resolver.current()
         try:

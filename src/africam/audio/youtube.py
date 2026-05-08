@@ -21,9 +21,13 @@ class YouTubeSource(AudioSource):
         url: str,
         sample_rate: int = 48_000,
         chunk_seconds: float = 3.0,
+        cookies_from_browser: str | None = None,
+        cookies_file: str | None = None,
     ) -> None:
         super().__init__(name=name, sample_rate=sample_rate, chunk_seconds=chunk_seconds)
         self.url = url
+        self.cookies_from_browser = cookies_from_browser
+        self.cookies_file = cookies_file
 
     def current_url(self) -> str:
         return self._resolve_stream_url()
@@ -32,15 +36,19 @@ class YouTubeSource(AudioSource):
         # bestaudio/best: prefer audio-only when present, otherwise an A+V manifest
         # which ffmpeg will demux (we drop video with -vn). Required because many
         # YouTube live streams don't publish a standalone audio format.
-        result = subprocess.run(
-            ["yt-dlp", "-f", "bestaudio/best", "-g", "--no-warnings", self.url],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        cmd = ["yt-dlp", "-f", "bestaudio/best", "-g", "--no-warnings"]
+        # cookies_file wins if both are set — it's the more reliable path on Windows.
+        if self.cookies_file:
+            cmd += ["--cookies", str(self.cookies_file)]
+        elif self.cookies_from_browser:
+            cmd += ["--cookies-from-browser", self.cookies_from_browser]
+        cmd += [self.url]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(
-                f"yt-dlp failed for {self.url}: {result.stderr.strip() or result.stdout.strip()}"
+                f"yt-dlp failed for {self.url}: "
+                f"{result.stderr.strip() or result.stdout.strip()}"
             )
         # When yt-dlp emits multiple URLs (e.g. video + audio manifests for DASH),
         # we still take the first. For HLS combined streams there's only one.

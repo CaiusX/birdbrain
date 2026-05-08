@@ -36,6 +36,17 @@ class SourceConfig(BaseModel):
     # the active site name. False = static lat/lon, no resolver.
     multisite: bool = False
     ocr: OcrConfig = Field(default_factory=OcrConfig)
+    # YouTube only. Passed through to yt-dlp's --cookies-from-browser; needed
+    # when YouTube's anti-bot checks demand auth ("Sign in to confirm you're
+    # not a bot"). Common values: "chrome", "firefox", "edge", "brave".
+    # Closing the browser before the pipeline starts avoids cookie-db locks.
+    # NOTE: Chrome 127+ uses App-Bound (DPAPI) cookie encryption which yt-dlp
+    # may fail to decrypt — use cookies_file in that case.
+    cookies_from_browser: str | None = None
+    # Path to a Netscape-format cookies.txt. Export once with a browser
+    # extension like "Get cookies.txt LOCALLY" (filter to youtube.com) and
+    # point at the file. More robust than cookies_from_browser on Windows.
+    cookies_file: Path | None = None
 
 
 class AppConfig(BaseSettings):
