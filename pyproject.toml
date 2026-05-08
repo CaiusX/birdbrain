@@ -1,0 +1,48 @@
+[project]
+name = "africam"
+version = "0.1.0"
+description = "Real-time bird species recognition from YouTube and IP camera audio streams"
+requires-python = ">=3.12"
+dependencies = [
+    "birdnetlib>=0.18.0",
+    "tensorflow>=2.16 ; sys_platform == 'win32'",
+    "tflite-runtime>=2.14 ; sys_platform != 'win32'",
+    "numpy>=1.26,<2.0",
+    "yt-dlp>=2024.10.7",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer>=0.12",
+    "rich>=13.7",
+    "structlog>=24.1",
+    "anyio>=4.3",
+]
+
+[project.scripts]
+africam = "africam.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/africam"]
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.5",
+    "pytest>=8",
+    "pytest-anyio>=0.0.0 ; python_version<'0'",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "RUF", "SIM", "PL"]
+ignore = ["PLR2004", "PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/africam/cli.py" = ["B008"]  # typer uses default-arg call expressions

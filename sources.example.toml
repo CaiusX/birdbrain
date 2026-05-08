@@ -1,0 +1,21 @@
+# Example sources file. Copy to sources.toml and edit.
+# Each [[source]] entry is one continuously-monitored audio stream.
+
+[[source]]
+name = "africam-olifants"
+kind = "youtube"
+# Any youtube URL that yt-dlp can resolve, including live streams and channel /live URLs.
+url = "https://www.youtube.com/@africam/live"
+# Lat/lon biases the BirdNET species filter. Olifants is in the Kruger area.
+lat = -24.0
+lon = 31.5
+# Optional: minimum confidence threshold (0-1) below which detections are dropped.
+min_confidence = 0.6
+
+[[source]]
+name = "garden-rtsp"
+kind = "rtsp"
+url = "rtsp://user:pass@192.168.1.42:554/stream1"
+lat = -33.92
+lon = 18.42
+min_confidence = 0.7

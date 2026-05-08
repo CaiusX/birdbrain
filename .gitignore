@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.python-version.local
+
+# uv
+.uv/
+
+# Project data
+data/
+*.sqlite
+*.sqlite3
+*.db
+clips/
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+sources.toml
+.env
+.env.local
