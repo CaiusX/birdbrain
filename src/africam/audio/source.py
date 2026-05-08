@@ -34,6 +34,8 @@ class AudioSource(ABC):
     that emits mono signed-16-bit little-endian PCM at ``sample_rate`` Hz on stdout.
     """
 
+    url: str
+
     def __init__(self, name: str, sample_rate: int = 48_000, chunk_seconds: float = 3.0) -> None:
         self.name = name
         self.sample_rate = sample_rate
@@ -43,6 +45,11 @@ class AudioSource(ABC):
 
     @abstractmethod
     def _ffmpeg_command(self) -> list[str]: ...
+
+    def current_url(self) -> str:
+        """Return a URL ffmpeg can read from. Subclasses with expiring URLs
+        (e.g. YouTube live manifests) should override this to re-resolve."""
+        return self.url
 
     def stream(self) -> Iterator[AudioChunk]:
         """Yield :class:`AudioChunk` instances until the underlying ffmpeg process exits."""

@@ -25,6 +25,9 @@ class YouTubeSource(AudioSource):
         super().__init__(name=name, sample_rate=sample_rate, chunk_seconds=chunk_seconds)
         self.url = url
 
+    def current_url(self) -> str:
+        return self._resolve_stream_url()
+
     def _resolve_stream_url(self) -> str:
         # bestaudio/best: prefer audio-only when present, otherwise an A+V manifest
         # which ffmpeg will demux (we drop video with -vn). Required because many

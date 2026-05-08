@@ -22,6 +22,13 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "jinja2>=3.1",
+    # Required by FastAPI for Form(...) parsing on the site-override endpoint.
+    "python-multipart>=0.0.9",
+    "pillow>=10.3",
+    # pytesseract is a thin wrapper that shells out to the system tesseract
+    # binary. OCR is gated by config + a runtime check, so the binary is
+    # optional — the resolver falls back to manual mode if it's missing.
+    "pytesseract>=0.3.10",
 ]
 
 [project.scripts]

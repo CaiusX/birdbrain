@@ -1,0 +1,44 @@
+{# Per-source site selector: shown beneath each multisite tile. #}
+<div class="px-4 py-3 text-sm">
+  <div class="flex items-center justify-between mb-2">
+    <div>
+      <span class="text-zinc-400 text-xs uppercase tracking-wider mr-2">Current site</span>
+      {% if current.site %}
+        <span class="font-medium">{{ current.site }}</span>
+        {% if current.latitude is not none and current.longitude is not none %}
+          <span class="text-zinc-500 text-xs ml-2 tabular-nums">
+            {{ "%.3f"|format(current.latitude) }}, {{ "%.3f"|format(current.longitude) }}
+          </span>
+        {% endif %}
+        {% if current.detected_by %}
+          <span class="ml-2 text-xs px-2 py-0.5 rounded-full
+                       {% if current.detected_by == 'manual' %}bg-amber-500/20 text-amber-300
+                       {% else %}bg-emerald-500/20 text-emerald-300{% endif %}">
+            {{ current.detected_by }}
+          </span>
+        {% endif %}
+      {% else %}
+        <span class="text-zinc-500">unknown</span>
+      {% endif %}
+    </div>
+  </div>
+  <form
+    hx-post="/api/sources/{{ tile.name }}/site"
+    hx-target="#site-panel-{{ tile.name }}"
+    hx-swap="innerHTML"
+    class="flex items-center gap-2">
+    <select name="site" class="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-sm">
+      {% for s in sites %}
+        <option value="{{ s.name }}" {% if s.name == current.site %}selected{% endif %}>
+          {{ s.name }} ({{ "%.2f"|format(s.lat) }}, {{ "%.2f"|format(s.lon) }})
+        </option>
+      {% endfor %}
+    </select>
+    <input type="number" name="ttl_minutes" value="60" min="1" max="1440"
+           class="w-16 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-sm tabular-nums"
+           title="Override expires after this many minutes">
+    <button type="submit" class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs font-medium">
+      set
+    </button>
+  </form>
+</div>

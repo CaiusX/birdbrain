@@ -1,0 +1,87 @@
+# Known sites for multi-site streams (e.g. Wild Africa Live, which rotates
+# between WildEarth/Africam camera locations). Coordinates are approximate
+# centres of the reserve — refine if you know the precise camera placement.
+#
+# `aliases` are case-insensitive substrings the OCR resolver matches against
+# whatever text it pulls from the on-screen overlay. Add abbreviations,
+# alternate spellings, or the name as it actually appears on screen.
+
+# --- Sabi Sand Nature Reserve (South Africa) ---
+
+[[site]]
+name = "Djuma"
+lat = -24.787
+lon = 31.470
+aliases = ["Djuma Game Reserve", "Djuma Dam"]
+
+[[site]]
+name = "Idube"
+lat = -24.798
+lon = 31.475
+aliases = ["Idube Safari Lodge"]
+
+[[site]]
+name = "Nkorho"
+lat = -24.760
+lon = 31.470
+aliases = ["Nkorho Bush Lodge", "Nkorho Pan"]
+
+[[site]]
+name = "Silvan"
+lat = -24.765
+lon = 31.490
+aliases = ["Silvan Safari"]
+
+[[site]]
+name = "Jaci's"
+lat = -24.760
+lon = 31.498
+aliases = ["Jaci's Safari House", "Jaci's Pan"]
+
+# --- Olifants / Balule (South Africa) ---
+
+[[site]]
+name = "Naledi"
+lat = -24.135
+lon = 30.916
+aliases = ["Naledi Bush Lodge", "Olifants West"]
+
+[[site]]
+name = "Olifants"
+lat = -24.040
+lon = 30.999
+aliases = ["Olifants Camp", "Olifants Pan"]
+
+# --- Other South African / regional reserves ---
+
+[[site]]
+name = "Tembe"
+lat = -27.040
+lon = 32.405
+aliases = ["Tembe Elephant Park", "Maputaland"]
+
+[[site]]
+name = "Ngala"
+lat = -24.359
+lon = 31.487
+aliases = ["Ngala Game Reserve"]
+
+[[site]]
+name = "Phinda"
+lat = -27.832
+lon = 32.319
+aliases = ["Phinda Game Reserve"]
+
+[[site]]
+name = "Pridelands"
+lat = -24.408
+lon = 31.180
+aliases = ["Pridelands Conservancy"]
+
+# --- East Africa ---
+
+[[site]]
+name = "Maasai Mara"
+lat = -1.500
+lon = 35.150
+aliases = ["Masai Mara", "Mara"]

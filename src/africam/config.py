@@ -4,8 +4,22 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class OcrConfig(BaseModel):
+    """Per-source OCR settings for site auto-detection."""
+
+    enabled: bool = False
+    # How often to grab a frame and run OCR.
+    every_seconds: int = 30
+    # Optional [x, y, w, h] crop in pixels of the frame, where the camera caption
+    # appears. Tighter crops are faster and more accurate. None = OCR full frame.
+    crop: tuple[int, int, int, int] | None = None
+    # Minimum number of consecutive matches against the same site before the
+    # resolver promotes it to "current". Guards against transient OCR misreads.
+    confirm_count: int = 1
 
 
 class SourceConfig(BaseModel):
@@ -17,6 +31,11 @@ class SourceConfig(BaseModel):
     min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     # Week of year (1-48) used by BirdNET's location/time filter. None = current week.
     week: int | None = None
+    # If true, the source rotates between cameras and the pipeline should
+    # consult the SiteResolver per-detection to override lat/lon and record
+    # the active site name. False = static lat/lon, no resolver.
+    multisite: bool = False
+    ocr: OcrConfig = Field(default_factory=OcrConfig)
 
 
 class AppConfig(BaseSettings):
@@ -30,6 +49,7 @@ class AppConfig(BaseSettings):
     )
 
     sources_file: Path = Path("sources.toml")
+    sites_file: Path = Path("sites.toml")
     db_url: str = "sqlite:///data/africam.sqlite"
     clips_dir: Path = Path("data/clips")
     save_clips: bool = True

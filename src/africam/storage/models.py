@@ -21,7 +21,30 @@ class DetectionRow(Base):
     common_name: Mapped[str] = mapped_column(String(256))
     confidence: Mapped[float] = mapped_column(Float)
     clip_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Site that the source camera was pointed at when this detection happened.
+    # NULL for single-site sources or when the resolver couldn't determine it.
+    site: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         Index("ix_detections_source_time", "source_name", "started_at"),
     )
+
+
+class SourceStateRow(Base):
+    """Mutable per-source runtime state. The pipeline reads it on every chunk
+    and the web app writes manual overrides to it. Used to coordinate the
+    "which site is the camera at right now?" answer across processes."""
+
+    __tablename__ = "source_state"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    site: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # "manual" / "ocr" / None — how the current site was determined.
+    detected_by: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # If set, manual overrides remain authoritative until this timestamp.
+    manual_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

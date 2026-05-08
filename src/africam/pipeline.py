@@ -8,6 +8,9 @@ from africam.clips import save_chunk_wav
 from africam.config import AppConfig, SourceConfig
 from africam.detector import BirdNetDetector
 from africam.logging import get_logger
+from africam.site_ocr import SiteOcrWatcher
+from africam.site_resolver import SiteResolver
+from africam.sites import Site, load_sites
 from africam.storage import Database
 
 log = get_logger(__name__)
@@ -26,23 +29,46 @@ def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
     raise ValueError(f"Unknown source kind: {cfg.kind!r}")
 
 
+def _build_resolver(
+    cfg: SourceConfig,
+    source: AudioSource,
+    sites: dict[str, Site],
+    db: Database,
+) -> SiteResolver:
+    ocr: SiteOcrWatcher | None = None
+    if cfg.multisite and cfg.ocr.enabled and sites:
+        ocr = SiteOcrWatcher(
+            source=cfg,
+            sites=sites,
+            ocr_cfg=cfg.ocr,
+            resolve_stream_url=source.current_url,
+        )
+        ocr.start()
+    elif cfg.multisite and not sites:
+        log.warning("multisite.no_sites_loaded", source=cfg.name)
+    return SiteResolver(source=cfg, sites=sites, db=db, ocr=ocr)
+
+
 def run_source(
     cfg: SourceConfig,
     app: AppConfig,
     detector: BirdNetDetector,
     db: Database,
+    sites: dict[str, Site],
 ) -> None:
     """Block, pulling chunks from one source and writing detections."""
     source = build_source(cfg, app)
-    slog = log.bind(source=cfg.name, kind=cfg.kind)
+    resolver = _build_resolver(cfg, source, sites, db)
+    slog = log.bind(source=cfg.name, kind=cfg.kind, multisite=cfg.multisite)
     slog.info("pipeline.start")
 
     for chunk in source.stream():
+        resolved = resolver.current()
         try:
             detections = detector.analyze(
                 chunk,
-                lat=cfg.lat,
-                lon=cfg.lon,
+                lat=resolved.latitude,
+                lon=resolved.longitude,
                 week=cfg.week,
                 min_confidence=cfg.min_confidence,
             )
@@ -57,7 +83,13 @@ def run_source(
         if app.save_clips:
             clip_path = str(save_chunk_wav(chunk, app.clips_dir))
 
-        db.insert_detections(detections, clip_path=clip_path)
+        db.insert_detections(
+            detections,
+            clip_path=clip_path,
+            site=resolved.site,
+            latitude=resolved.latitude,
+            longitude=resolved.longitude,
+        )
         for d in detections:
             slog.info(
                 "detection",
@@ -65,6 +97,8 @@ def run_source(
                 scientific=d.scientific_name,
                 confidence=round(d.confidence, 3),
                 at=d.started_at.isoformat(),
+                site=resolved.site,
+                site_by=resolved.detected_by,
                 clip=clip_path,
             )
 
@@ -73,12 +107,14 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
     """Run every configured source in its own thread, sharing one detector + DB."""
     detector = BirdNetDetector()
     db = Database(app.db_url)
+    sites = load_sites(app.sites_file)
+    log.info("sites.loaded", count=len(sites), path=str(app.sites_file))
 
     threads: list[threading.Thread] = []
     for cfg in sources:
         t = threading.Thread(
             target=run_source,
-            args=(cfg, app, detector, db),
+            args=(cfg, app, detector, db, sites),
             name=f"src-{cfg.name}",
             daemon=True,
         )

@@ -6,10 +6,11 @@ name = "africam-olifants"
 kind = "youtube"
 # Any youtube URL that yt-dlp can resolve, including live streams and channel /live URLs.
 url = "https://www.youtube.com/@africam/live"
-# Lat/lon biases the BirdNET species filter. Olifants is in the Kruger area.
+# Lat/lon biases the BirdNET species filter when this source is single-site.
+# For multisite sources this is only used as a fallback before the resolver
+# has determined the active site.
 lat = -24.0
 lon = 31.5
-# Optional: minimum confidence threshold (0-1) below which detections are dropped.
 min_confidence = 0.6
 
 [[source]]
@@ -19,3 +20,27 @@ url = "rtsp://user:pass@192.168.1.42:554/stream1"
 lat = -33.92
 lon = 18.42
 min_confidence = 0.7
+
+# --- Multi-site stream example ---
+# Wild Africa Live rotates between WildEarth/Africam camera locations.
+# Set multisite=true so the pipeline consults sites.toml + the SiteResolver
+# (manual override via the dashboard, with optional OCR auto-detect) instead
+# of using the static lat/lon above.
+
+[[source]]
+name = "wild-africa-live"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=qpukdDslCjk"
+lat = -24.5    # fallback only
+lon = 31.5     # fallback only
+min_confidence = 0.5
+multisite = true
+
+[source.ocr]
+enabled = false        # flip to true once tesseract is installed and on PATH
+every_seconds = 30
+# Optional crop [x, y, w, h] in pixels around the on-screen camera caption.
+# Tighter crops are faster and far more accurate. Set after eyeballing a
+# screenshot of the stream — comment out to OCR the full frame.
+# crop = [40, 40, 320, 60]
+confirm_count = 2      # require N consecutive matches before promoting

@@ -4,8 +4,9 @@
       <tr class="border-b border-zinc-800">
         <th class="text-left font-medium px-5 py-2">Time (UTC)</th>
         <th class="text-left font-medium px-5 py-2">Source</th>
+        <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Site</th>
         <th class="text-left font-medium px-5 py-2">Species</th>
-        <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Scientific</th>
+        <th class="text-left font-medium px-5 py-2 hidden lg:table-cell">Scientific</th>
         <th class="text-right font-medium px-5 py-2">Confidence</th>
         <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Clip</th>
       </tr>
@@ -17,8 +18,20 @@
             {{ r.started_at.strftime("%Y-%m-%d %H:%M:%S") }}
           </td>
           <td class="px-5 py-2"><code class="text-zinc-300">{{ r.source_name }}</code></td>
+          <td class="px-5 py-2 hidden md:table-cell">
+            {% if r.site %}
+              <span class="font-medium text-zinc-200">{{ r.site }}</span>
+              {% if r.latitude is not none and r.longitude is not none %}
+                <span class="text-zinc-500 text-xs ml-1 tabular-nums">
+                  {{ "%.2f"|format(r.latitude) }},{{ "%.2f"|format(r.longitude) }}
+                </span>
+              {% endif %}
+            {% else %}
+              <span class="text-zinc-600">—</span>
+            {% endif %}
+          </td>
           <td class="px-5 py-2 font-medium">{{ r.common_name }}</td>
-          <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ r.scientific_name }}</td>
+          <td class="px-5 py-2 italic text-zinc-400 hidden lg:table-cell">{{ r.scientific_name }}</td>
           <td class="px-5 py-2 text-right tabular-nums">
             <span class="inline-block w-24 conf-bar rounded px-2 py-0.5 text-xs"
                   style="--w: {{ (r.confidence * 100)|round(0)|int }}%;">

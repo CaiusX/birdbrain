@@ -5,13 +5,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, select
 
 from africam.config import AppConfig, SourceConfig, load_sources
+from africam.site_resolver import state_to_resolved
+from africam.sites import Site, load_sites
 from africam.storage import Database, DetectionRow
 
 WEB_DIR = Path(__file__).parent
@@ -19,6 +21,9 @@ TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 # Captures the 11-char YouTube video id from /watch?v=, youtu.be/ or /embed/ URLs.
 _YT_VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/embed/)([A-Za-z0-9_-]{11})")
+
+# Default duration of a manual site override before the resolver clears it.
+DEFAULT_OVERRIDE_MINUTES = 60
 
 
 def _youtube_video_id(url: str) -> str | None:
@@ -31,7 +36,8 @@ class LiveTile:
     name: str
     kind: str
     url: str
-    video_id: str | None  # YouTube video id, if embeddable
+    video_id: str | None
+    multisite: bool
 
     @property
     def embed_url(self) -> str | None:
@@ -44,11 +50,16 @@ class LiveTile:
 
 
 def _build_tiles(sources: list[SourceConfig]) -> list[LiveTile]:
-    out: list[LiveTile] = []
-    for s in sources:
-        vid = _youtube_video_id(s.url) if s.kind == "youtube" else None
-        out.append(LiveTile(name=s.name, kind=s.kind, url=s.url, video_id=vid))
-    return out
+    return [
+        LiveTile(
+            name=s.name,
+            kind=s.kind,
+            url=s.url,
+            video_id=_youtube_video_id(s.url) if s.kind == "youtube" else None,
+            multisite=s.multisite,
+        )
+        for s in sources
+    ]
 
 
 def create_app(cfg: AppConfig | None = None) -> FastAPI:
@@ -56,19 +67,37 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     db = Database(cfg.db_url)
     clips_root = cfg.clips_dir.resolve()
 
-    # Source list is optional — the dashboard still works without it (just no
-    # embedded video tiles). Read once at startup; reload by restarting.
     try:
         configured_sources = load_sources(cfg.sources_file)
     except FileNotFoundError:
         configured_sources = []
+    sources_by_name: dict[str, SourceConfig] = {s.name: s for s in configured_sources}
     tiles = _build_tiles(configured_sources)
+    sites: dict[str, Site] = load_sites(cfg.sites_file)
 
     app = FastAPI(title="Africam Bird Recognition", version="0.1.0")
     app.state.db = db
     app.state.clips_root = clips_root
     app.state.tiles = tiles
+    app.state.sites = sites
+    app.state.sources_by_name = sources_by_name
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+
+    def _site_states() -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for tile in tiles:
+            if not tile.multisite:
+                continue
+            cfg_src = sources_by_name[tile.name]
+            state = db.get_source_state(tile.name)
+            r = state_to_resolved(state, cfg_src)
+            out[tile.name] = {
+                "site": r.site,
+                "latitude": r.latitude,
+                "longitude": r.longitude,
+                "detected_by": r.detected_by,
+            }
+        return out
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
@@ -80,7 +109,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     .limit(50)
                 )
             )
-            sources = list(
+            row_sources = list(
                 s.scalars(
                     select(DetectionRow.source_name)
                     .group_by(DetectionRow.source_name)
@@ -108,10 +137,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "dashboard.html",
             {
                 "rows": rows,
-                "sources": sources,
+                "sources": row_sources,
                 "top_recent": top_recent,
                 "selected_source": None,
                 "tiles": tiles,
+                "sites": sorted(sites.values(), key=lambda s: s.name),
+                "site_states": _site_states(),
             },
         )
 
@@ -134,6 +165,73 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             request,
             "_detection_rows.html",
             {"rows": rows, "selected_source": source},
+        )
+
+    @app.get("/partials/site/{name}", response_class=HTMLResponse)
+    def site_panel(request: Request, name: str) -> HTMLResponse:
+        if name not in sources_by_name:
+            raise HTTPException(404, f"Unknown source: {name}")
+        cfg_src = sources_by_name[name]
+        state = db.get_source_state(name)
+        resolved = state_to_resolved(state, cfg_src)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "_site_panel.html",
+            {
+                "tile": next(t for t in tiles if t.name == name),
+                "sites": sorted(sites.values(), key=lambda s: s.name),
+                "current": resolved,
+            },
+        )
+
+    @app.post("/api/sources/{name}/site")
+    def set_site(
+        request: Request,
+        name: str,
+        site: str = Form(...),
+        ttl_minutes: int = Form(default=DEFAULT_OVERRIDE_MINUTES),
+    ) -> Response:
+        if name not in sources_by_name:
+            raise HTTPException(404, f"Unknown source: {name}")
+        site_obj = sites.get(site)
+        if site_obj is None:
+            raise HTTPException(404, f"Unknown site: {site}")
+        until = datetime.now(UTC) + timedelta(minutes=max(1, ttl_minutes))
+        db.set_source_state(
+            name,
+            site=site_obj.name,
+            latitude=site_obj.lat,
+            longitude=site_obj.lon,
+            detected_by="manual",
+            manual_until=until,
+        )
+        # If this came from HTMX, return the updated panel; otherwise plain JSON.
+        if request.headers.get("hx-request"):
+            return site_panel(request, name)
+        return JSONResponse({"ok": True, "site": site_obj.name, "manual_until": until.isoformat()})
+
+    @app.delete("/api/sources/{name}/site")
+    def clear_site(name: str) -> JSONResponse:
+        if name not in sources_by_name:
+            raise HTTPException(404, f"Unknown source: {name}")
+        db.clear_manual_override(name)
+        return JSONResponse({"ok": True})
+
+    @app.get("/api/sources/{name}/site")
+    def get_site(name: str) -> JSONResponse:
+        if name not in sources_by_name:
+            raise HTTPException(404, f"Unknown source: {name}")
+        cfg_src = sources_by_name[name]
+        state = db.get_source_state(name)
+        resolved = state_to_resolved(state, cfg_src)
+        return JSONResponse(
+            {
+                "source": name,
+                "site": resolved.site,
+                "latitude": resolved.latitude,
+                "longitude": resolved.longitude,
+                "detected_by": resolved.detected_by,
+            }
         )
 
     @app.get("/api/detections")
@@ -160,6 +258,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "scientific_name": r.scientific_name,
                     "common_name": r.common_name,
                     "confidence": r.confidence,
+                    "site": r.site,
+                    "latitude": r.latitude,
+                    "longitude": r.longitude,
                     "clip_url": f"/clips/{r.id}" if r.clip_path else None,
                 }
                 for r in rows
@@ -173,7 +274,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if row is None or row.clip_path is None:
                 raise HTTPException(status_code=404, detail="No clip for this detection")
             path = Path(row.clip_path).resolve()
-        # Defence in depth: never serve a path outside the configured clips dir.
         try:
             path.relative_to(clips_root)
         except ValueError as e:
