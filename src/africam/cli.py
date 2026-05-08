@@ -112,5 +112,25 @@ def probe(
                 )
 
 
+@app.command()
+def web(
+    host: Annotated[str, typer.Option("--host", "-H")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p")] = 8000,
+    reload: Annotated[bool, typer.Option("--reload")] = False,
+) -> None:
+    """Run the web dashboard. Reads from the same SQLite as the pipeline."""
+    import uvicorn
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    uvicorn.run(
+        "africam.web.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level=cfg.log_level.lower(),
+    )
+
+
 if __name__ == "__main__":
     app()

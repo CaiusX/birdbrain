@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Africam · dashboard{% endblock %}
+
+{% block content %}
+<section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+  <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Top species · last hour</h2>
+    {% if top_recent %}
+      <ul class="divide-y divide-zinc-800">
+        {% for r in top_recent %}
+          <li class="py-2 flex items-baseline justify-between">
+            <div>
+              <span class="font-medium">{{ r.common_name }}</span>
+              <span class="text-zinc-500 italic text-sm ml-2">{{ r.scientific_name }}</span>
+            </div>
+            <div class="text-sm tabular-nums">
+              <span class="text-zinc-400 mr-3">max {{ "%.2f"|format(r.max_conf) }}</span>
+              <span class="font-semibold">{{ r.n }}</span>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="text-zinc-500 text-sm">No detections in the last hour.</p>
+    {% endif %}
+  </div>
+
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Sources</h2>
+    {% if sources %}
+      <div class="flex flex-wrap gap-2">
+        <button
+          class="px-3 py-1 rounded-full text-xs border border-zinc-700 hover:bg-zinc-800"
+          hx-get="/partials/detections?limit=50"
+          hx-target="#detections-list"
+          hx-swap="innerHTML">all</button>
+        {% for s in sources %}
+          <button
+            class="px-3 py-1 rounded-full text-xs border border-zinc-700 hover:bg-zinc-800"
+            hx-get="/partials/detections?limit=50&source={{ s }}"
+            hx-target="#detections-list"
+            hx-swap="innerHTML">{{ s }}</button>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="text-zinc-500 text-sm">No sources have produced detections yet.</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Recent detections</h2>
+    <span class="text-xs text-zinc-500">auto-refreshes every 5s</span>
+  </div>
+  <div
+    id="detections-list"
+    hx-get="/partials/detections?limit=50"
+    hx-trigger="load, every 5s"
+    hx-swap="innerHTML">
+    {% include "_detection_rows.html" %}
+  </div>
+</section>
+{% endblock %}

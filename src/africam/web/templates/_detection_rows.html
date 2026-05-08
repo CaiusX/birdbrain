@@ -1,0 +1,43 @@
+{% if rows %}
+  <table class="w-full text-sm">
+    <thead class="text-zinc-400 text-xs uppercase tracking-wider">
+      <tr class="border-b border-zinc-800">
+        <th class="text-left font-medium px-5 py-2">Time (UTC)</th>
+        <th class="text-left font-medium px-5 py-2">Source</th>
+        <th class="text-left font-medium px-5 py-2">Species</th>
+        <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Scientific</th>
+        <th class="text-right font-medium px-5 py-2">Confidence</th>
+        <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Clip</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-zinc-800">
+      {% for r in rows %}
+        <tr class="hover:bg-zinc-800/40">
+          <td class="px-5 py-2 tabular-nums text-zinc-400">
+            {{ r.started_at.strftime("%Y-%m-%d %H:%M:%S") }}
+          </td>
+          <td class="px-5 py-2"><code class="text-zinc-300">{{ r.source_name }}</code></td>
+          <td class="px-5 py-2 font-medium">{{ r.common_name }}</td>
+          <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ r.scientific_name }}</td>
+          <td class="px-5 py-2 text-right tabular-nums">
+            <span class="inline-block w-24 conf-bar rounded px-2 py-0.5 text-xs"
+                  style="--w: {{ (r.confidence * 100)|round(0)|int }}%;">
+              {{ "%.2f"|format(r.confidence) }}
+            </span>
+          </td>
+          <td class="px-5 py-2 hidden md:table-cell">
+            {% if r.clip_path %}
+              <audio controls preload="none" class="h-7" src="/clips/{{ r.id }}"></audio>
+            {% else %}
+              <span class="text-zinc-600">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="text-zinc-500 text-sm px-5 py-6">
+    No detections yet. Run <code class="text-zinc-300">africam run</code> in another terminal.
+  </p>
+{% endif %}
