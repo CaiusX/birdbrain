@@ -51,8 +51,10 @@ class AudioSource(ABC):
         (e.g. YouTube live manifests) should override this to re-resolve."""
         return self.url
 
-    def stream(self) -> Iterator[AudioChunk]:
-        """Yield :class:`AudioChunk` instances until the underlying ffmpeg process exits."""
+    def stream(self, stop_event=None) -> Iterator[AudioChunk]:
+        """Yield :class:`AudioChunk` instances until the underlying ffmpeg
+        process exits or ``stop_event`` is set. Setting the event terminates
+        the ffmpeg subprocess so the read returns immediately."""
         cmd = self._ffmpeg_command()
         log.info(
             "ffmpeg.start",
@@ -70,6 +72,8 @@ class AudioSource(ABC):
         assert proc.stdout is not None
         try:
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    return
                 buf = self._read_exact(proc.stdout, self._chunk_bytes)
                 if buf is None:
                     log.warning("ffmpeg.eof", source=self.name)

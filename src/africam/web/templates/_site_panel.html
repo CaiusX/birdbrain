@@ -40,5 +40,14 @@
     <button type="submit" class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs font-medium">
       set
     </button>
+    {% if current.detected_by %}
+      <button type="button"
+              hx-delete="/api/sources/{{ tile.name }}/site"
+              hx-target="#site-panel-{{ tile.name }}"
+              hx-swap="innerHTML"
+              class="px-3 py-1 rounded border border-zinc-700 hover:bg-zinc-800 text-xs font-medium text-zinc-300">
+        clear
+      </button>
+    {% endif %}
   </form>
 </div>

@@ -75,16 +75,50 @@
   </div>
 
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Detection sources</h2>
-    {% if sources %}
-      <ul class="text-sm space-y-1">
-        {% for s in sources %}
-          <li><code class="text-zinc-300">{{ s }}</code></li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="text-zinc-500 text-sm">No sources have produced detections yet.</p>
-    {% endif %}
+    <div class="flex items-baseline justify-between mb-3">
+      <h2 class="text-sm uppercase tracking-wider text-zinc-400">Sources</h2>
+      <span class="text-xs text-zinc-500">add takes ~15s to start</span>
+    </div>
+    <div id="sources-panel"
+         hx-get="/partials/sources"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML">
+    </div>
+    <details class="mt-3">
+      <summary class="text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer">+ add a live source</summary>
+      <form
+        hx-post="/api/sources"
+        hx-target="#sources-panel"
+        hx-swap="innerHTML"
+        hx-on::after-request="if(event.detail.successful) { this.reset(); setTimeout(() => location.reload(), 600); }"
+        class="mt-3 grid grid-cols-1 gap-2 text-sm">
+        <input type="text" name="name" placeholder="short name e.g. cornell-feeder" required
+               pattern="[A-Za-z0-9_-]+"
+               class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
+        <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..." required
+               class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
+        <div class="grid grid-cols-3 gap-2">
+          <select name="kind" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
+            <option value="youtube">youtube</option>
+            <option value="rtsp">rtsp</option>
+          </select>
+          <input type="number" name="lat" placeholder="lat" step="any"
+                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 tabular-nums">
+          <input type="number" name="lon" placeholder="lon" step="any"
+                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 tabular-nums">
+        </div>
+        <input type="text" name="cookies_file" placeholder="cookies file (optional, for YT auth)"
+               value="data/www.youtube.com_cookies.txt"
+               class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-400">
+        <label class="flex items-center gap-2 text-xs text-zinc-400">
+          <input type="checkbox" name="multisite" value="true"> multi-site (rotates between cameras)
+        </label>
+        <button type="submit"
+                class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-xs font-medium">
+          add source
+        </button>
+      </form>
+    </details>
   </div>
 </section>
 

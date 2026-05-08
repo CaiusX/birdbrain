@@ -32,6 +32,30 @@ class DetectionRow(Base):
     )
 
 
+class RuntimeSourceRow(Base):
+    """Sources added at runtime via the web UI. Picked up by the pipeline
+    supervisor without a restart. Soft-deleted (deleted_at != NULL) so the
+    supervisor can stop the worker without losing history.
+
+    Fields mirror :class:`SourceConfig` (the file-based equivalent) but live
+    in SQL so the web app can mutate them without touching files.
+    """
+
+    __tablename__ = "runtime_sources"
+
+    name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))  # "youtube" | "rtsp"
+    url: Mapped[str] = mapped_column(String(1024))
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    multisite: Mapped[bool] = mapped_column(default=False)
+    cookies_from_browser: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    cookies_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SourceStateRow(Base):
     """Mutable per-source runtime state. The pipeline reads it on every chunk
     and the web app writes manual overrides to it. Used to coordinate the

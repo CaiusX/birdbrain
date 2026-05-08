@@ -4,11 +4,11 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from africam.detector.birdnet import Detection
-from africam.storage.models import Base, DetectionRow, SourceStateRow
+from africam.storage.models import Base, DetectionRow, RuntimeSourceRow, SourceStateRow
 
 
 class Database:
@@ -114,3 +114,32 @@ class Database:
                 row.manual_until = None
                 row.detected_by = None
                 row.updated_at = datetime.now(UTC)
+
+    # --- Runtime sources (added/removed via the web UI without restart) ---
+
+    def add_runtime_source(self, **fields) -> RuntimeSourceRow:
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(RuntimeSourceRow, fields["name"])
+            if row is None:
+                row = RuntimeSourceRow(created_at=now)
+                s.add(row)
+            for k, v in fields.items():
+                setattr(row, k, v)
+            row.deleted_at = None
+        return row
+
+    def soft_delete_runtime_source(self, name: str) -> bool:
+        with self._Session() as s, s.begin():
+            row = s.get(RuntimeSourceRow, name)
+            if row is None or row.deleted_at is not None:
+                return False
+            row.deleted_at = datetime.now(UTC)
+        return True
+
+    def list_runtime_sources(self, *, include_deleted: bool = False) -> list[RuntimeSourceRow]:
+        with self._Session() as s:
+            stmt = select(RuntimeSourceRow).order_by(RuntimeSourceRow.name)
+            if not include_deleted:
+                stmt = stmt.where(RuntimeSourceRow.deleted_at.is_(None))
+            return list(s.scalars(stmt))

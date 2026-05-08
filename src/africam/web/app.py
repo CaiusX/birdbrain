@@ -31,13 +31,14 @@ def _youtube_video_id(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-@dataclass(slots=True)
+@dataclass
 class LiveTile:
     name: str
     kind: str
     url: str
     video_id: str | None
     multisite: bool
+    is_runtime: bool = False
 
     @property
     def embed_url(self) -> str | None:
@@ -68,22 +69,46 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     clips_root = cfg.clips_dir.resolve()
 
     try:
-        configured_sources = load_sources(cfg.sources_file)
+        static_sources = load_sources(cfg.sources_file)
     except FileNotFoundError:
-        configured_sources = []
-    sources_by_name: dict[str, SourceConfig] = {s.name: s for s in configured_sources}
-    tiles = _build_tiles(configured_sources)
+        static_sources = []
     sites: dict[str, Site] = load_sites(cfg.sites_file)
 
     app = FastAPI(title="Africam Bird Recognition", version="0.1.0")
     app.state.db = db
     app.state.clips_root = clips_root
-    app.state.tiles = tiles
     app.state.sites = sites
-    app.state.sources_by_name = sources_by_name
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
-    def _site_states() -> dict[str, dict]:
+    def _runtime_to_cfg(row) -> SourceConfig:
+        from africam.config import OcrConfig
+        return SourceConfig(
+            name=row.name,
+            kind=row.kind,
+            url=row.url,
+            lat=row.lat,
+            lon=row.lon,
+            min_confidence=row.min_confidence,
+            multisite=row.multisite,
+            cookies_from_browser=row.cookies_from_browser,
+            cookies_file=row.cookies_file,
+            ocr=OcrConfig(),
+        )
+
+    def _all_sources() -> tuple[list[SourceConfig], dict[str, SourceConfig], list[LiveTile]]:
+        """Static (toml) + runtime (DB) sources merged; runtime wins on name clash."""
+        merged: dict[str, SourceConfig] = {s.name: s for s in static_sources}
+        runtime_names: set[str] = set()
+        for row in db.list_runtime_sources():
+            merged[row.name] = _runtime_to_cfg(row)
+            runtime_names.add(row.name)
+        ordered = list(merged.values())
+        tiles = _build_tiles(ordered)
+        for t in tiles:
+            t.is_runtime = t.name in runtime_names  # type: ignore[attr-defined]
+        return ordered, merged, tiles
+
+    def _site_states(tiles: list[LiveTile], sources_by_name: dict[str, SourceConfig]) -> dict[str, dict]:
         out: dict[str, dict] = {}
         for tile in tiles:
             if not tile.multisite:
@@ -101,6 +126,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
+        _, sources_by_name, tiles = _all_sources()
         with db.session() as s:
             rows = list(
                 s.scalars(
@@ -143,6 +169,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "video_id": t.video_id,
                 "multisite": t.multisite,
                 "url": t.url,
+                "is_runtime": t.is_runtime,
             }
             for t in tiles
         ]
@@ -158,7 +185,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "tiles_json": tiles_for_js,
                 "sites": sorted(sites.values(), key=lambda s: s.name),
                 "sites_json": sites_for_map,
-                "site_states": _site_states(),
+                "site_states": _site_states(tiles, sources_by_name),
             },
         )
 
@@ -185,6 +212,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     @app.get("/partials/site/{name}", response_class=HTMLResponse)
     def site_panel(request: Request, name: str) -> HTMLResponse:
+        _, sources_by_name, tiles = _all_sources()
+        _, sources_by_name, _ = _all_sources()
         if name not in sources_by_name:
             raise HTTPException(404, f"Unknown source: {name}")
         cfg_src = sources_by_name[name]
@@ -207,6 +236,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         site: str = Form(...),
         ttl_minutes: int = Form(default=DEFAULT_OVERRIDE_MINUTES),
     ) -> Response:
+        _, sources_by_name, _ = _all_sources()
         if name not in sources_by_name:
             raise HTTPException(404, f"Unknown source: {name}")
         site_obj = sites.get(site)
@@ -227,14 +257,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return JSONResponse({"ok": True, "site": site_obj.name, "manual_until": until.isoformat()})
 
     @app.delete("/api/sources/{name}/site")
-    def clear_site(name: str) -> JSONResponse:
+    def clear_site(request: Request, name: str) -> Response:
+        _, sources_by_name, _ = _all_sources()
         if name not in sources_by_name:
             raise HTTPException(404, f"Unknown source: {name}")
         db.clear_manual_override(name)
+        if request.headers.get("hx-request"):
+            return site_panel(request, name)
         return JSONResponse({"ok": True})
 
     @app.get("/api/sources/{name}/site")
     def get_site(name: str) -> JSONResponse:
+        _, sources_by_name, _ = _all_sources()
         if name not in sources_by_name:
             raise HTTPException(404, f"Unknown source: {name}")
         cfg_src = sources_by_name[name]
@@ -280,6 +314,71 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "clip_url": f"/clips/{r.id}" if r.clip_path else None,
                 }
                 for r in rows
+            ]
+        )
+
+    # --- Runtime sources (added/removed via the dashboard) ---
+
+    @app.get("/partials/sources", response_class=HTMLResponse)
+    def sources_partial(request: Request) -> HTMLResponse:
+        _, _, tiles = _all_sources()
+        return TEMPLATES.TemplateResponse(
+            request, "_sources_panel.html", {"tiles": tiles}
+        )
+
+    @app.post("/api/sources")
+    def add_runtime_source(
+        request: Request,
+        name: str = Form(...),
+        url: str = Form(...),
+        kind: str = Form(default="youtube"),
+        multisite: bool = Form(default=False),
+        lat: float | None = Form(default=None),
+        lon: float | None = Form(default=None),
+        cookies_file: str | None = Form(default=None),
+    ) -> Response:
+        if kind not in ("youtube", "rtsp"):
+            raise HTTPException(400, "kind must be youtube or rtsp")
+        if not name.strip():
+            raise HTTPException(400, "name is required")
+        db.add_runtime_source(
+            name=name.strip(),
+            kind=kind,
+            url=url.strip(),
+            lat=lat,
+            lon=lon,
+            min_confidence=0.5,
+            multisite=multisite,
+            cookies_from_browser=None,
+            cookies_file=cookies_file or None,
+        )
+        if request.headers.get("hx-request"):
+            return sources_partial(request)
+        return JSONResponse({"ok": True, "name": name})
+
+    @app.delete("/api/sources/{name}")
+    def remove_runtime_source(request: Request, name: str) -> Response:
+        ok = db.soft_delete_runtime_source(name)
+        if not ok:
+            raise HTTPException(404, f"Runtime source not found: {name}")
+        if request.headers.get("hx-request"):
+            return sources_partial(request)
+        return JSONResponse({"ok": True})
+
+    @app.get("/api/sources")
+    def list_sources() -> JSONResponse:
+        _, _, tiles = _all_sources()
+        return JSONResponse(
+            [
+                {
+                    "name": t.name,
+                    "kind": t.kind,
+                    "url": t.url,
+                    "video_id": t.video_id,
+                    "multisite": t.multisite,
+                    "is_runtime": t.is_runtime,
+                }
+                for t in tiles
             ]
         )
 
