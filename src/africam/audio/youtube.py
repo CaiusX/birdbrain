@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 
 from africam.audio.source import AudioSource
 from africam.logging import get_logger
 
 log = get_logger(__name__)
+
+
+def _detect_js_runtime() -> str | None:
+    """Return a yt-dlp ``--js-runtimes`` argument pointing at any JS runtime
+    found on PATH. yt-dlp auto-uses Deno but needs an explicit hint for Node;
+    YouTube's recent ``n``-challenge means we now need one or the other."""
+    for name in ("deno", "node"):
+        path = shutil.which(name)
+        if path:
+            return f"{name}:{path}"
+    return None
 
 
 class YouTubeSource(AudioSource):
@@ -42,6 +54,13 @@ class YouTubeSource(AudioSource):
             cmd += ["--cookies", str(self.cookies_file)]
         elif self.cookies_from_browser:
             cmd += ["--cookies-from-browser", self.cookies_from_browser]
+        # Tell yt-dlp where to find a JS runtime so it can solve YouTube's
+        # n-sig challenge. Deno is auto-detected; for Node we have to be
+        # explicit. The EJS solver script itself is cached on disk after a
+        # one-time download via --remote-components.
+        runtime = _detect_js_runtime()
+        if runtime:
+            cmd += ["--js-runtimes", runtime]
         cmd += [self.url]
 
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
