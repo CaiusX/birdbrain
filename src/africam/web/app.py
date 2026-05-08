@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -9,11 +11,44 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, select
 
-from africam.config import AppConfig
+from africam.config import AppConfig, SourceConfig, load_sources
 from africam.storage import Database, DetectionRow
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
+
+# Captures the 11-char YouTube video id from /watch?v=, youtu.be/ or /embed/ URLs.
+_YT_VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/embed/)([A-Za-z0-9_-]{11})")
+
+
+def _youtube_video_id(url: str) -> str | None:
+    m = _YT_VIDEO_ID.search(url)
+    return m.group(1) if m else None
+
+
+@dataclass(slots=True)
+class LiveTile:
+    name: str
+    kind: str
+    url: str
+    video_id: str | None  # YouTube video id, if embeddable
+
+    @property
+    def embed_url(self) -> str | None:
+        if self.kind == "youtube" and self.video_id:
+            return (
+                f"https://www.youtube.com/embed/{self.video_id}"
+                "?autoplay=1&mute=1&controls=1&rel=0"
+            )
+        return None
+
+
+def _build_tiles(sources: list[SourceConfig]) -> list[LiveTile]:
+    out: list[LiveTile] = []
+    for s in sources:
+        vid = _youtube_video_id(s.url) if s.kind == "youtube" else None
+        out.append(LiveTile(name=s.name, kind=s.kind, url=s.url, video_id=vid))
+    return out
 
 
 def create_app(cfg: AppConfig | None = None) -> FastAPI:
@@ -21,9 +56,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     db = Database(cfg.db_url)
     clips_root = cfg.clips_dir.resolve()
 
+    # Source list is optional — the dashboard still works without it (just no
+    # embedded video tiles). Read once at startup; reload by restarting.
+    try:
+        configured_sources = load_sources(cfg.sources_file)
+    except FileNotFoundError:
+        configured_sources = []
+    tiles = _build_tiles(configured_sources)
+
     app = FastAPI(title="Africam Bird Recognition", version="0.1.0")
     app.state.db = db
     app.state.clips_root = clips_root
+    app.state.tiles = tiles
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
     @app.get("/", response_class=HTMLResponse)
@@ -67,6 +111,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "sources": sources,
                 "top_recent": top_recent,
                 "selected_source": None,
+                "tiles": tiles,
             },
         )
 

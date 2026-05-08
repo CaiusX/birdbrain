@@ -2,6 +2,50 @@
 {% block title %}Africam · dashboard{% endblock %}
 
 {% block content %}
+{% if tiles %}
+<section class="mb-8">
+  <div class="flex items-baseline justify-between mb-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Live cameras</h2>
+    <span class="text-xs text-zinc-500">muted by default · click 🔊 on a player to hear it</span>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+    {% for t in tiles %}
+      <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+        <div class="px-4 py-2 flex items-center justify-between border-b border-zinc-800">
+          <div>
+            <span class="font-medium text-sm">{{ t.name }}</span>
+            <span class="ml-2 text-xs text-zinc-500 uppercase tracking-wider">{{ t.kind }}</span>
+          </div>
+          <a href="{{ t.url }}" target="_blank" rel="noopener" class="text-xs text-zinc-400 hover:text-zinc-200">↗ open</a>
+        </div>
+        {% if t.embed_url %}
+          <div class="aspect-video bg-black">
+            <iframe
+              src="{{ t.embed_url }}"
+              class="w-full h-full"
+              frameborder="0"
+              allow="autoplay; encrypted-media; picture-in-picture"
+              allowfullscreen
+              referrerpolicy="strict-origin-when-cross-origin"
+              loading="lazy"></iframe>
+          </div>
+        {% else %}
+          <div class="aspect-video bg-black flex items-center justify-center text-zinc-500 text-sm px-4 text-center">
+            {% if t.kind == "rtsp" %}
+              RTSP can't be played directly in a browser.<br>
+              Audio still feeds the detector.
+            {% else %}
+              Stream URL isn't embeddable.<br>
+              <code class="text-zinc-400 text-xs break-all">{{ t.url }}</code>
+            {% endif %}
+          </div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
   <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-5">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Top species · last hour</h2>
