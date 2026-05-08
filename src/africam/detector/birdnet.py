@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,6 +25,14 @@ class Detection:
     confidence: float
 
 
+@contextlib.contextmanager
+def _silence_stdout():
+    """Swallow birdnetlib's bare-`print()` trace lines without affecting our logs."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        yield
+
+
 class BirdNetDetector:
     """Wraps :mod:`birdnetlib` to run BirdNET on streaming numpy buffers.
 
@@ -33,7 +43,8 @@ class BirdNetDetector:
 
     def __init__(self) -> None:
         log.info("birdnet.load_start")
-        self._analyzer = Analyzer()
+        with _silence_stdout():
+            self._analyzer = Analyzer()
         self._lock = threading.Lock()
         log.info("birdnet.load_done")
 
@@ -46,7 +57,7 @@ class BirdNetDetector:
         week: int | None = None,
         min_confidence: float = 0.5,
     ) -> list[Detection]:
-        with self._lock:
+        with self._lock, _silence_stdout():
             recording = RecordingBuffer(
                 self._analyzer,
                 chunk.samples,

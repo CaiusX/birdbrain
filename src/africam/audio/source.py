@@ -47,7 +47,13 @@ class AudioSource(ABC):
     def stream(self) -> Iterator[AudioChunk]:
         """Yield :class:`AudioChunk` instances until the underlying ffmpeg process exits."""
         cmd = self._ffmpeg_command()
-        log.info("ffmpeg.start", source=self.name, cmd=cmd)
+        log.info(
+            "ffmpeg.start",
+            source=self.name,
+            sample_rate=self.sample_rate,
+            chunk_seconds=self.chunk_seconds,
+        )
+        log.debug("ffmpeg.cmd", source=self.name, cmd=cmd)
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
