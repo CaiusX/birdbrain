@@ -5,8 +5,11 @@ description = "Real-time bird species recognition from YouTube and IP camera aud
 requires-python = ">=3.12"
 dependencies = [
     "birdnetlib>=0.18.0",
-    "tensorflow>=2.16 ; sys_platform == 'win32'",
-    "tflite-runtime>=2.14 ; sys_platform != 'win32'",
+    # tflite-runtime has no cp312 wheels, so use full tensorflow on every
+    # platform; birdnetlib transparently uses tf.lite.Interpreter as fallback.
+    "tensorflow>=2.16",
+    "librosa>=0.10",
+    "resampy>=0.4",
     "numpy>=1.26,<2.0",
     "yt-dlp>=2024.10.7",
     "sqlalchemy>=2.0",
@@ -28,11 +31,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/africam"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "ruff>=0.5",
     "pytest>=8",
-    "pytest-anyio>=0.0.0 ; python_version<'0'",
 ]
 
 [tool.ruff]

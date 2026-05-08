@@ -26,8 +26,11 @@ class YouTubeSource(AudioSource):
         self.url = url
 
     def _resolve_stream_url(self) -> str:
+        # bestaudio/best: prefer audio-only when present, otherwise an A+V manifest
+        # which ffmpeg will demux (we drop video with -vn). Required because many
+        # YouTube live streams don't publish a standalone audio format.
         result = subprocess.run(
-            ["yt-dlp", "-f", "bestaudio", "-g", "--no-warnings", self.url],
+            ["yt-dlp", "-f", "bestaudio/best", "-g", "--no-warnings", self.url],
             capture_output=True,
             text=True,
             check=False,
@@ -36,7 +39,8 @@ class YouTubeSource(AudioSource):
             raise RuntimeError(
                 f"yt-dlp failed for {self.url}: {result.stderr.strip() or result.stdout.strip()}"
             )
-        # bestaudio is one URL; for some live streams yt-dlp emits two (audio+video). Take the first.
+        # When yt-dlp emits multiple URLs (e.g. video + audio manifests for DASH),
+        # we still take the first. For HLS combined streams there's only one.
         for line in result.stdout.splitlines():
             line = line.strip()
             if line:
@@ -45,7 +49,7 @@ class YouTubeSource(AudioSource):
 
     def _ffmpeg_command(self) -> list[str]:
         stream_url = self._resolve_stream_url()
-        log.info("youtube.resolved", source=self.name, url=stream_url[:80] + "...")
+        log.info("youtube.resolved", source=self.name, url_head=stream_url[:80])
         return [
             "ffmpeg",
             "-hide_banner",
