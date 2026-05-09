@@ -110,6 +110,14 @@
         <input type="text" name="cookies_file" placeholder="cookies file (optional, for YT auth)"
                value="data/www.youtube.com_cookies.txt"
                class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-400">
+        <div class="grid grid-cols-2 gap-2">
+          <input type="text" name="timezone" placeholder="timezone (IANA, e.g. Africa/Johannesburg)"
+                 value="UTC"
+                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs">
+          <input type="number" name="min_confidence" placeholder="min conf" step="0.05" min="0.05" max="0.95"
+                 value="0.3"
+                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs tabular-nums">
+        </div>
         <label class="flex items-center gap-2 text-xs text-zinc-400">
           <input type="checkbox" name="multisite" value="true"> multi-site (rotates between cameras)
         </label>
@@ -130,7 +138,8 @@
     <span class="text-xs text-zinc-500">auto-refreshes every 5s</span>
   </div>
   <div id="detections-list"
-       hx-trigger="every 5s"
+       hx-get="/partials/detections?limit=50"
+       hx-trigger="load, every 5s"
        hx-swap="innerHTML">
     {% include "_detection_rows.html" %}
   </div>
@@ -265,6 +274,8 @@
       rowsLabel.textContent = name;
       rowsList.setAttribute('hx-get', `/partials/detections?limit=50&source=${encodeURIComponent(name)}`);
     }
+    // Re-process so HTMX picks up the new hx-get for the every-5s poll.
+    htmx.process(rowsList);
     htmx.ajax('GET', rowsList.getAttribute('hx-get'), {target: rowsList, swap: 'innerHTML'});
     highlightActiveSite();
   }
