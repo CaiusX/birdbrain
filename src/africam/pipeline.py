@@ -20,6 +20,30 @@ log = get_logger(__name__)
 # How often the supervisor reconciles desired sources (toml + DB) with running threads.
 SUPERVISOR_INTERVAL = 15.0
 
+# Normal-failure backoff: fast retries for transient blips (ffmpeg disconnect,
+# network glitch). 5 → 10 → 20 → 40 → 60 capped.
+NORMAL_BACKOFF_INITIAL = 5.0
+NORMAL_BACKOFF_MAX = 60.0
+
+# Auth-failure backoff: YouTube rate-limits aggressively when many yt-dlp
+# calls come from one IP — we back off hard so a single failing source can't
+# poison auth for the rest. 5 min → 10 → 20 → 30 capped.
+AUTH_BACKOFF_INITIAL = 300.0
+AUTH_BACKOFF_MAX = 1800.0
+
+# Substrings that indicate a YouTube auth/bot-check failure — these warrant
+# the auth backoff schedule rather than the normal one.
+_AUTH_ERR_MARKERS = (
+    "Sign in to confirm",
+    "Use --cookies",
+    "cookies-from-browser",
+    "Failed to decrypt",
+)
+
+
+def _is_auth_error(err: str) -> bool:
+    return any(m in err for m in _AUTH_ERR_MARKERS)
+
 
 def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
     common = {
@@ -77,21 +101,41 @@ def run_source(
     slog = log.bind(source=cfg.name, kind=cfg.kind, multisite=cfg.multisite)
     slog.info("pipeline.start")
 
-    backoff = 5.0
+    backoff = NORMAL_BACKOFF_INITIAL
     while not stop_event.is_set():
         started = time.monotonic()
+        last_err = ""
         try:
             _consume_stream(source, resolver, cfg, app, detector, db, slog, stop_event)
             if stop_event.is_set():
                 break
             slog.warning("source.eof_reconnect", sleep_s=backoff)
         except Exception as e:
-            slog.warning("source.error_reconnect", error=str(e)[:300], sleep_s=backoff)
-        if time.monotonic() - started > 60:
-            backoff = 5.0
+            last_err = str(e)
+            slog.warning(
+                "source.error_reconnect",
+                error=last_err[:300],
+                sleep_s=backoff,
+                auth=_is_auth_error(last_err),
+            )
+
+        ran_for = time.monotonic() - started
+        if ran_for > 60:
+            # Successful stretch — reset to fast retries.
+            backoff = NORMAL_BACKOFF_INITIAL
+        elif _is_auth_error(last_err):
+            # YouTube rate-limits aggressively when many yt-dlp calls come from
+            # one IP. Back off hard so a single failing source can't poison auth
+            # for other workers; gives the IP cooldown time to lift.
+            if backoff < AUTH_BACKOFF_INITIAL:
+                backoff = AUTH_BACKOFF_INITIAL
+            else:
+                backoff = min(backoff * 2, AUTH_BACKOFF_MAX)
         else:
-            backoff = min(backoff * 2, 60.0)
-        # Use the event so we wake up immediately on stop instead of sleeping out.
+            # Transient (ffmpeg blip, brief network drop) — keep the fast schedule.
+            backoff = min(backoff * 2, NORMAL_BACKOFF_MAX)
+
+        # Use the event so the worker wakes immediately on stop_event rather than sleeping it out.
         if stop_event.wait(backoff):
             break
     slog.info("pipeline.stopped")
