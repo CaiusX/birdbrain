@@ -164,6 +164,12 @@
   SITES.forEach(s => {
     const m = L.marker([s.lat, s.lon], { icon: dotIcon(COLOR_DEFAULT) }).addTo(map);
     m.bindPopup(() => buildSitePopup(s));
+    m.bindTooltip(s.name, {
+      permanent: true,
+      direction: 'right',
+      offset: [10, 0],
+      className: 'site-label',
+    });
     markers[s.name] = m;
   });
 

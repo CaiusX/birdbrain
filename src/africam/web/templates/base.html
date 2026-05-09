@@ -13,6 +13,17 @@
     .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: #18181b !important; color: #e4e4e7; }
     .leaflet-popup-content { margin: 10px 14px; font-size: 13px; }
     .leaflet-container { background: #0c0c0e; }
+    /* Permanent site labels next to each marker. */
+    .leaflet-tooltip.site-label {
+      background: rgba(24, 24, 27, 0.85);
+      color: #e4e4e7;
+      border: 1px solid #3f3f46;
+      padding: 1px 6px;
+      font-size: 11px;
+      box-shadow: none;
+      white-space: nowrap;
+    }
+    .leaflet-tooltip.site-label::before { display: none; }
   </style>
   {% block head_extra %}{% endblock %}
 </head>
