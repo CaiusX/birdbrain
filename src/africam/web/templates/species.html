@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Africam · species{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Species detected · <span class="text-zinc-200">{{ species_list | length }}</span>
+    </h2>
+    {% set base = '/species?sort=' %}
+    <div class="flex gap-2 text-xs">
+      <span class="text-zinc-500">sort:</span>
+      {% for key, label in [('last_seen','last seen'), ('first_seen','first seen'), ('count','count'), ('max_conf','max conf'), ('name','name')] %}
+        {% if sort == key %}
+          <span class="px-2 py-0.5 rounded bg-zinc-700 text-zinc-100">{{ label }}</span>
+        {% else %}
+          <a href="{{ base }}{{ key }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">{{ label }}</a>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if species_list %}
+    <table class="w-full text-sm">
+      <thead class="text-zinc-400 text-xs uppercase tracking-wider">
+        <tr class="border-b border-zinc-800">
+          <th class="text-left font-medium px-5 py-2">Species</th>
+          <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Scientific</th>
+          <th class="text-right font-medium px-5 py-2">Count</th>
+          <th class="text-right font-medium px-5 py-2">Max conf</th>
+          <th class="text-left font-medium px-5 py-2 hidden lg:table-cell">First seen</th>
+          <th class="text-left font-medium px-5 py-2">Last seen</th>
+          <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Sources</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-zinc-800">
+        {% for s in species_list %}
+          {# Use the first source's timezone for display — most species come from a single source. #}
+          {% set tz = source_tz.get(s.sources[0], 'UTC') if s.sources else 'UTC' %}
+          <tr class="hover:bg-zinc-800/40">
+            <td class="px-5 py-2 font-medium">{{ s.common_name }}</td>
+            <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ s.scientific_name }}</td>
+            <td class="px-5 py-2 text-right tabular-nums">{{ s.n }}</td>
+            <td class="px-5 py-2 text-right tabular-nums">
+              <span class="inline-block w-16 conf-bar rounded px-2 py-0.5 text-xs"
+                    style="--w: {{ (s.max_conf * 100)|round(0)|int }}%;">
+                {{ "%.2f"|format(s.max_conf) }}
+              </span>
+            </td>
+            <td class="px-5 py-2 tabular-nums text-zinc-400 hidden lg:table-cell"
+                title="{{ s.first_seen | localtime('UTC') }} UTC">
+              {{ s.first_seen | localtime(tz) }}
+              <span class="text-xs text-zinc-600 ml-1">{{ tz | tz_abbr }}</span>
+            </td>
+            <td class="px-5 py-2 tabular-nums text-zinc-400"
+                title="{{ s.last_seen | localtime('UTC') }} UTC">
+              {{ s.last_seen | localtime(tz) }}
+              <span class="text-xs text-zinc-600 ml-1">{{ tz | tz_abbr }}</span>
+            </td>
+            <td class="px-5 py-2 hidden md:table-cell">
+              <div class="flex flex-wrap gap-1">
+                {% for src in s.sources %}
+                  <code class="text-xs text-zinc-300 bg-zinc-800/60 rounded px-1.5 py-0.5">{{ src }}</code>
+                {% endfor %}
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">
+      No detections yet. Once the pipeline produces some, species will appear here.
+    </p>
+  {% endif %}
+</section>
+{% endblock %}

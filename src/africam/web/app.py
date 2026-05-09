@@ -425,6 +425,66 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             ]
         )
 
+    @app.get("/species", response_class=HTMLResponse)
+    def species(
+        request: Request,
+        sort: str = Query(default="last_seen"),  # last_seen | first_seen | count | max_conf | name
+    ) -> HTMLResponse:
+        _, sources_by_name, _ = _all_sources()
+        # One row per (scientific_name, common_name) with aggregates.
+        # SQLite's group_concat handles the per-species source list cheaply.
+        with db.session() as s:
+            rows = list(
+                s.execute(
+                    select(
+                        DetectionRow.scientific_name,
+                        DetectionRow.common_name,
+                        func.count().label("n"),
+                        func.min(DetectionRow.started_at).label("first_seen"),
+                        func.max(DetectionRow.started_at).label("last_seen"),
+                        func.max(DetectionRow.confidence).label("max_conf"),
+                        func.avg(DetectionRow.confidence).label("avg_conf"),
+                        func.group_concat(DetectionRow.source_name.distinct()).label("sources"),
+                    )
+                    .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
+                )
+            )
+        species_list = [
+            {
+                "scientific_name": r.scientific_name,
+                "common_name": r.common_name,
+                "n": r.n,
+                "first_seen": r.first_seen,
+                "last_seen": r.last_seen,
+                "max_conf": r.max_conf,
+                "avg_conf": r.avg_conf,
+                "sources": sorted((r.sources or "").split(",")),
+            }
+            for r in rows
+        ]
+        sort_keys = {
+            "last_seen":  lambda r: r["last_seen"],
+            "first_seen": lambda r: r["first_seen"],
+            "count":      lambda r: r["n"],
+            "max_conf":   lambda r: r["max_conf"],
+            "name":       lambda r: r["common_name"].lower(),
+        }
+        key = sort_keys.get(sort, sort_keys["last_seen"])
+        # name sorts ascending; everything else descending (most recent / most / highest first).
+        species_list.sort(key=key, reverse=(sort != "name"))
+
+        # Pre-compute timezone per source so the template's localtime filter works.
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        return TEMPLATES.TemplateResponse(
+            request,
+            "species.html",
+            {
+                "species_list": species_list,
+                "sort": sort,
+                "source_tz": source_tz,
+            },
+        )
+
     @app.get("/clips/{detection_id}")
     def clip(detection_id: int) -> FileResponse:
         with db.session() as s:
