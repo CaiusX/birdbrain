@@ -24,6 +24,8 @@ dependencies = [
     "jinja2>=3.1",
     # Required by FastAPI for Form(...) parsing on the site-override endpoint.
     "python-multipart>=0.0.9",
+    # Ensures zoneinfo can resolve IANA timezones on Windows (no system DB).
+    "tzdata>=2024.1",
     "pillow>=10.3",
     # pytesseract is a thin wrapper that shells out to the system tesseract
     # binary. OCR is gated by config + a runtime check, so the binary is

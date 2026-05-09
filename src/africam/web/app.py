@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -18,6 +19,35 @@ from africam.storage import Database, DetectionRow
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
+
+
+def _localtime(dt: datetime, tz_name: str | None = None, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """Render a UTC datetime in the given IANA timezone. SQLite hands us back
+    naive datetimes (it strips tz on read), so re-attach UTC first."""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    try:
+        tz = ZoneInfo(tz_name) if tz_name else UTC
+    except ZoneInfoNotFoundError:
+        tz = UTC
+    return dt.astimezone(tz).strftime(fmt)
+
+
+def _tz_abbr(tz_name: str | None) -> str:
+    """Short label like SAST/UTC/EST for a column header. Datetime-derived so
+    it stays correct across DST."""
+    if not tz_name:
+        return "UTC"
+    try:
+        return datetime.now(ZoneInfo(tz_name)).tzname() or tz_name
+    except ZoneInfoNotFoundError:
+        return tz_name
+
+
+TEMPLATES.env.filters["localtime"] = _localtime
+TEMPLATES.env.filters["tz_abbr"] = _tz_abbr
 
 # Captures the 11-char YouTube video id from /watch?v=, youtu.be/ or /embed/ URLs.
 _YT_VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/embed/)([A-Za-z0-9_-]{11})")
@@ -92,6 +122,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             multisite=row.multisite,
             cookies_from_browser=row.cookies_from_browser,
             cookies_file=row.cookies_file,
+            timezone=row.timezone or "UTC",
             ocr=OcrConfig(),
         )
 
@@ -173,6 +204,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
             for t in tiles
         ]
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         return TEMPLATES.TemplateResponse(
             request,
             "dashboard.html",
@@ -186,6 +218,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "sites": sorted(sites.values(), key=lambda s: s.name),
                 "sites_json": sites_for_map,
                 "site_states": _site_states(tiles, sources_by_name),
+                "source_tz": source_tz,
             },
         )
 
@@ -195,6 +228,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         source: str | None = Query(default=None),
         limit: int = Query(default=50, ge=1, le=500),
     ) -> HTMLResponse:
+        _, sources_by_name, _ = _all_sources()
         with db.session() as s:
             stmt = (
                 select(DetectionRow)
@@ -204,10 +238,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if source:
                 stmt = stmt.where(DetectionRow.source_name == source)
             rows = list(s.scalars(stmt))
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         return TEMPLATES.TemplateResponse(
             request,
             "_detection_rows.html",
-            {"rows": rows, "selected_source": source},
+            {"rows": rows, "selected_source": source, "source_tz": source_tz},
         )
 
     @app.get("/partials/site/{name}", response_class=HTMLResponse)

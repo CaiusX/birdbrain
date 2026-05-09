@@ -2,7 +2,7 @@
   <table class="w-full text-sm">
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
       <tr class="border-b border-zinc-800">
-        <th class="text-left font-medium px-5 py-2">Time (UTC)</th>
+        <th class="text-left font-medium px-5 py-2">Time (local)</th>
         <th class="text-left font-medium px-5 py-2">Source</th>
         <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Site</th>
         <th class="text-left font-medium px-5 py-2">Species</th>
@@ -14,8 +14,10 @@
     <tbody class="divide-y divide-zinc-800">
       {% for r in rows %}
         <tr class="hover:bg-zinc-800/40">
-          <td class="px-5 py-2 tabular-nums text-zinc-400">
-            {{ r.started_at.strftime("%Y-%m-%d %H:%M:%S") }}
+          {% set tz = source_tz.get(r.source_name, "UTC") %}
+          <td class="px-5 py-2 tabular-nums text-zinc-400" title="{{ r.started_at | localtime('UTC') }} UTC">
+            {{ r.started_at | localtime(tz) }}
+            <span class="text-xs text-zinc-600 ml-1">{{ tz | tz_abbr }}</span>
           </td>
           <td class="px-5 py-2"><code class="text-zinc-300">{{ r.source_name }}</code></td>
           <td class="px-5 py-2 hidden md:table-cell">

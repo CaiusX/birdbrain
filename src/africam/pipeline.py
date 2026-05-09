@@ -171,6 +171,7 @@ def _runtime_row_to_cfg(row: RuntimeSourceRow) -> SourceConfig:
         multisite=row.multisite,
         cookies_from_browser=row.cookies_from_browser,
         cookies_file=row.cookies_file,
+        timezone=row.timezone or "UTC",
         ocr=OcrConfig(),
     )
 

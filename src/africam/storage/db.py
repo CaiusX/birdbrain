@@ -35,6 +35,7 @@ class Database:
             ("detections", "site", "TEXT"),
             ("detections", "latitude", "REAL"),
             ("detections", "longitude", "REAL"),
+            ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
         ]
         with self.engine.begin() as conn:
             for table, col, ddl in added:

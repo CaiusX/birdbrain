@@ -47,6 +47,9 @@ class SourceConfig(BaseModel):
     # extension like "Get cookies.txt LOCALLY" (filter to youtube.com) and
     # point at the file. More robust than cookies_from_browser on Windows.
     cookies_file: Path | None = None
+    # IANA timezone for display (e.g. "Africa/Johannesburg"). The DB always
+    # stores UTC; the dashboard converts using this when rendering rows.
+    timezone: str = "UTC"
 
 
 class AppConfig(BaseSettings):

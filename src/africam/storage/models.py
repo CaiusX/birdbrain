@@ -52,6 +52,7 @@ class RuntimeSourceRow(Base):
     multisite: Mapped[bool] = mapped_column(default=False)
     cookies_from_browser: Mapped[str | None] = mapped_column(String(32), nullable=True)
     cookies_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
