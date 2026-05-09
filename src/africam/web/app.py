@@ -371,21 +371,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         lat: float | None = Form(default=None),
         lon: float | None = Form(default=None),
         cookies_file: str | None = Form(default=None),
+        timezone: str = Form(default="UTC"),
+        min_confidence: float = Form(default=0.3),
     ) -> Response:
         if kind not in ("youtube", "rtsp"):
             raise HTTPException(400, "kind must be youtube or rtsp")
         if not name.strip():
             raise HTTPException(400, "name is required")
+        # Validate timezone before persisting so a typo doesn't slip through.
+        try:
+            ZoneInfo(timezone)
+        except ZoneInfoNotFoundError as e:
+            raise HTTPException(400, f"unknown timezone: {timezone}") from e
         db.add_runtime_source(
             name=name.strip(),
             kind=kind,
             url=url.strip(),
             lat=lat,
             lon=lon,
-            min_confidence=0.5,
+            min_confidence=min_confidence,
             multisite=multisite,
             cookies_from_browser=None,
             cookies_file=cookies_file or None,
+            timezone=timezone,
         )
         if request.headers.get("hx-request"):
             return sources_partial(request)
