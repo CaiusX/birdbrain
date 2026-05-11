@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+{% block title %}Africam · audition{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Audition
+      <span class="text-zinc-200 ml-2">{{ rows | length }}</span>
+      <span class="text-zinc-500 ml-1 text-xs">
+        of {{ label_counts.unreviewed }} unreviewed
+        · ✓ {{ label_counts.good }}
+        · ✗ {{ label_counts.bad }}
+        · ? {{ label_counts.unsure }}
+      </span>
+    </h2>
+    <span class="text-xs text-zinc-500">listen → label → keeps it as ground truth</span>
+  </div>
+
+  <form method="get" action="/audition" class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Source</span>
+      <select name="source" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        <option value="">— any —</option>
+        {% for s in all_sources %}
+          <option value="{{ s }}" {% if filters.source == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Species (contains)</span>
+      <input name="species" value="{{ filters.species }}" placeholder="e.g. plover"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Min conf</span>
+      <input name="min_conf" type="number" step="0.05" min="0" max="1" value="{{ filters.min_conf }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Max conf</span>
+      <input name="max_conf" type="number" step="0.05" min="0" max="1" value="{{ filters.max_conf }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Show</span>
+      <select name="label_filter" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [('unreviewed','unreviewed'), ('good','good'), ('bad','bad'), ('unsure','unsure'), ('all','all')] %}
+          <option value="{{ v }}" {% if filters.label_filter == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Order</span>
+      <select name="order" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [('conf_desc','highest conf first'), ('conf_asc','lowest conf first'), ('recent','most recent')] %}
+          <option value="{{ v }}" {% if filters.order == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <input type="hidden" name="limit" value="{{ filters.limit }}">
+    <div class="md:col-span-6 flex justify-end gap-2">
+      <a href="/audition" class="px-3 py-1.5 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</a>
+      <button type="submit" class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 font-medium">apply</button>
+    </div>
+  </form>
+
+  {% if rows %}
+    <ul class="divide-y divide-zinc-800">
+      {% for r in rows %}
+        {% include "_audition_row.html" %}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">
+      No detections match these filters.
+    </p>
+  {% endif %}
+</section>
+
+<dialog id="spec-modal"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 max-w-3xl w-full max-h-[92vh] overflow-y-auto backdrop:bg-black/70">
+  <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <div class="min-w-0">
+      <div id="spec-modal-species" class="text-base font-medium truncate"></div>
+      <div id="spec-modal-scientific" class="text-xs italic text-zinc-500 truncate"></div>
+      <div id="spec-modal-meta" class="text-xs text-zinc-500 mt-0.5 truncate"></div>
+    </div>
+    <button type="button" id="spec-modal-close"
+            class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
+  </div>
+  <div class="p-5">
+    <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none">
+      <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-cover">
+      <div id="spec-modal-playhead"
+           class="absolute top-0 bottom-0 w-px bg-emerald-300 shadow-[0_0_6px_2px_rgba(110,231,183,0.7)] pointer-events-none"
+           style="left: 0%; display: none;"></div>
+    </div>
+    <audio id="spec-modal-audio" src="" controls preload="metadata" class="w-full mt-3"></audio>
+
+    <div class="mt-4 flex items-center justify-between gap-3 flex-wrap">
+      <p class="text-xs text-zinc-500">click the spectrogram to seek</p>
+      <div class="flex items-center gap-1.5">
+        <button type="button" data-label-btn="bad"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
+                title="False positive">✗ bad</button>
+        <button type="button" data-label-btn="unsure"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
+                title="Can't tell">? unsure</button>
+        <button type="button" data-label-btn="good"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
+                title="Correct ID">✓ good</button>
+        <button type="button" data-label-btn=""
+                class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                title="Clear label">↺</button>
+      </div>
+    </div>
+
+    <div id="spec-modal-suggest" class="mt-3 hidden">
+      <label for="spec-modal-suggest-input" class="text-xs uppercase tracking-wider text-zinc-500">
+        Looked more like…
+      </label>
+      <div class="flex gap-2 mt-1">
+        <input id="spec-modal-suggest-input" type="text" list="known-species"
+               placeholder="type a species (autocompletes from already-detected)"
+               class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100"
+               autocomplete="off" spellcheck="false">
+        <button type="button" id="spec-modal-suggest-save"
+                class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 text-sm font-medium hover:bg-white">save</button>
+      </div>
+      <p id="spec-modal-suggest-current" class="mt-1 text-xs text-zinc-500"></p>
+    </div>
+
+    <div id="spec-modal-xc" class="mt-4 border-t border-zinc-800 pt-4">
+      <div class="flex items-center justify-between mb-2">
+        <h4 class="text-xs uppercase tracking-wider text-zinc-400">
+          Compare with Xeno-Canto
+          <span id="spec-modal-xc-species" class="text-zinc-200 normal-case ml-1"></span>
+        </h4>
+        <a id="spec-modal-xc-search" href="#" target="_blank" rel="noopener"
+           class="text-xs text-emerald-300 hover:text-emerald-200">search xeno-canto ↗</a>
+      </div>
+      <p id="spec-modal-xc-status" class="text-xs text-zinc-500"></p>
+      <ul id="spec-modal-xc-list" class="space-y-2 mt-2"></ul>
+    </div>
+  </div>
+</dialog>
+
+<datalist id="known-species">
+  {% for sp in all_species %}<option value="{{ sp }}">{% endfor %}
+</datalist>
+
+<script>
+(function () {
+  const dialog   = document.getElementById('spec-modal');
+  const img      = document.getElementById('spec-modal-img');
+  const audio    = document.getElementById('spec-modal-audio');
+  const playhead = document.getElementById('spec-modal-playhead');
+  const specEl   = document.getElementById('spec-modal-spec');
+  const speciesEl = document.getElementById('spec-modal-species');
+  const sciEl     = document.getElementById('spec-modal-scientific');
+  const metaEl   = document.getElementById('spec-modal-meta');
+  const closeBtn = document.getElementById('spec-modal-close');
+  const labelBtns = dialog.querySelectorAll('[data-label-btn]');
+  const suggestWrap  = document.getElementById('spec-modal-suggest');
+  const suggestInput = document.getElementById('spec-modal-suggest-input');
+  const suggestSave  = document.getElementById('spec-modal-suggest-save');
+  const suggestNote  = document.getElementById('spec-modal-suggest-current');
+  const xcSpeciesEl  = document.getElementById('spec-modal-xc-species');
+  const xcSearchEl   = document.getElementById('spec-modal-xc-search');
+  const xcStatusEl   = document.getElementById('spec-modal-xc-status');
+  const xcListEl     = document.getElementById('spec-modal-xc-list');
+
+  let currentId = null;
+  let currentLabel = null;
+  let currentSuggested = '';
+
+  const labelStyles = {
+    good:   'bg-emerald-500/20 border-emerald-500 text-emerald-300',
+    bad:    'bg-rose-500/20 border-rose-500 text-rose-300',
+    unsure: 'bg-amber-500/20 border-amber-500 text-amber-300',
+  };
+
+  function paintActiveLabel(label) {
+    currentLabel = label;
+    labelBtns.forEach((btn) => {
+      const v = btn.dataset.labelBtn;
+      // Always strip the "active" classes first.
+      btn.classList.remove(...'bg-emerald-500/20 border-emerald-500 text-emerald-300 bg-rose-500/20 border-rose-500 text-rose-300 bg-amber-500/20 border-amber-500 text-amber-300'.split(' '));
+      if (v && v === label && labelStyles[v]) {
+        btn.classList.add(...labelStyles[v].split(' '));
+      }
+    });
+    // Suggestion field is only meaningful for bad/unsure.
+    if (label === 'bad' || label === 'unsure') {
+      suggestWrap.classList.remove('hidden');
+      suggestNote.textContent = currentSuggested
+        ? `current: ${currentSuggested}`
+        : 'optional — saved alongside the label';
+    } else {
+      suggestWrap.classList.add('hidden');
+    }
+  }
+
+  let raf = 0;
+  function tick() {
+    if (audio.duration > 0) {
+      playhead.style.left = (audio.currentTime / audio.duration * 100) + '%';
+    }
+    if (!audio.paused && !audio.ended) {
+      raf = requestAnimationFrame(tick);
+    }
+  }
+  function startTick() { cancelAnimationFrame(raf); raf = requestAnimationFrame(tick); }
+  function stopTick()  { cancelAnimationFrame(raf); }
+
+  function openFor(btn) {
+    currentId = btn.dataset.detectionId;
+    currentSuggested = btn.dataset.suggested || '';
+    speciesEl.textContent = btn.dataset.species || '';
+    sciEl.textContent     = btn.dataset.scientific || '';
+    metaEl.textContent    = btn.dataset.meta || '';
+    img.src = `/spectrograms/${currentId}.png?size=large`;
+    audio.src = `/clips/${currentId}`;
+    playhead.style.left = '0%';
+    playhead.style.display = 'block';
+    suggestInput.value = currentSuggested;
+    paintActiveLabel(btn.dataset.label || null);
+    loadXenoCanto(btn.dataset.scientific || btn.dataset.species || '');
+    if (typeof dialog.showModal === 'function') {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute('open', '');
+    }
+    audio.play().catch(() => {});
+  }
+
+  async function loadXenoCanto(species) {
+    xcListEl.innerHTML = '';
+    xcSpeciesEl.textContent = species ? `· ${species}` : '';
+    xcSearchEl.href = species
+      ? `https://xeno-canto.org/explore?query=${encodeURIComponent(species)}`
+      : 'https://xeno-canto.org/';
+    if (!species) { xcStatusEl.textContent = ''; return; }
+    xcStatusEl.textContent = 'loading…';
+    try {
+      const resp = await fetch(`/api/xeno_canto?species=${encodeURIComponent(species)}&limit=3`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const body = await resp.json();
+      xcSearchEl.href = body.search_url || xcSearchEl.href;
+      const recs = body.recordings || [];
+      if (body.needs_key) {
+        xcStatusEl.innerHTML =
+          'Set <code class="text-zinc-300">AFRICAM_XENO_CANTO_KEY</code> ' +
+          '(free at <a href="https://xeno-canto.org/account" target="_blank" rel="noopener" class="underline">xeno-canto.org/account</a>) ' +
+          'to load reference recordings inline.';
+        return;
+      }
+      if (!recs.length) {
+        xcStatusEl.textContent = 'no recordings found';
+        return;
+      }
+      xcStatusEl.textContent = '';
+      for (const r of recs) {
+        xcListEl.appendChild(renderXcRecording(r));
+      }
+    } catch (e) {
+      xcStatusEl.textContent = 'fetch failed: ' + e.message;
+    }
+  }
+
+  function renderXcRecording(r) {
+    const li = document.createElement('li');
+    li.className = 'flex gap-3 items-start bg-zinc-950/40 border border-zinc-800 rounded p-2';
+
+    const link = document.createElement('a');
+    link.href = r.url || '#';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.className = 'shrink-0';
+    if (r.sono_small) {
+      const im = document.createElement('img');
+      im.src = r.sono_small;
+      im.alt = '';
+      im.className = 'w-32 h-12 object-cover rounded bg-zinc-900';
+      link.appendChild(im);
+    } else {
+      link.textContent = `XC${r.id}`;
+      link.className += ' text-xs text-zinc-400 underline';
+    }
+    li.appendChild(link);
+
+    const main = document.createElement('div');
+    main.className = 'flex-1 min-w-0';
+
+    const meta = document.createElement('div');
+    meta.className = 'text-xs text-zinc-400 truncate';
+    meta.textContent = [r.en, r.cnt, r.q ? `q:${r.q}` : ''].filter(Boolean).join(' · ');
+    main.appendChild(meta);
+
+    const sub = document.createElement('div');
+    sub.className = 'text-xs text-zinc-500 truncate';
+    sub.textContent = [r.rec, r.type, r.length].filter(Boolean).join(' · ');
+    main.appendChild(sub);
+
+    if (r.file) {
+      const a = document.createElement('audio');
+      a.src = r.file;
+      a.controls = true;
+      a.preload = 'none';
+      a.className = 'w-full h-7 mt-1';
+      main.appendChild(a);
+    }
+
+    li.appendChild(main);
+    return li;
+  }
+
+  async function postLabel(value, suggested) {
+    if (currentId == null) return;
+    const params = new URLSearchParams();
+    params.set('value', value);
+    if (suggested !== undefined) params.set('suggested', suggested);
+    const resp = await fetch(`/api/detections/${currentId}/label`, {
+      method: 'POST',
+      headers: {
+        'HX-Request': 'true',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+    if (!resp.ok) return;
+    const html = (await resp.text()).trim();
+    const tmp = document.createElement('template');
+    tmp.innerHTML = html;
+    const newRow = tmp.content.firstElementChild;
+    const oldRow = document.getElementById(`audit-${currentId}`);
+    if (oldRow && newRow) {
+      oldRow.replaceWith(newRow);
+      // Pick up the canonical suggestion the server returned.
+      const fresh = newRow.querySelector('[data-spectrogram-trigger]');
+      if (fresh) currentSuggested = fresh.dataset.suggested || '';
+    }
+    paintActiveLabel(value || null);
+  }
+  const setLabel = (value) => postLabel(value);
+  const saveSuggestion = () => {
+    // Save against whichever of bad/unsure is currently selected; fall back to
+    // bad if neither is set yet (user typed a suggestion without picking one).
+    const lbl = (currentLabel === 'unsure') ? 'unsure' : 'bad';
+    postLabel(lbl, suggestInput.value);
+  };
+  function closeIt() {
+    audio.pause();
+    stopTick();
+    // Stop any xeno-canto reference players that may still be playing.
+    xcListEl.querySelectorAll('audio').forEach((a) => a.pause());
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+  }
+
+  // Delegate click — works for HTMX-swapped rows.
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-spectrogram-trigger]');
+    if (btn) { e.preventDefault(); openFor(btn); }
+  });
+
+  audio.addEventListener('play',     startTick);
+  audio.addEventListener('seeking',  () => { tick(); });
+  audio.addEventListener('pause',    () => { tick(); stopTick(); });
+  audio.addEventListener('ended',    () => { playhead.style.left = '100%'; stopTick(); });
+  audio.addEventListener('timeupdate', tick);
+
+  specEl.addEventListener('click', (e) => {
+    if (!audio.duration) return;
+    const rect = specEl.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    audio.currentTime = frac * audio.duration;
+  });
+
+  labelBtns.forEach((btn) => {
+    btn.addEventListener('click', () => setLabel(btn.dataset.labelBtn));
+  });
+
+  suggestSave.addEventListener('click', saveSuggestion);
+  suggestInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveSuggestion();
+    }
+  });
+
+  closeBtn.addEventListener('click', closeIt);
+  dialog.addEventListener('close',  () => { audio.pause(); stopTick(); });
+  dialog.addEventListener('cancel', closeIt);
+  // Click on backdrop closes (the dialog itself is the backdrop target when
+  // the click lands outside the inner content).
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) closeIt(); });
+})();
+</script>
+{% endblock %}

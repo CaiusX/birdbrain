@@ -3,12 +3,23 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from africam.detector.birdnet import Detection
-from africam.storage.models import Base, DetectionRow, RuntimeSourceRow, SourceStateRow
+from africam.storage.models import (
+    Base,
+    DetectionRow,
+    RuntimeSourceRow,
+    SourceStateRow,
+    WorkerHeartbeatRow,
+)
+
+# Sentinel for "argument not supplied" — distinct from None, which means
+# "explicitly clear this field."
+_UNSET: Any = object()
 
 
 class Database:
@@ -35,6 +46,9 @@ class Database:
             ("detections", "site", "TEXT"),
             ("detections", "latitude", "REAL"),
             ("detections", "longitude", "REAL"),
+            ("detections", "label", "TEXT"),
+            ("detections", "labeled_at", "TIMESTAMP"),
+            ("detections", "suggested_species", "TEXT"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
         ]
         with self.engine.begin() as conn:
@@ -107,6 +121,98 @@ class Database:
             row.manual_until = manual_until
             row.updated_at = now
         return row
+
+    def set_detection_label(
+        self,
+        detection_id: int,
+        label: str | None,
+        *,
+        suggested: Any = _UNSET,
+    ) -> bool:
+        """Set/clear the manual audition label on a detection. Returns False if
+        the detection doesn't exist.
+
+        ``suggested`` is the rater's free-text guess at the actual species. It
+        is only meaningful when ``label`` is ``'bad'`` or ``'unsure'``; for any
+        other label this method clears it automatically. Pass the sentinel
+        default to leave the existing suggestion unchanged."""
+        if label is not None and label not in ("good", "bad", "unsure"):
+            raise ValueError(f"invalid label: {label!r}")
+        with self._Session() as s, s.begin():
+            row = s.get(DetectionRow, detection_id)
+            if row is None:
+                return False
+            row.label = label
+            row.labeled_at = datetime.now(UTC) if label is not None else None
+            if label not in ("bad", "unsure"):
+                # 'good' / unreviewed never carries a suggestion.
+                row.suggested_species = None
+            elif suggested is not _UNSET:
+                row.suggested_species = (suggested or None)
+        return True
+
+    # --- Worker heartbeats (admin liveness view) ---
+
+    def worker_started(self, source_name: str) -> None:
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(WorkerHeartbeatRow, source_name)
+            if row is None:
+                row = WorkerHeartbeatRow(source_name=source_name)
+                s.add(row)
+            row.started_at = now
+            row.last_heartbeat_at = now
+            row.state = "running"
+            row.last_error = None
+
+    def worker_heartbeat(self, source_name: str) -> None:
+        """Bump last_heartbeat_at. Called every ~15s while the worker is healthy."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(WorkerHeartbeatRow, source_name)
+            if row is None:
+                row = WorkerHeartbeatRow(
+                    source_name=source_name, started_at=now, last_heartbeat_at=now
+                )
+                s.add(row)
+            else:
+                row.last_heartbeat_at = now
+                row.state = "running"
+                row.last_error = None
+
+    def worker_backoff(self, source_name: str, error: str) -> None:
+        with self._Session() as s, s.begin():
+            row = s.get(WorkerHeartbeatRow, source_name)
+            if row is None:
+                row = WorkerHeartbeatRow(
+                    source_name=source_name,
+                    started_at=datetime.now(UTC),
+                    last_heartbeat_at=datetime.now(UTC),
+                )
+                s.add(row)
+            row.state = "backoff"
+            row.last_error = (error or "")[:512] or None
+            row.last_heartbeat_at = datetime.now(UTC)
+
+    def worker_stopped(self, source_name: str) -> None:
+        with self._Session() as s, s.begin():
+            row = s.get(WorkerHeartbeatRow, source_name)
+            if row is not None:
+                row.state = "stopped"
+
+    def list_worker_heartbeats(self) -> list[WorkerHeartbeatRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(WorkerHeartbeatRow)))
+
+    # --- Runtime source enable (undo soft-delete) ---
+
+    def enable_runtime_source(self, name: str) -> bool:
+        with self._Session() as s, s.begin():
+            row = s.get(RuntimeSourceRow, name)
+            if row is None:
+                return False
+            row.deleted_at = None
+        return True
 
     def clear_manual_override(self, source_name: str) -> None:
         with self._Session() as s, s.begin():

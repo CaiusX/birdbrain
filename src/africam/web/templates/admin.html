@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Africam · admin{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Admin · sources
+      <span class="text-zinc-200 ml-2">{{ running }}/{{ total }}</span>
+      <span class="text-zinc-500 text-xs ml-1">running</span>
+    </h2>
+    <button hx-get="/partials/admin" hx-target="#admin-table" hx-swap="outerHTML"
+            class="text-xs text-zinc-400 hover:text-zinc-100 px-2 py-0.5 rounded border border-zinc-800 hover:border-zinc-600">
+      ↻ refresh
+    </button>
+  </div>
+
+  {% include "_admin_table.html" %}
+</section>
+{% endblock %}

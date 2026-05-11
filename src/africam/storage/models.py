@@ -26,6 +26,13 @@ class DetectionRow(Base):
     site: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Manual audition label: 'good' | 'bad' | 'unsure' | NULL (unreviewed).
+    label: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    labeled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When label='bad', the rater can suggest what the call actually was.
+    # Free-text (auto-completed from species we've already detected). NULL
+    # whenever label is anything other than 'bad'.
+    suggested_species: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     __table_args__ = (
         Index("ix_detections_source_time", "source_name", "started_at"),
@@ -55,6 +62,25 @@ class RuntimeSourceRow(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkerHeartbeatRow(Base):
+    """Liveness signal written by each per-source worker thread. The web
+    /admin page reads this to tell which sources are actually producing data
+    right now (vs configured but stopped/dead)."""
+
+    __tablename__ = "worker_heartbeats"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # When the current worker incarnation started — bumped each time a new
+    # thread takes over for this source.
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Touched ~every 15s by the worker while it's processing chunks.
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 'running' | 'backoff' (between retries) | 'stopped'
+    state: Mapped[str] = mapped_column(String(16), default="running")
+    # Last error message that triggered backoff (truncated). NULL when healthy.
+    last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class SourceStateRow(Base):

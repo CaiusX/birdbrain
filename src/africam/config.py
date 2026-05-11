@@ -67,9 +67,17 @@ class AppConfig(BaseSettings):
     db_url: str = "sqlite:///data/africam.sqlite"
     clips_dir: Path = Path("data/clips")
     save_clips: bool = True
+    # Container/codec for saved detection clips. OGG Vorbis is ~10× smaller
+    # than WAV for negligible perceptual loss in audition. Use 'flac' for
+    # lossless compression, or 'wav' to revert to uncompressed PCM.
+    clip_format: Literal["ogg", "wav", "flac"] = "ogg"
     sample_rate: int = 48_000
     chunk_seconds: float = 3.0
     log_level: str = "INFO"
+    # Xeno-Canto API v3 requires a key (free, per-account). When set, the
+    # audition modal shows reference recordings inline. When unset, it falls
+    # back to a plain "search XC" link that needs no auth.
+    xeno_canto_key: str | None = None
 
 
 def load_sources(path: Path) -> list[SourceConfig]:

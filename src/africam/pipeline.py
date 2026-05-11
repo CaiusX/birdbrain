@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from africam.audio import AudioSource, RtspSource, YouTubeSource
-from africam.clips import save_chunk_wav
+from africam.clips import save_chunk
 from africam.config import AppConfig, OcrConfig, SourceConfig
 from africam.detector import BirdNetDetector
 from africam.logging import get_logger
@@ -100,6 +100,10 @@ def run_source(
     resolver = _build_resolver(cfg, source, sites, db)
     slog = log.bind(source=cfg.name, kind=cfg.kind, multisite=cfg.multisite)
     slog.info("pipeline.start")
+    try:
+        db.worker_started(cfg.name)
+    except Exception:
+        slog.exception("worker.heartbeat_started_failed")
 
     backoff = NORMAL_BACKOFF_INITIAL
     while not stop_event.is_set():
@@ -110,6 +114,7 @@ def run_source(
             if stop_event.is_set():
                 break
             slog.warning("source.eof_reconnect", sleep_s=backoff)
+            last_err = "stream EOF / reconnect"
         except Exception as e:
             last_err = str(e)
             slog.warning(
@@ -118,6 +123,10 @@ def run_source(
                 sleep_s=backoff,
                 auth=_is_auth_error(last_err),
             )
+        try:
+            db.worker_backoff(cfg.name, last_err)
+        except Exception:
+            slog.exception("worker.heartbeat_backoff_failed")
 
         ran_for = time.monotonic() - started
         if ran_for > 60:
@@ -139,6 +148,10 @@ def run_source(
         if stop_event.wait(backoff):
             break
     slog.info("pipeline.stopped")
+    try:
+        db.worker_stopped(cfg.name)
+    except Exception:
+        slog.exception("worker.heartbeat_stopped_failed")
 
 
 def _consume_stream(
@@ -151,9 +164,17 @@ def _consume_stream(
     slog,
     stop_event: threading.Event,
 ) -> None:
+    last_hb = 0.0
     for chunk in source.stream(stop_event=stop_event):
         if stop_event.is_set():
             return
+        now = time.monotonic()
+        if now - last_hb > 15.0:
+            try:
+                db.worker_heartbeat(cfg.name)
+            except Exception:
+                slog.exception("worker.heartbeat_update_failed")
+            last_hb = now
         resolved = resolver.current()
         try:
             detections = detector.analyze(
@@ -172,7 +193,7 @@ def _consume_stream(
 
         clip_path = None
         if app.save_clips:
-            clip_path = str(save_chunk_wav(chunk, app.clips_dir))
+            clip_path = str(save_chunk(chunk, app.clips_dir, fmt=app.clip_format))
 
         db.insert_detections(
             detections,

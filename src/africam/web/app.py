@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +20,7 @@ from sqlalchemy import desc, func, select
 from africam.config import AppConfig, SourceConfig, load_sources
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
-from africam.storage import Database, DetectionRow
+from africam.storage import Database, DetectionRow, WorkerHeartbeatRow
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -399,6 +404,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             return sources_partial(request)
         return JSONResponse({"ok": True, "name": name})
 
+    @app.post("/api/sources/{name}/enable")
+    def enable_source(request: Request, name: str) -> Response:
+        """Restore a soft-deleted runtime source. Supervisor picks it up within
+        SUPERVISOR_INTERVAL (15s) and starts a worker."""
+        ok = db.enable_runtime_source(name)
+        if not ok:
+            raise HTTPException(404, f"Runtime source not found: {name}")
+        if request.headers.get("hx-request"):
+            return admin_partial(request)
+        return JSONResponse({"ok": True, "name": name})
+
+    @app.post("/api/sources/{name}/disable")
+    def disable_source(request: Request, name: str) -> Response:
+        """Soft-delete a runtime source so the supervisor stops its worker.
+        Equivalent to DELETE /api/sources/{name} but returns the admin
+        partial so the /admin table can re-render in place."""
+        ok = db.soft_delete_runtime_source(name)
+        if not ok:
+            raise HTTPException(404, f"Runtime source not found: {name}")
+        if request.headers.get("hx-request"):
+            return admin_partial(request)
+        return JSONResponse({"ok": True, "name": name})
+
     @app.delete("/api/sources/{name}")
     def remove_runtime_source(request: Request, name: str) -> Response:
         ok = db.soft_delete_runtime_source(name)
@@ -485,6 +513,447 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             },
         )
 
+    def _admin_view() -> dict:
+        """Build the per-source admin payload: status + knobs + heartbeat info.
+        Combines file-defined sources (sources.toml), live runtime sources
+        (runtime_sources where deleted_at IS NULL), and soft-deleted runtime
+        sources (deleted_at NOT NULL) so the operator can re-enable them."""
+        ordered, sources_by_name, _ = _all_sources()
+        runtime_rows = db.list_runtime_sources(include_deleted=True)
+        runtime_by_name = {r.name: r for r in runtime_rows}
+        heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+
+        now = datetime.now(UTC)
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for cfg_src in ordered:
+            seen.add(cfg_src.name)
+            rt = runtime_by_name.get(cfg_src.name)
+            hb = heartbeats.get(cfg_src.name)
+            rows.append(_admin_row(cfg_src, rt, hb, deleted=False, now=now))
+        # Soft-deleted runtime sources — still listed so they can be re-enabled.
+        for rt in runtime_rows:
+            if rt.name in seen or rt.deleted_at is None:
+                continue
+            cfg_src = _runtime_to_cfg(rt)
+            hb = heartbeats.get(rt.name)
+            rows.append(_admin_row(cfg_src, rt, hb, deleted=True, now=now))
+
+        rows.sort(key=lambda r: r["name"].lower())
+        running = sum(1 for r in rows if r["status"] == "running")
+        return {"rows": rows, "running": running, "total": len(rows), "now": now}
+
+    def _admin_row(
+        cfg_src: SourceConfig,
+        runtime_row,
+        heartbeat: WorkerHeartbeatRow | None,
+        *,
+        deleted: bool,
+        now: datetime,
+    ) -> dict:
+        is_runtime = runtime_row is not None
+        if deleted:
+            status = "disabled"
+            since_s = None
+            error = None
+            state = None
+        elif heartbeat is None:
+            status = "never"
+            since_s = None
+            error = None
+            state = None
+        else:
+            hb_at = heartbeat.last_heartbeat_at
+            if hb_at.tzinfo is None:
+                hb_at = hb_at.replace(tzinfo=UTC)
+            since_s = max(0, int((now - hb_at).total_seconds()))
+            state = heartbeat.state
+            error = heartbeat.last_error
+            if state == "running" and since_s < 60:
+                status = "running"
+            elif state == "backoff":
+                status = "backoff"
+            elif state == "stopped":
+                status = "stopped"
+            else:
+                status = "stale"
+        return {
+            "name": cfg_src.name,
+            "kind": cfg_src.kind,
+            "url": cfg_src.url,
+            "lat": cfg_src.lat,
+            "lon": cfg_src.lon,
+            "min_confidence": cfg_src.min_confidence,
+            "week": cfg_src.week,
+            "multisite": cfg_src.multisite,
+            "timezone": cfg_src.timezone,
+            "is_runtime": is_runtime,
+            "deleted": deleted,
+            "status": status,
+            "state": state,
+            "since_s": since_s,
+            "error": error,
+        }
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def admin(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(request, "admin.html", _admin_view())
+
+    @app.get("/partials/admin", response_class=HTMLResponse)
+    def admin_partial(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request, "_admin_table.html", _admin_view()
+        )
+
+    @app.get("/rollup", response_class=HTMLResponse)
+    def rollup(
+        request: Request,
+        hours: int = Query(default=24, ge=1, le=24 * 14),
+        top: int = Query(default=8, ge=1, le=50),
+    ) -> HTMLResponse:
+        _, sources_by_name, _ = _all_sources()
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        with db.session() as s:
+            rows = list(
+                s.scalars(
+                    select(DetectionRow)
+                    .where(DetectionRow.started_at >= since)
+                )
+            )
+
+        by_source: dict[str, list[DetectionRow]] = {}
+        for r in rows:
+            by_source.setdefault(r.source_name, []).append(r)
+
+        # Per-source rollup with hourly histogram.
+        rollup_rows = []
+        per_source_top = []
+        for src_name in sorted(by_source):
+            src_rows = by_source[src_name]
+            species = {r.scientific_name for r in src_rows}
+            mean_conf = sum(r.confidence for r in src_rows) / len(src_rows)
+            buckets = [0] * hours
+            for r in src_rows:
+                idx = int((r.started_at.replace(tzinfo=UTC) - since).total_seconds() // 3600)
+                if 0 <= idx < hours:
+                    buckets[idx] += 1
+            peak = max(buckets) or 1
+            rollup_rows.append(
+                {
+                    "source": src_name,
+                    "count": len(src_rows),
+                    "species": len(species),
+                    "mean_conf": mean_conf,
+                    "buckets": buckets,
+                    "peak": peak,
+                }
+            )
+
+            # Top species for this source.
+            stats: dict[str, dict] = {}
+            for r in src_rows:
+                d = stats.setdefault(
+                    r.scientific_name,
+                    {
+                        "common": r.common_name,
+                        "scientific": r.scientific_name,
+                        "count": 0,
+                        "max_conf": 0.0,
+                        "best_id": r.id,
+                        "best_at": r.started_at,
+                    },
+                )
+                d["count"] += 1
+                if r.confidence > d["max_conf"]:
+                    d["max_conf"] = r.confidence
+                    d["best_id"] = r.id
+                    d["best_at"] = r.started_at
+            ordered = sorted(stats.values(), key=lambda d: d["count"], reverse=True)[:top]
+            per_source_top.append(
+                {
+                    "source": src_name,
+                    "tz": sources_by_name.get(src_name).timezone if sources_by_name.get(src_name) else "UTC",
+                    "species": ordered,
+                }
+            )
+
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        return TEMPLATES.TemplateResponse(
+            request,
+            "rollup.html",
+            {
+                "hours": hours,
+                "top": top,
+                "since": since,
+                "total": len(rows),
+                "rollup_rows": rollup_rows,
+                "per_source_top": per_source_top,
+                "source_tz": source_tz,
+                "windows": [1, 6, 24, 48, 168],
+            },
+        )
+
+    @app.get("/audition", response_class=HTMLResponse)
+    def audition(
+        request: Request,
+        source: str | None = Query(default=None),
+        species: str | None = Query(default=None, description="case-insensitive substring of common name"),
+        min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
+        max_conf: float = Query(default=1.0, ge=0.0, le=1.0),
+        label_filter: str = Query(default="unreviewed"),  # unreviewed | good | bad | unsure | all
+        order: str = Query(default="conf_desc"),  # conf_desc | conf_asc | recent
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> HTMLResponse:
+        _, sources_by_name, _ = _all_sources()
+
+        with db.session() as s:
+            stmt = (
+                select(DetectionRow)
+                .where(DetectionRow.clip_path.is_not(None))
+                .where(DetectionRow.confidence >= min_conf)
+                .where(DetectionRow.confidence <= max_conf)
+            )
+            if source:
+                stmt = stmt.where(DetectionRow.source_name == source)
+            if species:
+                stmt = stmt.where(DetectionRow.common_name.ilike(f"%{species}%"))
+            if label_filter == "unreviewed":
+                stmt = stmt.where(DetectionRow.label.is_(None))
+            elif label_filter in ("good", "bad", "unsure"):
+                stmt = stmt.where(DetectionRow.label == label_filter)
+            # 'all' adds no filter
+
+            if order == "conf_asc":
+                stmt = stmt.order_by(DetectionRow.confidence.asc())
+            elif order == "recent":
+                stmt = stmt.order_by(desc(DetectionRow.started_at))
+            else:
+                stmt = stmt.order_by(desc(DetectionRow.confidence))
+            rows = list(s.scalars(stmt.limit(limit)))
+
+            all_sources = list(
+                s.scalars(
+                    select(DetectionRow.source_name)
+                    .group_by(DetectionRow.source_name)
+                    .order_by(DetectionRow.source_name)
+                )
+            )
+            all_species = list(
+                s.scalars(
+                    select(DetectionRow.common_name)
+                    .group_by(DetectionRow.common_name)
+                    .order_by(DetectionRow.common_name)
+                )
+            )
+            label_counts = dict(
+                s.execute(
+                    select(DetectionRow.label, func.count())
+                    .group_by(DetectionRow.label)
+                ).all()
+            )
+
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        return TEMPLATES.TemplateResponse(
+            request,
+            "audition.html",
+            {
+                "rows": rows,
+                "all_sources": all_sources,
+                "all_species": all_species,
+                "source_tz": source_tz,
+                "filters": {
+                    "source": source or "",
+                    "species": species or "",
+                    "min_conf": min_conf,
+                    "max_conf": max_conf,
+                    "label_filter": label_filter,
+                    "order": order,
+                    "limit": limit,
+                },
+                "label_counts": {
+                    "good": label_counts.get("good", 0),
+                    "bad": label_counts.get("bad", 0),
+                    "unsure": label_counts.get("unsure", 0),
+                    "unreviewed": label_counts.get(None, 0),
+                },
+            },
+        )
+
+    @app.post("/api/detections/{detection_id}/label", response_class=HTMLResponse)
+    async def label_detection(
+        request: Request,
+        detection_id: int,
+    ) -> Response:
+        # Read the raw form so we can distinguish "field absent → leave the
+        # suggestion alone" from "field present but empty → clear it."
+        # FastAPI's ``Form(default=None)`` collapses both to ``None``.
+        form = await request.form()
+        value_raw = form.get("value")
+        new_label = (value_raw or "").strip() or None
+        if new_label is not None and new_label not in ("good", "bad", "unsure"):
+            raise HTTPException(400, "value must be good/bad/unsure or empty")
+        kwargs: dict = {}
+        if "suggested" in form:
+            s_raw = form.get("suggested") or ""
+            kwargs["suggested"] = s_raw.strip() or None
+        ok = db.set_detection_label(detection_id, new_label, **kwargs)
+        if not ok:
+            raise HTTPException(404, "detection not found")
+        if request.headers.get("hx-request"):
+            with db.session() as s:
+                row = s.get(DetectionRow, detection_id)
+            _, sources_by_name, _ = _all_sources()
+            source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+            return TEMPLATES.TemplateResponse(
+                request,
+                "_audition_row.html",
+                {"r": row, "source_tz": source_tz},
+            )
+        return JSONResponse({"ok": True, "id": detection_id, "label": new_label})
+
+    SPEC_SIZES = {
+        "small": "240x60",   # inline conf-bar background
+        "large": "900x220",  # popout modal
+    }
+
+    # Xeno-Canto reference fetch (proxied + cached so the browser doesn't hit
+    # the public API directly — gives us caching, error normalization, and no
+    # CORS surprises).
+    _xc_cache: dict[str, tuple[float, list[dict]]] = {}
+    _XC_TTL_SECONDS = 6 * 3600
+
+    def _https(url: str | None) -> str | None:
+        """Xeno-Canto returns protocol-relative URLs (``//xeno-canto.org/...``).
+        Force https so the browser doesn't downgrade or block them."""
+        if not url:
+            return None
+        return "https:" + url if url.startswith("//") else url
+
+    @app.get("/api/xeno_canto")
+    def xeno_canto(
+        species: str = Query(..., min_length=2, max_length=200),
+        limit: int = Query(default=3, ge=1, le=8),
+    ) -> JSONResponse:
+        """Top reference recordings for a species from xeno-canto.org. Cached
+        in-memory for 6h per species string. Always returns a ``search_url``
+        the UI can link to; ``recordings`` is only populated when an API key
+        is configured via ``AFRICAM_XENO_CANTO_KEY``."""
+        species_clean = species.strip()
+        search_url = (
+            "https://xeno-canto.org/explore?"
+            + urllib.parse.urlencode({"query": species_clean})
+        )
+        api_key = (cfg.xeno_canto_key or "").strip()
+        if not api_key:
+            return JSONResponse(
+                {"recordings": [], "search_url": search_url, "needs_key": True}
+            )
+
+        cache_key = species_clean.lower()
+        now = time.monotonic()
+        cached = _xc_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return JSONResponse(
+                {
+                    "recordings": cached[1][:limit],
+                    "search_url": search_url,
+                    "needs_key": False,
+                }
+            )
+
+        # XC v3 only accepts tagged queries (no free text). Build one from the
+        # input: "Genus species" → gen:Genus sp:species; anything else is
+        # treated as an English-name search (en:).
+        tokens = species_clean.split()
+        if (
+            len(tokens) == 2
+            and tokens[0][:1].isupper()
+            and tokens[1][:1].islower()
+        ):
+            tag_query = f"gen:{tokens[0]} sp:{tokens[1]} q_gt:C"
+        else:
+            tag_query = f'en:"{species_clean}" q_gt:C'
+
+        params = urllib.parse.urlencode({"query": tag_query, "key": api_key})
+        url = f"https://xeno-canto.org/api/3/recordings?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "africam-bird/0.1"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 (https only)
+                data = json.load(resp)
+        except Exception as e:  # network, timeout, JSON, etc.
+            raise HTTPException(502, f"xeno-canto fetch failed: {e}") from e
+
+        recs_in = data.get("recordings") or []
+        recs_out: list[dict] = []
+        for r in recs_in:
+            sono = r.get("sono") or {}
+            recs_out.append(
+                {
+                    "id": r.get("id"),
+                    "en": r.get("en") or "",
+                    "sci": f"{r.get('gen','')} {r.get('sp','')}".strip(),
+                    "rec": r.get("rec") or "",
+                    "cnt": r.get("cnt") or "",
+                    "loc": r.get("loc") or "",
+                    "type": r.get("type") or "",
+                    "length": r.get("length") or "",
+                    "q": r.get("q") or "",
+                    "url": _https(r.get("url")),
+                    "file": _https(r.get("file")),
+                    "sono_small": _https(sono.get("small")),
+                    "sono_med": _https(sono.get("med")),
+                }
+            )
+        _xc_cache[cache_key] = (now + _XC_TTL_SECONDS, recs_out)
+        return JSONResponse(
+            {
+                "recordings": recs_out[:limit],
+                "search_url": search_url,
+                "needs_key": False,
+            }
+        )
+
+    @app.get("/spectrograms/{detection_id}.png")
+    def spectrogram(
+        detection_id: int,
+        size: str = Query(default="small"),
+    ) -> Response:
+        """PNG spectrogram of a detection's clip. Generated lazily on first
+        request via ffmpeg's showspectrumpic filter and cached next to the
+        WAV. ``size=small`` is used inline; ``large`` for the popout view."""
+        if size not in SPEC_SIZES:
+            raise HTTPException(400, "size must be 'small' or 'large'")
+        with db.session() as s:
+            row = s.get(DetectionRow, detection_id)
+            if row is None or row.clip_path is None:
+                raise HTTPException(404, "no clip for this detection")
+            wav = Path(row.clip_path).resolve()
+        try:
+            wav.relative_to(clips_root)
+        except ValueError as e:
+            raise HTTPException(403, "clip outside allowed root") from e
+        if not wav.is_file():
+            raise HTTPException(404, "clip file missing")
+
+        suffix = "" if size == "small" else f".{size}"
+        png = wav.parent / f"{wav.stem}{suffix}.png"
+        if not png.exists():
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-i", str(wav),
+                        "-lavfi", f"showspectrumpic=s={SPEC_SIZES[size]}:legend=0:scale=log:color=fire",
+                        str(png),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=15,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+                raise HTTPException(500, f"failed to render spectrogram: {e}") from e
+        return FileResponse(png, media_type="image/png")
+
     @app.get("/clips/{detection_id}")
     def clip(detection_id: int) -> FileResponse:
         with db.session() as s:
@@ -498,7 +967,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Clip outside allowed root") from e
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Clip file missing")
-        return FileResponse(path, media_type="audio/wav")
+        media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac"}
+        return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "audio/wav"))
 
     return app
 

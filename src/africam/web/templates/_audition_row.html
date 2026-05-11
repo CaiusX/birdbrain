@@ -1,0 +1,55 @@
+{# expects: r (DetectionRow), source_tz (dict[str,str]) #}
+{% set tz = source_tz.get(r.source_name, 'UTC') %}
+{% set lbl = r.label %}
+<li id="audit-{{ r.id }}" class="px-5 py-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-center hover:bg-zinc-800/30">
+  <div class="md:col-span-5 min-w-0">
+    <div class="text-sm font-medium text-zinc-100 truncate">
+      {{ r.common_name }}
+      <span class="text-xs italic text-zinc-500 font-normal ml-1">{{ r.scientific_name }}</span>
+    </div>
+    <div class="text-xs text-zinc-500 truncate">
+      <code class="text-zinc-400">{{ r.source_name }}</code>{% if r.site %} · <span class="text-zinc-400">{{ r.site }}</span>{% endif %}
+      · <span class="tabular-nums" title="{{ r.started_at | localtime('UTC') }} UTC">{{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }}</span>
+    </div>
+  </div>
+
+  <div class="md:col-span-5">
+    <button type="button"
+            data-spectrogram-trigger
+            data-detection-id="{{ r.id }}"
+            data-species="{{ r.common_name }}"
+            data-scientific="{{ r.scientific_name }}"
+            data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
+            data-label="{{ lbl or '' }}"
+            data-suggested="{{ r.suggested_species or '' }}"
+            class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
+            style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
+            title="click to play with playhead">
+      <img src="/spectrograms/{{ r.id }}.png" alt=""
+           class="absolute inset-0 w-full h-full object-cover pointer-events-none"
+           onerror="this.style.display='none'"
+           loading="lazy">
+      <span class="absolute inset-0 flex items-center justify-center text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
+        {{ "%.2f"|format(r.confidence) }}
+      </span>
+    </button>
+  </div>
+
+  <div class="md:col-span-2 flex items-center justify-end min-w-0">
+    {% if lbl == 'good' %}
+      <span class="px-2 py-0.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/40">✓ good</span>
+    {% elif lbl == 'bad' %}
+      <span class="px-2 py-0.5 rounded text-xs font-medium bg-rose-500/15 text-rose-300 border border-rose-500/40 truncate"
+            {% if r.suggested_species %}title="suggested: {{ r.suggested_species }}"{% endif %}>
+        ✗ bad{% if r.suggested_species %} → <span class="text-rose-200">{{ r.suggested_species }}</span>{% endif %}
+      </span>
+    {% elif lbl == 'unsure' %}
+      <span class="px-2 py-0.5 rounded text-xs font-medium bg-amber-500/15 text-amber-300 border border-amber-500/40 truncate"
+            {% if r.suggested_species %}title="suggested: {{ r.suggested_species }}"{% endif %}>
+        ? unsure{% if r.suggested_species %} → <span class="text-amber-200">{{ r.suggested_species }}</span>{% endif %}
+      </span>
+    {% else %}
+      <span class="text-xs text-zinc-600">unreviewed</span>
+    {% endif %}
+  </div>
+</li>

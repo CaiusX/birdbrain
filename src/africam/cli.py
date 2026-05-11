@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import typer
+
+# Windows consoles default to cp1252 under uv subprocesses, which can't encode
+# the unicode block characters used in the summary sparkline. Reconfigure once
+# at import so rich can emit utf-8 unimpeded.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (ValueError, OSError):
+            pass
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import desc, select
@@ -11,7 +24,7 @@ from sqlalchemy import desc, select
 from africam.config import AppConfig, load_sources
 from africam.logging import configure as configure_logging
 from africam.pipeline import run_all
-from africam.storage import Database, DetectionRow
+from africam.storage import Database, DetectionRow, RuntimeSourceRow
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
@@ -69,6 +82,130 @@ def detections(
 
 
 @app.command()
+def summary(
+    hours: Annotated[int, typer.Option("--hours", "-H", help="Look-back window in hours.")] = 24,
+    source: Annotated[
+        list[str] | None,
+        typer.Option("--source", help="Restrict to one or more sources (repeatable)."),
+    ] = None,
+    top: Annotated[int, typer.Option("--top", help="Top N species per source.")] = 8,
+    samples: Annotated[int, typer.Option("--samples", help="Clip samples per confidence bucket.")] = 2,
+) -> None:
+    """Per-source rollup + top species + sample clip paths for spot-checking."""
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+
+    tz_by_source: dict[str, str] = {}
+    try:
+        for s_cfg in load_sources(cfg.sources_file):
+            tz_by_source[s_cfg.name] = s_cfg.timezone
+    except FileNotFoundError:
+        pass
+    with db.session() as s:
+        for row in s.scalars(select(RuntimeSourceRow)):
+            tz_by_source.setdefault(row.name, row.timezone or "UTC")
+
+    since = datetime.now(UTC) - timedelta(hours=hours)
+    base = select(DetectionRow).where(DetectionRow.started_at >= since)
+    if source:
+        base = base.where(DetectionRow.source_name.in_(source))
+
+    with db.session() as s:
+        rows: list[DetectionRow] = list(s.scalars(base))
+
+    if not rows:
+        console.print(f"[yellow]No detections in the last {hours}h.[/yellow]")
+        return
+
+    console.rule(f"[bold]Last {hours}h[/bold]  ({since.strftime('%Y-%m-%d %H:%MZ')} → now)  •  {len(rows)} detections")
+
+    by_source: dict[str, list[DetectionRow]] = {}
+    for r in rows:
+        by_source.setdefault(r.source_name, []).append(r)
+
+    rollup = Table(title="Per-source rollup")
+    rollup.add_column("Source")
+    rollup.add_column("Count", justify="right")
+    rollup.add_column("Species", justify="right")
+    rollup.add_column("Mean conf", justify="right")
+    rollup.add_column(f"Hourly (last {hours}h)", style="cyan")
+    spark_chars = " ▁▂▃▄▅▆▇█"
+    for src_name, src_rows in sorted(by_source.items()):
+        species = {r.scientific_name for r in src_rows}
+        mean_conf = sum(r.confidence for r in src_rows) / len(src_rows)
+        buckets = [0] * hours
+        for r in src_rows:
+            idx = int((r.started_at.replace(tzinfo=UTC) - since).total_seconds() // 3600)
+            if 0 <= idx < hours:
+                buckets[idx] += 1
+        peak = max(buckets) or 1
+        spark = "".join(spark_chars[min(len(spark_chars) - 1, int(b / peak * (len(spark_chars) - 1)))] for b in buckets)
+        rollup.add_row(src_name, str(len(src_rows)), str(len(species)), f"{mean_conf:.2f}", spark)
+    console.print(rollup)
+
+    for src_name, src_rows in sorted(by_source.items()):
+        tz = ZoneInfo(tz_by_source.get(src_name, "UTC"))
+        species_stats: dict[str, dict] = {}
+        for r in src_rows:
+            d = species_stats.setdefault(
+                r.scientific_name,
+                {"common": r.common_name, "count": 0, "max": 0.0, "max_row": r},
+            )
+            d["count"] += 1
+            if r.confidence > d["max"]:
+                d["max"] = r.confidence
+                d["max_row"] = r
+        ordered = sorted(species_stats.values(), key=lambda d: d["count"], reverse=True)[:top]
+
+        t = Table(title=f"[bold]{src_name}[/bold] — top {len(ordered)} species  (tz: {tz.key})")
+        t.add_column("Species")
+        t.add_column("Scientific", style="dim")
+        t.add_column("Count", justify="right")
+        t.add_column("Max conf", justify="right")
+        t.add_column("Best clip (local time)")
+        for d in ordered:
+            best: DetectionRow = d["max_row"]
+            local = best.started_at.replace(tzinfo=UTC).astimezone(tz)
+            clip = best.clip_path or "—"
+            t.add_row(
+                d["common"],
+                best.scientific_name,
+                str(d["count"]),
+                f"{d['max']:.2f}",
+                f"{local.strftime('%m-%d %H:%M')}  {clip}",
+            )
+        console.print(t)
+
+        buckets_def = [
+            ("low ", lambda c: c < 0.6),
+            ("mid ", lambda c: 0.6 <= c < 0.8),
+            ("high", lambda c: c >= 0.8),
+        ]
+        audit = Table(title=f"{src_name} — audition samples")
+        audit.add_column("Bucket")
+        audit.add_column("Conf", justify="right")
+        audit.add_column("Species")
+        audit.add_column("Local time")
+        audit.add_column("Clip", style="dim")
+        for label, pred in buckets_def:
+            picks = [r for r in src_rows if r.clip_path and pred(r.confidence)]
+            if not picks:
+                audit.add_row(label, "—", "—", "—", "(none)")
+                continue
+            step = max(1, len(picks) // samples)
+            for r in picks[::step][:samples]:
+                local = r.started_at.replace(tzinfo=UTC).astimezone(tz)
+                audit.add_row(
+                    label,
+                    f"{r.confidence:.2f}",
+                    r.common_name,
+                    local.strftime("%m-%d %H:%M:%S"),
+                    r.clip_path or "",
+                )
+        console.print(audit)
+
+
+@app.command()
 def probe(
     sources_file: Annotated[
         Path | None,
@@ -110,6 +247,107 @@ def probe(
                 console.print(
                     f"  {d.common_name} ({d.scientific_name})  conf={d.confidence:.2f}"
                 )
+
+
+@app.command()
+def prune(
+    days: Annotated[int, typer.Option("--days", "-d", help="Delete clip files older than this many days.")] = 14,
+    keep_labelled: Annotated[bool, typer.Option("--keep-labelled/--no-keep-labelled")] = True,
+    keep_pngs: Annotated[bool, typer.Option("--keep-pngs/--delete-pngs", help="Keep cached spectrogram PNGs (they regenerate on demand).")] = True,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the y/N confirmation prompt.")] = False,
+) -> None:
+    """Delete old detection clips to free disk. DB rows are kept; clip_path is
+    NULLed for any row whose audio file gets removed."""
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    stmt = (
+        select(DetectionRow.id, DetectionRow.clip_path, DetectionRow.label, DetectionRow.source_name, DetectionRow.confidence)
+        .where(DetectionRow.started_at < cutoff)
+        .where(DetectionRow.clip_path.is_not(None))
+    )
+    if keep_labelled:
+        stmt = stmt.where(DetectionRow.label.is_(None))
+
+    with db.session() as s:
+        candidates = list(s.execute(stmt))
+
+    # Group by clip_path so we delete each file once and NULL out every row
+    # that references it.
+    by_clip: dict[str, list[int]] = {}
+    by_source: dict[str, int] = {}
+    for row in candidates:
+        by_clip.setdefault(row.clip_path, []).append(row.id)
+        by_source[row.source_name] = by_source.get(row.source_name, 0) + 1
+
+    total_bytes = 0
+    missing = 0
+    for clip in by_clip:
+        p = Path(clip)
+        if p.is_file():
+            total_bytes += p.stat().st_size
+            if not keep_pngs:
+                for png in (p.with_suffix(".png"), p.parent / f"{p.stem}.large.png"):
+                    if png.is_file():
+                        total_bytes += png.stat().st_size
+        else:
+            missing += 1
+
+    summary = Table(title=f"Prune candidates (older than {days}d)")
+    summary.add_column("metric")
+    summary.add_column("value", justify="right")
+    summary.add_row("rows affected", f"{len(candidates):,}")
+    summary.add_row("distinct clips", f"{len(by_clip):,}")
+    summary.add_row("missing on disk", f"{missing:,}")
+    summary.add_row("would free", f"{total_bytes/1024/1024:.1f} MB")
+    summary.add_row("keep labelled", "yes" if keep_labelled else "no")
+    summary.add_row("keep PNG cache", "yes" if keep_pngs else "no")
+    console.print(summary)
+    if by_source:
+        per_src = Table(title="By source")
+        per_src.add_column("source")
+        per_src.add_column("rows", justify="right")
+        for src in sorted(by_source):
+            per_src.add_row(src, f"{by_source[src]:,}")
+        console.print(per_src)
+
+    if not by_clip:
+        console.print("[green]nothing to prune.[/green]")
+        return
+
+    if not yes:
+        ans = typer.prompt("delete? [y/N]", default="N", show_default=False)
+        if ans.strip().lower() not in {"y", "yes"}:
+            console.print("[yellow]aborted.[/yellow]")
+            raise typer.Exit(code=1)
+
+    deleted_files = 0
+    deleted_bytes = 0
+    nulled_rows = 0
+    with db.session() as s, s.begin():
+        for clip, ids in by_clip.items():
+            p = Path(clip)
+            if p.is_file():
+                deleted_bytes += p.stat().st_size
+                p.unlink()
+                deleted_files += 1
+            if not keep_pngs:
+                for png in (p.with_suffix(".png"), p.parent / f"{p.stem}.large.png"):
+                    if png.is_file():
+                        deleted_bytes += png.stat().st_size
+                        png.unlink()
+            for det_id in ids:
+                row = s.get(DetectionRow, det_id)
+                if row is not None:
+                    row.clip_path = None
+                    nulled_rows += 1
+
+    console.print(
+        f"[green]deleted {deleted_files:,} clip files[/green] "
+        f"({deleted_bytes/1024/1024:.1f} MB), "
+        f"NULLed clip_path on {nulled_rows:,} rows."
+    )
 
 
 @app.command()

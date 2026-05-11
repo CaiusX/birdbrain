@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Africam · rollup{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Rollup
+      <span class="text-zinc-200 ml-2">{{ total }}</span>
+      <span class="text-zinc-500 text-xs ml-1">detections in last {{ hours }}h</span>
+    </h2>
+    <div class="flex gap-1 text-xs">
+      <span class="text-zinc-500 self-center mr-1">window:</span>
+      {% for w in windows %}
+        {% set label = (w ~ 'h') if w < 48 else ((w // 24) ~ 'd') %}
+        {% if w == hours %}
+          <span class="px-2 py-0.5 rounded bg-zinc-700 text-zinc-100">{{ label }}</span>
+        {% else %}
+          <a href="/rollup?hours={{ w }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">{{ label }}</a>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if rollup_rows %}
+    <table class="w-full text-sm">
+      <thead class="text-zinc-400 text-xs uppercase tracking-wider">
+        <tr class="border-b border-zinc-800">
+          <th class="text-left font-medium px-5 py-2">Source</th>
+          <th class="text-right font-medium px-5 py-2">Count</th>
+          <th class="text-right font-medium px-5 py-2">Species</th>
+          <th class="text-right font-medium px-5 py-2">Mean conf</th>
+          <th class="text-left font-medium px-5 py-2">Hourly</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-zinc-800">
+        {% for r in rollup_rows %}
+          <tr class="hover:bg-zinc-800/40">
+            <td class="px-5 py-3 font-medium">
+              <a href="/audition?source={{ r.source }}" class="hover:text-emerald-300">{{ r.source }}</a>
+            </td>
+            <td class="px-5 py-3 text-right tabular-nums">{{ r.count }}</td>
+            <td class="px-5 py-3 text-right tabular-nums">{{ r.species }}</td>
+            <td class="px-5 py-3 text-right tabular-nums">{{ "%.2f"|format(r.mean_conf) }}</td>
+            <td class="px-5 py-3">
+              <div class="flex items-end gap-px h-7" title="oldest hour → most recent">
+                {% for b in r.buckets %}
+                  {% set h = (b / r.peak * 100) | round(0) | int %}
+                  <div class="w-1.5 bg-emerald-500/70 rounded-sm"
+                       style="height: {{ h if h > 0 else 2 }}%; min-height: 2px;"
+                       title="{{ b }} detections"></div>
+                {% endfor %}
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">No detections in the last {{ hours }}h.</p>
+  {% endif %}
+</section>
+
+{% for s in per_source_top %}
+  <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
+    <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+      <h3 class="text-sm uppercase tracking-wider text-zinc-400">
+        {{ s.source }}
+        <span class="text-zinc-500 text-xs ml-1">top {{ s.species | length }} species</span>
+      </h3>
+      <span class="text-xs text-zinc-500">{{ s.tz | tz_abbr }}</span>
+    </div>
+    {% if s.species %}
+      <table class="w-full text-sm">
+        <thead class="text-zinc-400 text-xs uppercase tracking-wider">
+          <tr class="border-b border-zinc-800">
+            <th class="text-left font-medium px-5 py-2">Species</th>
+            <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Scientific</th>
+            <th class="text-right font-medium px-5 py-2">Count</th>
+            <th class="text-right font-medium px-5 py-2">Max conf</th>
+            <th class="text-left font-medium px-5 py-2">Best clip</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-zinc-800">
+          {% for sp in s.species %}
+            <tr class="hover:bg-zinc-800/40">
+              <td class="px-5 py-2 font-medium">{{ sp.common }}</td>
+              <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ sp.scientific }}</td>
+              <td class="px-5 py-2 text-right tabular-nums">{{ sp.count }}</td>
+              <td class="px-5 py-2 text-right tabular-nums">
+                <span class="inline-block w-16 conf-bar rounded px-2 py-0.5 text-xs"
+                      style="--w: {{ (sp.max_conf * 100)|round(0)|int }}%;">
+                  {{ "%.2f"|format(sp.max_conf) }}
+                </span>
+              </td>
+              <td class="px-5 py-2 text-zinc-400">
+                <span class="text-xs tabular-nums" title="{{ sp.best_at | localtime('UTC') }} UTC">
+                  {{ sp.best_at | localtime(s.tz, "%m-%d %H:%M") }}
+                </span>
+                <audio src="/clips/{{ sp.best_id }}" controls preload="none" class="inline-block align-middle ml-2 h-7"></audio>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="text-zinc-500 text-sm px-5 py-4">No species in window.</p>
+    {% endif %}
+  </section>
+{% endfor %}
+{% endblock %}
