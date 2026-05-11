@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -62,6 +62,23 @@ class RuntimeSourceRow(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SpeciesNoteRow(Base):
+    """A short curated comment about a species — displayed in the audition
+    modal whenever a detection of that species is opened. Used to flag known
+    false-positive-prone species, biome plausibility, ID confusions, etc.
+    Keyed by scientific name since BirdNET reports it consistently."""
+
+    __tablename__ = "species_notes"
+
+    scientific_name: Mapped[str] = mapped_column(String(256), primary_key=True)
+    common_name: Mapped[str] = mapped_column(String(256))
+    note: Mapped[str] = mapped_column(Text)
+    # Optional flag that styles the banner in the modal.
+    # 'reliable' (green) | 'suspect' (amber) | 'rare' (blue) | NULL (neutral)
+    tag: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class WorkerHeartbeatRow(Base):

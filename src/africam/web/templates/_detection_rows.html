@@ -1,50 +1,86 @@
+{# Detection table for the live page. Each conf bar is a clickable spectrogram
+   that opens the shared modal (defined in _spectrogram_modal.html).
+   Expects: rows, source_tz; optionally note_tag_by_sci, palette_for_tag,
+   default_palette (so the spectrogram colour reflects the species tag). #}
 {% if rows %}
   <table class="w-full text-sm">
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
       <tr class="border-b border-zinc-800">
         <th class="text-left font-medium px-5 py-2">Time (local)</th>
         <th class="text-left font-medium px-5 py-2">Source</th>
-        <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Site</th>
         <th class="text-left font-medium px-5 py-2">Species</th>
         <th class="text-left font-medium px-5 py-2 hidden lg:table-cell">Scientific</th>
-        <th class="text-right font-medium px-5 py-2">Confidence</th>
-        <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Clip</th>
+        <th class="text-right font-medium px-5 py-2">Confidence · clip</th>
+        <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Label</th>
       </tr>
     </thead>
     <tbody class="divide-y divide-zinc-800">
       {% for r in rows %}
+        {% set tz = source_tz.get(r.source_name, "UTC") %}
+        {% set sp_tag = (note_tag_by_sci or {}).get(r.scientific_name) %}
+        {% set sp_palette = (palette_for_tag or {}).get(sp_tag, default_palette or 'fire') %}
+        {% set lbl = r.label %}
         <tr class="hover:bg-zinc-800/40">
-          {% set tz = source_tz.get(r.source_name, "UTC") %}
           <td class="px-5 py-2 tabular-nums text-zinc-400" title="{{ r.started_at | localtime('UTC') }} UTC">
             {{ r.started_at | localtime(tz) }}
             <span class="text-xs text-zinc-600 ml-1">{{ tz | tz_abbr }}</span>
           </td>
-          <td class="px-5 py-2"><code class="text-zinc-300">{{ r.source_name }}</code></td>
-          <td class="px-5 py-2 hidden md:table-cell">
+          <td class="px-5 py-2">
+            <code class="text-zinc-300">{{ r.source_name }}</code>
             {% if r.site %}
-              <span class="font-medium text-zinc-200">{{ r.site }}</span>
-              {% if r.latitude is not none and r.longitude is not none %}
-                <span class="text-zinc-500 text-xs ml-1 tabular-nums">
-                  {{ "%.2f"|format(r.latitude) }},{{ "%.2f"|format(r.longitude) }}
-                </span>
-              {% endif %}
-            {% else %}
-              <span class="text-zinc-600">—</span>
+              <span class="text-zinc-500"> · </span>
+              <span class="text-zinc-200" title="{% if r.latitude is not none and r.longitude is not none %}{{ '%.3f'|format(r.latitude) }}, {{ '%.3f'|format(r.longitude) }}{% endif %}">{{ r.site }}</span>
             {% endif %}
           </td>
           <td class="px-5 py-2 font-medium">{{ r.common_name }}</td>
           <td class="px-5 py-2 italic text-zinc-400 hidden lg:table-cell">{{ r.scientific_name }}</td>
-          <td class="px-5 py-2 text-right tabular-nums">
-            <span class="inline-block w-24 conf-bar rounded px-2 py-0.5 text-xs"
-                  style="--w: {{ (r.confidence * 100)|round(0)|int }}%;">
-              {{ "%.2f"|format(r.confidence) }}
-            </span>
+          <td class="px-5 py-2 text-right">
+            {% if r.clip_path %}
+              <button type="button"
+                      data-spectrogram-trigger
+                      data-detection-id="{{ r.id }}"
+                      data-species="{{ r.common_name }}"
+                      data-scientific="{{ r.scientific_name }}"
+                      data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
+                      data-label="{{ lbl or '' }}"
+                      data-suggested="{{ r.suggested_species or '' }}"
+                      data-palette="{{ sp_palette }}"
+                      class="relative inline-block w-40 h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition align-middle"
+                      style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
+                      title="click to play with playhead">
+                <img src="/spectrograms/{{ r.id }}.png?p={{ sp_palette }}" alt=""
+                     class="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                     onerror="this.style.display='none'"
+                     loading="lazy">
+                <span class="absolute inset-0 flex items-center justify-center text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
+                  {{ "%.2f"|format(r.confidence) }}
+                </span>
+              </button>
+            {% else %}
+              <span class="inline-block w-40 h-7 rounded conf-bar align-middle"
+                    style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
+                    title="no clip saved for this detection">
+                <span class="text-xs tabular-nums text-white font-medium leading-7 inline-block w-full text-center">
+                  {{ "%.2f"|format(r.confidence) }}
+                </span>
+              </span>
+            {% endif %}
           </td>
           <td class="px-5 py-2 hidden md:table-cell">
-            {% if r.clip_path %}
-              <audio controls preload="none" class="h-7" src="/clips/{{ r.id }}"></audio>
+            {% if lbl == 'good' %}
+              <span class="px-2 py-0.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/40">✓ good</span>
+            {% elif lbl == 'bad' %}
+              <span class="px-2 py-0.5 rounded text-xs font-medium bg-rose-500/15 text-rose-300 border border-rose-500/40"
+                    {% if r.suggested_species %}title="→ {{ r.suggested_species }}"{% endif %}>
+                ✗ bad{% if r.suggested_species %} → <span class="text-rose-200">{{ r.suggested_species }}</span>{% endif %}
+              </span>
+            {% elif lbl == 'unsure' %}
+              <span class="px-2 py-0.5 rounded text-xs font-medium bg-amber-500/15 text-amber-300 border border-amber-500/40"
+                    {% if r.suggested_species %}title="→ {{ r.suggested_species }}"{% endif %}>
+                ? unsure{% if r.suggested_species %} → <span class="text-amber-200">{{ r.suggested_species }}</span>{% endif %}
+              </span>
             {% else %}
-              <span class="text-zinc-600">—</span>
+              <span class="text-xs text-zinc-600">—</span>
             {% endif %}
           </td>
         </tr>

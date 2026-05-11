@@ -14,6 +14,7 @@ from africam.storage.models import (
     DetectionRow,
     RuntimeSourceRow,
     SourceStateRow,
+    SpeciesNoteRow,
     WorkerHeartbeatRow,
 )
 
@@ -203,6 +204,46 @@ class Database:
     def list_worker_heartbeats(self) -> list[WorkerHeartbeatRow]:
         with self._Session() as s:
             return list(s.scalars(select(WorkerHeartbeatRow)))
+
+    # --- Species notes (curated commentary shown in audition) ---
+
+    def get_species_note(self, scientific_name: str) -> SpeciesNoteRow | None:
+        with self._Session() as s:
+            return s.get(SpeciesNoteRow, scientific_name)
+
+    def set_species_note(
+        self,
+        scientific_name: str,
+        *,
+        common_name: str = "",
+        note: str,
+        tag: str | None = None,
+    ) -> SpeciesNoteRow:
+        if tag is not None and tag not in ("reliable", "suspect", "rare"):
+            raise ValueError(f"invalid tag: {tag!r}")
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                row = SpeciesNoteRow(scientific_name=scientific_name)
+                s.add(row)
+            if common_name:
+                row.common_name = common_name
+            row.note = note
+            row.tag = tag
+            row.updated_at = datetime.now(UTC)
+        return row
+
+    def delete_species_note(self, scientific_name: str) -> bool:
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                return False
+            s.delete(row)
+        return True
+
+    def list_species_notes(self) -> list[SpeciesNoteRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(SpeciesNoteRow)))
 
     # --- Runtime source enable (undo soft-delete) ---
 

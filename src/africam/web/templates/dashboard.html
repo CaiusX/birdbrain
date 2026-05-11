@@ -145,6 +145,8 @@
   </div>
 </section>
 
+{% include "_spectrogram_modal.html" %}
+
 <script>
   const TILES = {{ tiles_json | tojson }};
   const SITES = {{ sites_json | tojson }};

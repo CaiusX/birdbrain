@@ -20,7 +20,7 @@ from sqlalchemy import desc, func, select
 from africam.config import AppConfig, SourceConfig, load_sources
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
-from africam.storage import Database, DetectionRow, WorkerHeartbeatRow
+from africam.storage import Database, DetectionRow, SpeciesNoteRow, WorkerHeartbeatRow
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -160,6 +160,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
         return out
 
+    def _note_tag_context() -> dict:
+        """Shared context for any page that renders detection rows with
+        palette-aware spectrograms. Keeps the template-side lookup tidy."""
+        with db.session() as s:
+            tag_by_sci = {
+                n.scientific_name: n.tag for n in s.scalars(select(SpeciesNoteRow))
+            }
+            all_species = list(
+                s.scalars(
+                    select(DetectionRow.common_name)
+                    .group_by(DetectionRow.common_name)
+                    .order_by(DetectionRow.common_name)
+                )
+            )
+        return {
+            "note_tag_by_sci": tag_by_sci,
+            "palette_for_tag": {
+                k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
+            },
+            "default_palette": SPEC_PALETTE_FOR_TAG[None],
+            "all_species": all_species,
+        }
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
         _, sources_by_name, tiles = _all_sources()
@@ -224,6 +247,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "sites_json": sites_for_map,
                 "site_states": _site_states(tiles, sources_by_name),
                 "source_tz": source_tz,
+                **_note_tag_context(),
             },
         )
 
@@ -247,7 +271,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return TEMPLATES.TemplateResponse(
             request,
             "_detection_rows.html",
-            {"rows": rows, "selected_source": source, "source_tz": source_tz},
+            {
+                "rows": rows,
+                "selected_source": source,
+                "source_tz": source_tz,
+                **_note_tag_context(),
+            },
         )
 
     @app.get("/partials/site/{name}", response_class=HTMLResponse)
@@ -701,6 +730,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
         max_conf: float = Query(default=1.0, ge=0.0, le=1.0),
         label_filter: str = Query(default="unreviewed"),  # unreviewed | good | bad | unsure | all
+        note_tag: str = Query(default="any"),  # any | reliable | suspect | rare | untagged
         order: str = Query(default="conf_desc"),  # conf_desc | conf_asc | recent
         limit: int = Query(default=50, ge=1, le=500),
     ) -> HTMLResponse:
@@ -722,6 +752,25 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             elif label_filter in ("good", "bad", "unsure"):
                 stmt = stmt.where(DetectionRow.label == label_filter)
             # 'all' adds no filter
+
+            if note_tag in ("reliable", "suspect", "rare"):
+                stmt = stmt.where(
+                    DetectionRow.scientific_name.in_(
+                        select(SpeciesNoteRow.scientific_name).where(
+                            SpeciesNoteRow.tag == note_tag
+                        )
+                    )
+                )
+            elif note_tag == "untagged":
+                # Either no note at all, or a note with NULL tag (neutral).
+                stmt = stmt.where(
+                    DetectionRow.scientific_name.notin_(
+                        select(SpeciesNoteRow.scientific_name).where(
+                            SpeciesNoteRow.tag.is_not(None)
+                        )
+                    )
+                )
+            # 'any' adds no filter
 
             if order == "conf_asc":
                 stmt = stmt.order_by(DetectionRow.confidence.asc())
@@ -751,6 +800,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     .group_by(DetectionRow.label)
                 ).all()
             )
+            # Species → note tag, so each row can encode its palette in the
+            # spectrogram URL (browser cache busts on re-tag without a full
+            # page reload).
+            note_tag_by_sci = {
+                n.scientific_name: n.tag for n in s.scalars(select(SpeciesNoteRow))
+            }
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         return TEMPLATES.TemplateResponse(
@@ -760,6 +815,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "rows": rows,
                 "all_sources": all_sources,
                 "all_species": all_species,
+                "note_tag_by_sci": note_tag_by_sci,
+                "palette_for_tag": {
+                    k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
+                },
+                "default_palette": SPEC_PALETTE_FOR_TAG[None],
                 "source_tz": source_tz,
                 "filters": {
                     "source": source or "",
@@ -767,6 +827,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "min_conf": min_conf,
                     "max_conf": max_conf,
                     "label_filter": label_filter,
+                    "note_tag": note_tag,
                     "order": order,
                     "limit": limit,
                 },
@@ -802,18 +863,44 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if request.headers.get("hx-request"):
             with db.session() as s:
                 row = s.get(DetectionRow, detection_id)
+                note = s.get(SpeciesNoteRow, row.scientific_name) if row else None
             _, sources_by_name, _ = _all_sources()
             source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
             return TEMPLATES.TemplateResponse(
                 request,
                 "_audition_row.html",
-                {"r": row, "source_tz": source_tz},
+                {
+                    "r": row,
+                    "source_tz": source_tz,
+                    "note_tag_by_sci": {row.scientific_name: note.tag} if note else {},
+                    "palette_for_tag": {
+                        k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
+                    },
+                    "default_palette": SPEC_PALETTE_FOR_TAG[None],
+                },
             )
         return JSONResponse({"ok": True, "id": detection_id, "label": new_label})
 
     SPEC_SIZES = {
         "small": "240x60",   # inline conf-bar background
         "large": "900x220",  # popout modal
+    }
+
+    # Most birds live below ~10 kHz. ffmpeg's default showspectrumpic axis is
+    # 0..Nyquist (24 kHz for our 48 kHz audio), so a Hadada Ibis at ~1 kHz
+    # gets squashed into the bottom 1/24. Cap at 12 kHz and use log frequency
+    # scaling for extra emphasis on the low band.
+    SPEC_FILTER_BASE = "legend=0:scale=log:fscale=log:start=80:stop=12000"
+
+    # ffmpeg showspectrumpic color palettes per species-note tag — at-a-glance
+    # status colour without changing the audio data. 'fire' is the default
+    # warm palette used for untagged species and matches what we generated
+    # before notes existed.
+    SPEC_PALETTE_FOR_TAG: dict[str | None, str] = {
+        "reliable": "green",
+        "suspect":  "fiery",  # warm yellow-orange-red
+        "rare":     "cool",   # blues
+        None:       "fire",
     }
 
     # Xeno-Canto reference fetch (proxied + cached so the browser doesn't hit
@@ -828,6 +915,272 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if not url:
             return None
         return "https:" + url if url.startswith("//") else url
+
+    # Wikipedia thumbnail cache: scientific name → (expiry, payload).
+    # Wikipedia pages change rarely, so 24h TTL is fine and keeps load off
+    # Wikimedia's REST API.
+    _wp_cache: dict[str, tuple[float, dict]] = {}
+    _WP_TTL_SECONDS = 24 * 3600
+
+    def _wp_fetch(title: str) -> dict | None:
+        """Fetch the Wikipedia REST summary for a page title and return the
+        thumbnail/page URL pair, or None if the page doesn't exist / has no
+        image. Wikipedia accepts both scientific and common bird names; the
+        scientific name is more reliable so we try that first."""
+        if not title:
+            return None
+        title_enc = urllib.parse.quote(title.strip().replace(" ", "_"))
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title_enc}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "africam-bird/0.1"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        thumb = (data.get("thumbnail") or {}).get("source")
+        if not thumb:
+            return None
+        page = ((data.get("content_urls") or {}).get("desktop") or {}).get("page")
+        return {
+            "thumbnail": thumb,
+            "page_url": page,
+            # Prefer plain ``title`` over ``displaytitle`` (the latter contains
+            # HTML markup like <span lang="en">…</span>).
+            "wp_title": data.get("title") or title,
+            "extract": (data.get("extract") or "")[:280],
+        }
+
+    @app.get("/api/species_image")
+    def species_image(
+        scientific: str = Query(..., min_length=2, max_length=200),
+        common: str = Query(default="", max_length=200),
+    ) -> JSONResponse:
+        key = scientific.strip().lower()
+        now = time.monotonic()
+        cached = _wp_cache.get(key)
+        if cached and cached[0] > now:
+            return JSONResponse(cached[1])
+        payload = (
+            _wp_fetch(scientific)
+            or _wp_fetch(common)
+            or {"thumbnail": None, "page_url": None}
+        )
+        # Augment with a Wikipedia range/distribution map when we can find one.
+        # Resolved against the same page title we landed on (or the input
+        # scientific/common name), since the article's image list is the most
+        # reliable source for the species' specific range map.
+        for title in (payload.get("wp_title"), scientific, common):
+            map_payload = _wp_range_map(title) if title else None
+            if map_payload:
+                payload = {**payload, **map_payload}
+                break
+        # Only cache when we actually got *something* useful — otherwise a
+        # transient Wikipedia hiccup poisons the cache for 24h.
+        if payload.get("thumbnail") or payload.get("range_map"):
+            _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
+        return JSONResponse(payload)
+
+    # Tokens (split on non-letter chars) that mark an image as a species range
+    # map. We tokenize so 'range' doesn't match 'orange' and 'map' doesn't
+    # match within unrelated filenames.
+    _RANGE_TOKENS = {"distribution", "range", "rangemap", "map", "habitatmap"}
+    _RANGE_EXCLUDES = ("status_iucn", "commons-logo", "ooui_icon", "oojs_ui")
+
+    _RANGE_SPLIT = re.compile(r"[^a-z0-9]+")
+
+    def _wp_range_map(title: str) -> dict | None:
+        if not title:
+            return None
+        title_enc = urllib.parse.quote(title.strip().replace(" ", "_"))
+        list_url = (
+            "https://en.wikipedia.org/w/api.php"
+            f"?action=query&prop=images&titles={title_enc}"
+            "&format=json&imlimit=80"
+        )
+        req = urllib.request.Request(
+            list_url, headers={"User-Agent": "africam-bird/0.1"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        candidates: list[str] = []
+        for page in (data.get("query") or {}).get("pages", {}).values():
+            for img in page.get("images") or []:
+                t = img.get("title") or ""
+                tl = t.lower()
+                if any(x in tl for x in _RANGE_EXCLUDES):
+                    continue
+                # "File:..." prefix + extension contribute noise; just compare
+                # tokens against the keyword set.
+                tokens = {tk for tk in _RANGE_SPLIT.split(tl) if tk}
+                if tokens & _RANGE_TOKENS:
+                    candidates.append(t)
+        if not candidates:
+            return None
+        # Prefer 'distribution' over 'range' over plain 'map'.
+        def _rank(t: str) -> int:
+            tl = t.lower()
+            if "distribution" in tl:
+                return 0
+            if "range" in tl:
+                return 1
+            return 2
+        candidates.sort(key=_rank)
+        fname_enc = urllib.parse.quote(candidates[0].replace(" ", "_"))
+        info_url = (
+            "https://en.wikipedia.org/w/api.php"
+            f"?action=query&titles={fname_enc}"
+            "&prop=imageinfo&iiprop=url&iiurlwidth=320&format=json"
+        )
+        req2 = urllib.request.Request(
+            info_url, headers={"User-Agent": "africam-bird/0.1"}
+        )
+        try:
+            with urllib.request.urlopen(req2, timeout=8) as resp:  # noqa: S310
+                ii_data = json.load(resp)
+        except Exception:
+            return None
+        for page in (ii_data.get("query") or {}).get("pages", {}).values():
+            info = (page.get("imageinfo") or [{}])[0]
+            thumb = info.get("thumburl")
+            desc = info.get("descriptionurl")
+            if thumb:
+                return {"range_map": thumb, "range_map_page": desc}
+        return None
+
+    @app.get("/api/species_notes/{scientific_name:path}")
+    def get_species_note(scientific_name: str) -> JSONResponse:
+        row = db.get_species_note(scientific_name)
+        if row is None:
+            return JSONResponse({"scientific_name": scientific_name, "note": "", "tag": None})
+        return JSONResponse(
+            {
+                "scientific_name": row.scientific_name,
+                "common_name": row.common_name,
+                "note": row.note,
+                "tag": row.tag,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+        )
+
+    @app.post("/api/species_notes/{scientific_name:path}")
+    async def post_species_note(request: Request, scientific_name: str) -> JSONResponse:
+        form = await request.form()
+        note = (form.get("note") or "").strip()
+        common_name = (form.get("common_name") or "").strip()
+        tag_raw = (form.get("tag") or "").strip()
+        tag = tag_raw or None
+        if tag is not None and tag not in ("reliable", "suspect", "rare"):
+            raise HTTPException(400, "tag must be reliable/suspect/rare or empty")
+        if not note:
+            db.delete_species_note(scientific_name)
+            return JSONResponse({"deleted": True, "scientific_name": scientific_name})
+        row = db.set_species_note(
+            scientific_name, common_name=common_name, note=note, tag=tag
+        )
+        return JSONResponse(
+            {
+                "scientific_name": row.scientific_name,
+                "common_name": row.common_name,
+                "note": row.note,
+                "tag": row.tag,
+                "updated_at": row.updated_at.isoformat(),
+            }
+        )
+
+    # Distribution view — aggregates lat/lng of XC recordings into a points
+    # payload the modal renders as an inline SVG dot-map. Separate cache from
+    # the comparison fetch above so a long page-load doesn't block the audio
+    # compare panel.
+    _xc_dist_cache: dict[str, tuple[float, dict]] = {}
+    _XC_DIST_TTL_SECONDS = 24 * 3600
+
+    @app.get("/api/xeno_canto/distribution")
+    def xeno_canto_distribution(
+        species: str = Query(..., min_length=2, max_length=200),
+        max_points: int = Query(default=400, ge=10, le=1500),
+    ) -> JSONResponse:
+        """Lat/lng + country aggregates for XC recordings of a species.
+        Used by the audition modal to draw a small dot-map of where the
+        species has actually been recorded by XC contributors — fills the
+        gap when Wikipedia doesn't have a range map."""
+        species_clean = species.strip()
+        api_key = (cfg.xeno_canto_key or "").strip()
+        if not api_key:
+            return JSONResponse({"points": [], "top_countries": [], "total": 0, "needs_key": True})
+
+        cache_key = species_clean.lower()
+        now = time.monotonic()
+        cached = _xc_dist_cache.get(cache_key)
+        if cached and cached[0] > now:
+            payload = cached[1]
+            return JSONResponse({**payload, "points": payload["points"][:max_points]})
+
+        tokens = species_clean.split()
+        if (
+            len(tokens) == 2
+            and tokens[0][:1].isupper()
+            and tokens[1][:1].islower()
+        ):
+            tag_query = f"gen:{tokens[0]} sp:{tokens[1]}"
+        else:
+            tag_query = f'en:"{species_clean}"'
+
+        params = urllib.parse.urlencode({"query": tag_query, "key": api_key})
+        url = f"https://xeno-canto.org/api/3/recordings?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "africam-bird/0.1"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception as e:
+            raise HTTPException(502, f"xeno-canto fetch failed: {e}") from e
+
+        points: list[list[float]] = []
+        country_counts: dict[str, int] = {}
+        for r in data.get("recordings") or []:
+            # XC v3 uses 'lon'; the older API examples often show 'lng'. Try
+            # both so we don't silently drop everything if the field name
+            # ever shifts back.
+            lat_raw = r.get("lat")
+            lon_raw = r.get("lon", r.get("lng"))
+            try:
+                if lat_raw is None or lon_raw is None:
+                    continue
+                lat = float(lat_raw)
+                lon = float(lon_raw)
+            except (TypeError, ValueError):
+                continue
+            # Drop nonsensical coords (lat must be -90..90, lon -180..180; XC
+            # uploaders sometimes mis-enter and we don't want 0,0 stragglers
+            # dominating the view).
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                continue
+            if lat == 0.0 and lon == 0.0:
+                continue
+            points.append([round(lat, 3), round(lon, 3)])
+            cnt = r.get("cnt") or ""
+            if cnt:
+                country_counts[cnt] = country_counts.get(cnt, 0) + 1
+
+        top_countries = sorted(
+            ({"name": c, "count": n} for c, n in country_counts.items()),
+            key=lambda x: -x["count"],
+        )[:8]
+        payload = {
+            "total": int(data.get("numRecordings") or 0),
+            "plotted": len(points),
+            "points": points,
+            "top_countries": top_countries,
+        }
+        # Only cache positive results — keeps a transient hiccup from poisoning
+        # the cache for a day.
+        if points or top_countries:
+            _xc_dist_cache[cache_key] = (now + _XC_DIST_TTL_SECONDS, payload)
+        return JSONResponse({**payload, "points": payload["points"][:max_points]})
 
     @app.get("/api/xeno_canto")
     def xeno_canto(
@@ -928,6 +1281,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if row is None or row.clip_path is None:
                 raise HTTPException(404, "no clip for this detection")
             wav = Path(row.clip_path).resolve()
+            note = s.get(SpeciesNoteRow, row.scientific_name)
+            tag = note.tag if note else None
         try:
             wav.relative_to(clips_root)
         except ValueError as e:
@@ -935,15 +1290,19 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if not wav.is_file():
             raise HTTPException(404, "clip file missing")
 
-        suffix = "" if size == "small" else f".{size}"
-        png = wav.parent / f"{wav.stem}{suffix}.png"
+        palette = SPEC_PALETTE_FOR_TAG.get(tag, "fire")
+        size_suffix = "" if size == "small" else f".{size}"
+        # Cache by palette so re-tagging a species regenerates the colour
+        # without colliding with the old file.
+        png = wav.parent / f"{wav.stem}.{palette}{size_suffix}.png"
         if not png.exists():
             try:
                 subprocess.run(
                     [
                         "ffmpeg", "-y", "-loglevel", "error",
                         "-i", str(wav),
-                        "-lavfi", f"showspectrumpic=s={SPEC_SIZES[size]}:legend=0:scale=log:color=fire",
+                        "-lavfi",
+                        f"showspectrumpic=s={SPEC_SIZES[size]}:{SPEC_FILTER_BASE}:color={palette}",
                         str(png),
                     ],
                     check=True,

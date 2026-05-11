@@ -1,6 +1,9 @@
-{# expects: r (DetectionRow), source_tz (dict[str,str]) #}
+{# expects: r (DetectionRow), source_tz (dict[str,str]),
+   optionally: note_tag_by_sci, palette_for_tag, default_palette #}
 {% set tz = source_tz.get(r.source_name, 'UTC') %}
 {% set lbl = r.label %}
+{% set sp_tag = (note_tag_by_sci or {}).get(r.scientific_name) %}
+{% set sp_palette = (palette_for_tag or {}).get(sp_tag, default_palette or 'fire') %}
 <li id="audit-{{ r.id }}" class="px-5 py-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-center hover:bg-zinc-800/30">
   <div class="md:col-span-5 min-w-0">
     <div class="text-sm font-medium text-zinc-100 truncate">
@@ -22,10 +25,11 @@
             data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
             data-label="{{ lbl or '' }}"
             data-suggested="{{ r.suggested_species or '' }}"
+            data-palette="{{ sp_palette }}"
             class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
             style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
             title="click to play with playhead">
-      <img src="/spectrograms/{{ r.id }}.png" alt=""
+      <img src="/spectrograms/{{ r.id }}.png?p={{ sp_palette }}" alt=""
            class="absolute inset-0 w-full h-full object-cover pointer-events-none"
            onerror="this.style.display='none'"
            loading="lazy">

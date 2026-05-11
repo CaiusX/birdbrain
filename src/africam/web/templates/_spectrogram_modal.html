@@ -1,0 +1,577 @@
+{# Shared spectrogram modal — opened by any element with
+   [data-spectrogram-trigger]. Requires the trigger button to carry
+   data-detection-id, data-species, data-scientific, data-meta,
+   data-label, data-suggested, data-palette.
+   Caller template should pass ``all_species`` for the suggestion datalist. #}
+<dialog id="spec-modal"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 max-w-3xl w-full max-h-[92vh] overflow-y-auto backdrop:bg-black/70">
+  <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <div class="flex items-start gap-3 min-w-0">
+      <a id="spec-modal-thumb-link"
+         href="#" target="_blank" rel="noopener"
+         class="shrink-0 hidden"
+         title="open Wikipedia article">
+        <img id="spec-modal-thumb" src="" alt=""
+             class="w-16 h-16 rounded object-cover bg-zinc-800 ring-1 ring-zinc-700">
+      </a>
+      <a id="spec-modal-range-link"
+         href="#" target="_blank" rel="noopener"
+         class="shrink-0 hidden"
+         title="open range map on Wikimedia Commons">
+        <img id="spec-modal-range" src="" alt="range map"
+             class="w-16 h-16 rounded object-contain bg-zinc-800 ring-1 ring-zinc-700 p-0.5">
+      </a>
+      <a id="spec-modal-xcdist-link"
+         href="#" target="_blank" rel="noopener"
+         class="shrink-0 hidden"
+         title="">
+        <div class="w-16 h-16 rounded bg-zinc-800 ring-1 ring-zinc-700 overflow-hidden relative">
+          <svg id="spec-modal-xcdist-svg"
+               viewBox="0 0 170 160" preserveAspectRatio="none"
+               class="w-full h-full"></svg>
+          <span id="spec-modal-xcdist-count"
+                class="absolute bottom-0 left-0 right-0 text-[9px] text-center text-zinc-300 bg-black/40 px-0.5"></span>
+        </div>
+      </a>
+      <div class="min-w-0">
+        <div id="spec-modal-species" class="text-base font-medium truncate"></div>
+        <div id="spec-modal-scientific" class="text-xs italic text-zinc-500 truncate"></div>
+        <div id="spec-modal-meta" class="text-xs text-zinc-500 mt-0.5 truncate"></div>
+      </div>
+    </div>
+    <button type="button" id="spec-modal-close"
+            class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
+  </div>
+  <div class="p-5">
+    <div id="spec-modal-note"
+         class="hidden mb-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40">
+      <div class="flex items-center justify-between gap-2">
+        <span id="spec-modal-note-tag"
+              class="uppercase tracking-wider text-[10px] font-medium px-1.5 py-0.5 rounded border"></span>
+        <button type="button" id="spec-modal-note-edit"
+                class="text-[11px] text-zinc-400 hover:text-zinc-100 underline-offset-2 hover:underline">
+          edit
+        </button>
+      </div>
+      <p id="spec-modal-note-text" class="mt-1 whitespace-pre-wrap text-zinc-200"></p>
+    </div>
+
+    <div id="spec-modal-note-edit-form"
+         class="hidden mb-3 rounded border border-zinc-800 px-3 py-2 bg-zinc-950/40">
+      <div class="flex items-center justify-between mb-2">
+        <span class="uppercase tracking-wider text-[10px] font-medium text-zinc-400">
+          Species note · <span id="spec-modal-note-edit-species" class="normal-case text-zinc-200"></span>
+        </span>
+        <button type="button" id="spec-modal-note-cancel"
+                class="text-[11px] text-zinc-500 hover:text-zinc-200">cancel</button>
+      </div>
+      <textarea id="spec-modal-note-input"
+                rows="3"
+                placeholder="Plausibility, ID confusions, biome fit, calls it resembles…"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs text-zinc-100"
+                spellcheck="false"></textarea>
+      <div class="flex items-center justify-between mt-2 gap-2 flex-wrap">
+        <div class="flex gap-1 text-[11px]">
+          {% for v, lbl in [("", "neutral"), ("reliable", "reliable"), ("suspect", "suspect"), ("rare", "rare")] %}
+            <label class="cursor-pointer">
+              <input type="radio" name="spec-modal-note-tag-input" value="{{ v }}" class="peer sr-only">
+              <span class="px-2 py-0.5 rounded border border-zinc-700 text-zinc-400
+                           peer-checked:border-emerald-400 peer-checked:text-emerald-300
+                           hover:text-zinc-200">{{ lbl }}</span>
+            </label>
+          {% endfor %}
+        </div>
+        <button type="button" id="spec-modal-note-save"
+                class="px-3 py-1 rounded bg-zinc-100 text-zinc-900 text-xs font-medium hover:bg-white">
+          save
+        </button>
+      </div>
+    </div>
+
+    <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none">
+      <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-cover">
+      <div id="spec-modal-playhead"
+           class="absolute top-0 bottom-0 w-px bg-emerald-300 shadow-[0_0_6px_2px_rgba(110,231,183,0.7)] pointer-events-none"
+           style="left: 0%; display: none;"></div>
+    </div>
+    <audio id="spec-modal-audio" src="" controls preload="metadata" class="w-full mt-3"></audio>
+
+    <div class="mt-4 flex items-center justify-between gap-3 flex-wrap">
+      <p class="text-xs text-zinc-500">click the spectrogram to seek</p>
+      <div class="flex items-center gap-1.5">
+        <button type="button" data-label-btn="bad"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
+                title="False positive">✗ bad</button>
+        <button type="button" data-label-btn="unsure"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
+                title="Can't tell">? unsure</button>
+        <button type="button" data-label-btn="good"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
+                title="Correct ID">✓ good</button>
+        <button type="button" data-label-btn=""
+                class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                title="Clear label">↺</button>
+      </div>
+    </div>
+
+    <div id="spec-modal-suggest" class="mt-3 hidden">
+      <label for="spec-modal-suggest-input" class="text-xs uppercase tracking-wider text-zinc-500">
+        Looked more like…
+      </label>
+      <div class="flex gap-2 mt-1">
+        <input id="spec-modal-suggest-input" type="text" list="known-species"
+               placeholder="type a species (autocompletes from already-detected)"
+               class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100"
+               autocomplete="off" spellcheck="false">
+        <button type="button" id="spec-modal-suggest-save"
+                class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 text-sm font-medium hover:bg-white">save</button>
+      </div>
+      <p id="spec-modal-suggest-current" class="mt-1 text-xs text-zinc-500"></p>
+    </div>
+
+    <div id="spec-modal-xc" class="mt-4 border-t border-zinc-800 pt-4">
+      <div class="flex items-center justify-between mb-2">
+        <h4 class="text-xs uppercase tracking-wider text-zinc-400">
+          Compare with Xeno-Canto
+          <span id="spec-modal-xc-species" class="text-zinc-200 normal-case ml-1"></span>
+        </h4>
+        <a id="spec-modal-xc-search" href="#" target="_blank" rel="noopener"
+           class="text-xs text-emerald-300 hover:text-emerald-200">search xeno-canto ↗</a>
+      </div>
+      <p id="spec-modal-xc-status" class="text-xs text-zinc-500"></p>
+      <ul id="spec-modal-xc-list" class="space-y-2 mt-2"></ul>
+    </div>
+  </div>
+</dialog>
+
+<datalist id="known-species">
+  {% for sp in (all_species or []) %}<option value="{{ sp }}">{% endfor %}
+</datalist>
+
+<script>
+(function () {
+  // Guard against double-init when the partial is included on multiple pages
+  // or after an HTMX swap.
+  if (window.__africamSpecModalReady) return;
+  window.__africamSpecModalReady = true;
+
+  const dialog   = document.getElementById('spec-modal');
+  const img      = document.getElementById('spec-modal-img');
+  const audio    = document.getElementById('spec-modal-audio');
+  const playhead = document.getElementById('spec-modal-playhead');
+  const specEl   = document.getElementById('spec-modal-spec');
+  const speciesEl = document.getElementById('spec-modal-species');
+  const sciEl     = document.getElementById('spec-modal-scientific');
+  const metaEl   = document.getElementById('spec-modal-meta');
+  const closeBtn = document.getElementById('spec-modal-close');
+  const labelBtns = dialog.querySelectorAll('[data-label-btn]');
+  const suggestWrap  = document.getElementById('spec-modal-suggest');
+  const suggestInput = document.getElementById('spec-modal-suggest-input');
+  const suggestSave  = document.getElementById('spec-modal-suggest-save');
+  const suggestNote  = document.getElementById('spec-modal-suggest-current');
+  const xcSpeciesEl  = document.getElementById('spec-modal-xc-species');
+  const xcSearchEl   = document.getElementById('spec-modal-xc-search');
+  const xcStatusEl   = document.getElementById('spec-modal-xc-status');
+  const xcListEl     = document.getElementById('spec-modal-xc-list');
+  const thumbLink    = document.getElementById('spec-modal-thumb-link');
+  const thumbImg     = document.getElementById('spec-modal-thumb');
+  const rangeLink    = document.getElementById('spec-modal-range-link');
+  const rangeImg     = document.getElementById('spec-modal-range');
+  const xcDistLink   = document.getElementById('spec-modal-xcdist-link');
+  const xcDistSvg    = document.getElementById('spec-modal-xcdist-svg');
+  const xcDistCount  = document.getElementById('spec-modal-xcdist-count');
+  const noteBox      = document.getElementById('spec-modal-note');
+  const noteTagEl    = document.getElementById('spec-modal-note-tag');
+  const noteTextEl   = document.getElementById('spec-modal-note-text');
+  const noteEditBtn  = document.getElementById('spec-modal-note-edit');
+  const noteForm     = document.getElementById('spec-modal-note-edit-form');
+  const noteFormSp   = document.getElementById('spec-modal-note-edit-species');
+  const noteInput    = document.getElementById('spec-modal-note-input');
+  const noteCancel   = document.getElementById('spec-modal-note-cancel');
+  const noteSave     = document.getElementById('spec-modal-note-save');
+
+  const noteTagStyle = {
+    reliable: ['border-emerald-500/50 bg-emerald-500/5',  'border-emerald-500/60 text-emerald-300', 'reliable'],
+    suspect:  ['border-amber-500/50 bg-amber-500/5',      'border-amber-500/60 text-amber-300',     'suspect'],
+    rare:     ['border-sky-500/50 bg-sky-500/5',          'border-sky-500/60 text-sky-300',         'rare'],
+    null:     ['border-zinc-800',                          'border-zinc-700 text-zinc-400',          'note'],
+  };
+  let currentSci = null;
+  let currentId = null;
+  let currentLabel = null;
+  let currentSuggested = '';
+
+  const labelStyles = {
+    good:   'bg-emerald-500/20 border-emerald-500 text-emerald-300',
+    bad:    'bg-rose-500/20 border-rose-500 text-rose-300',
+    unsure: 'bg-amber-500/20 border-amber-500 text-amber-300',
+  };
+
+  function paintActiveLabel(label) {
+    currentLabel = label;
+    labelBtns.forEach((btn) => {
+      const v = btn.dataset.labelBtn;
+      btn.classList.remove(...'bg-emerald-500/20 border-emerald-500 text-emerald-300 bg-rose-500/20 border-rose-500 text-rose-300 bg-amber-500/20 border-amber-500 text-amber-300'.split(' '));
+      if (v && v === label && labelStyles[v]) {
+        btn.classList.add(...labelStyles[v].split(' '));
+      }
+    });
+    if (label === 'bad' || label === 'unsure') {
+      suggestWrap.classList.remove('hidden');
+      suggestNote.textContent = currentSuggested
+        ? `current: ${currentSuggested}`
+        : 'optional — saved alongside the label';
+    } else {
+      suggestWrap.classList.add('hidden');
+    }
+  }
+
+  let raf = 0;
+  function tick() {
+    if (audio.duration > 0) {
+      playhead.style.left = (audio.currentTime / audio.duration * 100) + '%';
+    }
+    if (!audio.paused && !audio.ended) {
+      raf = requestAnimationFrame(tick);
+    }
+  }
+  function startTick() { cancelAnimationFrame(raf); raf = requestAnimationFrame(tick); }
+  function stopTick()  { cancelAnimationFrame(raf); }
+
+  function openFor(btn) {
+    currentId = btn.dataset.detectionId;
+    currentSuggested = btn.dataset.suggested || '';
+    currentSci = btn.dataset.scientific || '';
+    speciesEl.textContent = btn.dataset.species || '';
+    sciEl.textContent     = currentSci;
+    metaEl.textContent    = btn.dataset.meta || '';
+    img.src = `/spectrograms/${currentId}.png?size=large&p=${encodeURIComponent(btn.dataset.palette || 'fire')}`;
+    audio.src = `/clips/${currentId}`;
+    playhead.style.left = '0%';
+    playhead.style.display = 'block';
+    suggestInput.value = currentSuggested;
+    paintActiveLabel(btn.dataset.label || null);
+    loadXenoCanto(currentSci || btn.dataset.species || '');
+    loadSpeciesNote(currentSci, btn.dataset.species || '');
+    loadSpeciesImage(currentSci, btn.dataset.species || '');
+    loadXcDistribution(currentSci);
+    if (typeof dialog.showModal === 'function') {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute('open', '');
+    }
+    audio.play().catch(() => {});
+  }
+
+  function applyNoteView(data) {
+    const tag = data && data.tag ? data.tag : null;
+    const [boxCls, tagCls, tagLabel] = noteTagStyle[tag] || noteTagStyle.null;
+    if (data && data.note) {
+      noteBox.className = 'mb-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40 ' + boxCls;
+      noteTagEl.className = 'uppercase tracking-wider text-[10px] font-medium px-1.5 py-0.5 rounded border ' + tagCls;
+      noteTagEl.textContent = tagLabel;
+      noteTextEl.textContent = data.note;
+      noteBox.classList.remove('hidden');
+    } else {
+      noteBox.classList.add('hidden');
+    }
+    noteForm.classList.add('hidden');
+  }
+
+  const XCD_LAT_LO = -40, XCD_LAT_HI = 40;
+  const XCD_LON_LO = -25, XCD_LON_HI = 60;
+  const XCD_W = 170, XCD_H = 160;
+
+  async function loadXcDistribution(sci) {
+    xcDistLink.classList.add('hidden');
+    xcDistSvg.innerHTML = '';
+    xcDistCount.textContent = '';
+    if (!sci) return;
+    try {
+      const resp = await fetch('/api/xeno_canto/distribution?species=' + encodeURIComponent(sci));
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const pts = data.points || [];
+      if (!pts.length) return;
+
+      const ns = 'http://www.w3.org/2000/svg';
+      const bg = document.createElementNS(ns, 'rect');
+      bg.setAttribute('x', '0');
+      bg.setAttribute('y', '0');
+      bg.setAttribute('width', String(XCD_W));
+      bg.setAttribute('height', String(XCD_H));
+      bg.setAttribute('fill', '#27272a');
+      xcDistSvg.appendChild(bg);
+
+      for (const [lat, lon] of pts) {
+        const xRaw = ((lon - XCD_LON_LO) / (XCD_LON_HI - XCD_LON_LO)) * XCD_W;
+        const yRaw = ((XCD_LAT_HI - lat) / (XCD_LAT_HI - XCD_LAT_LO)) * XCD_H;
+        const x = Math.max(1, Math.min(XCD_W - 1, xRaw));
+        const y = Math.max(1, Math.min(XCD_H - 1, yRaw));
+        const clamped = (x !== xRaw) || (y !== yRaw);
+        const dot = document.createElementNS(ns, 'circle');
+        dot.setAttribute('cx', x.toFixed(1));
+        dot.setAttribute('cy', y.toFixed(1));
+        dot.setAttribute('r', '1.4');
+        dot.setAttribute('fill', clamped ? '#facc15' : '#34d399');
+        dot.setAttribute('fill-opacity', '0.85');
+        xcDistSvg.appendChild(dot);
+      }
+      xcDistCount.textContent = `XC · ${data.total}`;
+      const tokens = sci.trim().split(/\s+/);
+      const slug = tokens.length === 2
+        ? `${tokens[0]}-${tokens[1]}`
+        : tokens.join('-');
+      xcDistLink.href = `https://xeno-canto.org/species/${encodeURIComponent(slug)}`;
+      const top = (data.top_countries || []).slice(0, 3)
+        .map((c) => `${c.name} (${c.count})`).join(', ');
+      xcDistLink.title = `XC recordings: ${data.plotted} plotted of ${data.total}` +
+        (top ? ` — top: ${top}` : '');
+      xcDistLink.classList.remove('hidden');
+    } catch (_) { /* silent */ }
+  }
+
+  async function loadSpeciesImage(sci, common) {
+    thumbLink.classList.add('hidden');
+    rangeLink.classList.add('hidden');
+    thumbImg.removeAttribute('src');
+    rangeImg.removeAttribute('src');
+    if (!sci) return;
+    try {
+      const qs = new URLSearchParams({ scientific: sci });
+      if (common) qs.set('common', common);
+      const resp = await fetch('/api/species_image?' + qs.toString());
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.thumbnail) {
+        thumbImg.src = data.thumbnail;
+        thumbImg.alt = data.wp_title || sci;
+        thumbLink.href = data.page_url || '#';
+        thumbLink.classList.remove('hidden');
+      }
+      if (data.range_map) {
+        rangeImg.src = data.range_map;
+        rangeLink.href = data.range_map_page || data.page_url || '#';
+        rangeLink.classList.remove('hidden');
+      }
+    } catch (_) { /* silent */ }
+  }
+
+  async function loadSpeciesNote(sci, common) {
+    noteBox.classList.add('hidden');
+    noteForm.classList.add('hidden');
+    if (!sci) return;
+    try {
+      const resp = await fetch(`/api/species_notes/${encodeURIComponent(sci)}`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      noteBox.dataset.common = common || '';
+      applyNoteView(data);
+    } catch (e) {
+      noteBox.classList.add('hidden');
+    }
+  }
+
+  function openNoteEditor(currentNote, currentTag) {
+    noteFormSp.textContent = currentSci;
+    noteInput.value = currentNote || '';
+    noteForm.querySelectorAll('input[name="spec-modal-note-tag-input"]').forEach((r) => {
+      r.checked = (r.value === (currentTag || ''));
+    });
+    noteForm.classList.remove('hidden');
+    noteBox.classList.add('hidden');
+    noteInput.focus();
+  }
+
+  noteEditBtn.addEventListener('click', () => {
+    openNoteEditor(noteTextEl.textContent, _currentNoteTag());
+  });
+
+  sciEl.style.cursor = 'pointer';
+  sciEl.title = 'click to add/edit a species note';
+  sciEl.addEventListener('click', () => {
+    if (!currentSci) return;
+    openNoteEditor(noteTextEl.textContent, _currentNoteTag());
+  });
+
+  noteCancel.addEventListener('click', () => {
+    noteForm.classList.add('hidden');
+    if (noteTextEl.textContent) noteBox.classList.remove('hidden');
+  });
+
+  noteSave.addEventListener('click', async () => {
+    if (!currentSci) return;
+    const params = new URLSearchParams();
+    params.set('note', noteInput.value);
+    params.set('common_name', noteBox.dataset.common || '');
+    const tagInput = noteForm.querySelector('input[name="spec-modal-note-tag-input"]:checked');
+    if (tagInput) params.set('tag', tagInput.value);
+    const resp = await fetch(`/api/species_notes/${encodeURIComponent(currentSci)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    applyNoteView(data.deleted ? {note: '', tag: null} : data);
+  });
+
+  function _currentNoteTag() {
+    for (const t of ['reliable', 'suspect', 'rare']) {
+      if (noteBox.className.includes(noteTagStyle[t][0].split(' ')[0])) return t;
+    }
+    return null;
+  }
+
+  async function loadXenoCanto(species) {
+    xcListEl.innerHTML = '';
+    xcSpeciesEl.textContent = species ? `· ${species}` : '';
+    xcSearchEl.href = species
+      ? `https://xeno-canto.org/explore?query=${encodeURIComponent(species)}`
+      : 'https://xeno-canto.org/';
+    if (!species) { xcStatusEl.textContent = ''; return; }
+    xcStatusEl.textContent = 'loading…';
+    try {
+      const resp = await fetch(`/api/xeno_canto?species=${encodeURIComponent(species)}&limit=3`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const body = await resp.json();
+      xcSearchEl.href = body.search_url || xcSearchEl.href;
+      const recs = body.recordings || [];
+      if (body.needs_key) {
+        xcStatusEl.innerHTML =
+          'Set <code class="text-zinc-300">AFRICAM_XENO_CANTO_KEY</code> ' +
+          '(free at <a href="https://xeno-canto.org/account" target="_blank" rel="noopener" class="underline">xeno-canto.org/account</a>) ' +
+          'to load reference recordings inline.';
+        return;
+      }
+      if (!recs.length) {
+        xcStatusEl.textContent = 'no recordings found';
+        return;
+      }
+      xcStatusEl.textContent = '';
+      for (const r of recs) {
+        xcListEl.appendChild(renderXcRecording(r));
+      }
+    } catch (e) {
+      xcStatusEl.textContent = 'fetch failed: ' + e.message;
+    }
+  }
+
+  function renderXcRecording(r) {
+    const li = document.createElement('li');
+    li.className = 'flex gap-3 items-start bg-zinc-950/40 border border-zinc-800 rounded p-2';
+    const link = document.createElement('a');
+    link.href = r.url || '#';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.className = 'shrink-0';
+    if (r.sono_small) {
+      const im = document.createElement('img');
+      im.src = r.sono_small;
+      im.alt = '';
+      im.className = 'w-32 h-12 object-cover rounded bg-zinc-900';
+      link.appendChild(im);
+    } else {
+      link.textContent = `XC${r.id}`;
+      link.className += ' text-xs text-zinc-400 underline';
+    }
+    li.appendChild(link);
+    const main = document.createElement('div');
+    main.className = 'flex-1 min-w-0';
+    const meta = document.createElement('div');
+    meta.className = 'text-xs text-zinc-400 truncate';
+    meta.textContent = [r.en, r.cnt, r.q ? `q:${r.q}` : ''].filter(Boolean).join(' · ');
+    main.appendChild(meta);
+    const sub = document.createElement('div');
+    sub.className = 'text-xs text-zinc-500 truncate';
+    sub.textContent = [r.rec, r.type, r.length].filter(Boolean).join(' · ');
+    main.appendChild(sub);
+    if (r.file) {
+      const a = document.createElement('audio');
+      a.src = r.file;
+      a.controls = true;
+      a.preload = 'none';
+      a.className = 'w-full h-7 mt-1';
+      main.appendChild(a);
+    }
+    li.appendChild(main);
+    return li;
+  }
+
+  async function postLabel(value, suggested) {
+    if (currentId == null) return;
+    const params = new URLSearchParams();
+    params.set('value', value);
+    if (suggested !== undefined) params.set('suggested', suggested);
+    const resp = await fetch(`/api/detections/${currentId}/label`, {
+      method: 'POST',
+      headers: {
+        'HX-Request': 'true',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+    if (!resp.ok) return;
+    const html = (await resp.text()).trim();
+    const tmp = document.createElement('template');
+    tmp.innerHTML = html;
+    const newRow = tmp.content.firstElementChild;
+    // Only the audition page has #audit-{id} rows; on the live page the
+    // 5-second HTMX refresh will pick up the change, so just no-op there.
+    const oldRow = document.getElementById(`audit-${currentId}`);
+    if (oldRow && newRow) {
+      oldRow.replaceWith(newRow);
+      const fresh = newRow.querySelector('[data-spectrogram-trigger]');
+      if (fresh) currentSuggested = fresh.dataset.suggested || '';
+    }
+    paintActiveLabel(value || null);
+  }
+  const setLabel = (value) => postLabel(value);
+  const saveSuggestion = () => {
+    const lbl = (currentLabel === 'unsure') ? 'unsure' : 'bad';
+    postLabel(lbl, suggestInput.value);
+  };
+  function closeIt() {
+    audio.pause();
+    stopTick();
+    xcListEl.querySelectorAll('audio').forEach((a) => a.pause());
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+  }
+
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-spectrogram-trigger]');
+    if (btn) { e.preventDefault(); openFor(btn); }
+  });
+
+  audio.addEventListener('play',     startTick);
+  audio.addEventListener('seeking',  () => { tick(); });
+  audio.addEventListener('pause',    () => { tick(); stopTick(); });
+  audio.addEventListener('ended',    () => { playhead.style.left = '100%'; stopTick(); });
+  audio.addEventListener('timeupdate', tick);
+
+  specEl.addEventListener('click', (e) => {
+    if (!audio.duration) return;
+    const rect = specEl.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    audio.currentTime = frac * audio.duration;
+  });
+
+  labelBtns.forEach((btn) => {
+    btn.addEventListener('click', () => setLabel(btn.dataset.labelBtn));
+  });
+
+  suggestSave.addEventListener('click', saveSuggestion);
+  suggestInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveSuggestion();
+    }
+  });
+
+  closeBtn.addEventListener('click', closeIt);
+  dialog.addEventListener('close',  () => { audio.pause(); stopTick(); });
+  dialog.addEventListener('cancel', closeIt);
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) closeIt(); });
+})();
+</script>
