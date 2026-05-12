@@ -3,21 +3,29 @@
 
 {% block content %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
-  <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Species detected · <span class="text-zinc-200">{{ species_list | length }}</span>
-    </h2>
-    {% set base = '/species?sort=' %}
-    <div class="flex gap-2 text-xs">
-      <span class="text-zinc-500">sort:</span>
-      {% for key, label in [('last_seen','last seen'), ('first_seen','first seen'), ('count','count'), ('max_conf','max conf'), ('name','name')] %}
-        {% if sort == key %}
-          <span class="px-2 py-0.5 rounded bg-zinc-700 text-zinc-100">{{ label }}</span>
-        {% else %}
-          <a href="{{ base }}{{ key }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">{{ label }}</a>
-        {% endif %}
-      {% endfor %}
+  <div class="px-5 py-3 border-b border-zinc-800 flex flex-col gap-2">
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+        Species detected ·
+        <span id="species-count" class="text-zinc-200">{{ species_list | length }}</span><!--
+       --><span id="species-count-total" class="text-zinc-500 text-xs ml-1 hidden"></span>
+      </h2>
+      {% set base = '/species?sort=' %}
+      <div class="flex gap-2 text-xs">
+        <span class="text-zinc-500">sort:</span>
+        {% for key, label in [('last_seen','last seen'), ('first_seen','first seen'), ('count','count'), ('max_conf','max conf'), ('name','name')] %}
+          {% if sort == key %}
+            <span class="px-2 py-0.5 rounded bg-zinc-700 text-zinc-100">{{ label }}</span>
+          {% else %}
+            <a href="{{ base }}{{ key }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">{{ label }}</a>
+          {% endif %}
+        {% endfor %}
+      </div>
     </div>
+    <input id="species-search" type="search"
+           placeholder="filter by name, sci-name or source (e.g. cisticola, francolin, Tembe)"
+           autocomplete="off" spellcheck="false"
+           class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600">
   </div>
 
   {% if species_list %}
@@ -71,10 +79,60 @@
         {% endfor %}
       </tbody>
     </table>
+    <p id="species-empty"
+       class="hidden text-zinc-500 text-sm px-5 py-6">
+      No species match this filter.
+    </p>
   {% else %}
     <p class="text-zinc-500 text-sm px-5 py-6">
       No detections yet. Once the pipeline produces some, species will appear here.
     </p>
   {% endif %}
 </section>
+
+<script>
+(function () {
+  const input  = document.getElementById('species-search');
+  const tbody  = document.querySelector('section table tbody');
+  if (!input || !tbody) return;
+  const rows   = Array.from(tbody.querySelectorAll('tr'));
+  const empty  = document.getElementById('species-empty');
+  const count  = document.getElementById('species-count');
+  const totalEl = document.getElementById('species-count-total');
+  const total  = rows.length;
+
+  // Cache lower-cased text once per row — typing is hot path.
+  const rowText = rows.map((r) => r.textContent.toLowerCase());
+
+  function apply() {
+    const q = input.value.trim().toLowerCase();
+    let visible = 0;
+    rows.forEach((r, i) => {
+      const show = !q || rowText[i].includes(q);
+      r.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    count.textContent = visible;
+    if (q) {
+      totalEl.textContent = 'of ' + total;
+      totalEl.classList.remove('hidden');
+    } else {
+      totalEl.classList.add('hidden');
+    }
+    empty.classList.toggle('hidden', visible !== 0);
+  }
+
+  input.addEventListener('input', apply);
+  // "/" focuses the search like in many web apps. Bail if user is already
+  // typing into another input so we don't hijack keystrokes.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+    e.preventDefault();
+    input.focus();
+    input.select();
+  });
+})();
+</script>
 {% endblock %}
