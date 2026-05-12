@@ -373,16 +373,35 @@
     }
   }
 
+  // Last-known authoritative audio position + wall clock at that moment.
+  // Used to smooth the playhead between iOS Safari's coarse (~250 ms)
+  // currentTime updates by predicting how far the audio has advanced since
+  // the most recent reading.
+  let lastSync = { wallMs: 0, audioSec: 0 };
+  function _snapshotAudioClock() {
+    lastSync = { wallMs: performance.now(), audioSec: audio.currentTime };
+  }
+
   let raf = 0;
   function tick() {
     if (audio.duration > 0) {
-      playhead.style.left = (audio.currentTime / audio.duration * 100) + '%';
+      let t = audio.currentTime;
+      if (!audio.paused && !audio.ended && lastSync.wallMs > 0) {
+        const elapsed = (performance.now() - lastSync.wallMs) / 1000;
+        // Cap the prediction so it never runs off the end of the clip.
+        t = Math.min(lastSync.audioSec + elapsed, audio.duration);
+      }
+      playhead.style.left = (t / audio.duration * 100) + '%';
     }
     if (!audio.paused && !audio.ended) {
       raf = requestAnimationFrame(tick);
     }
   }
-  function startTick() { cancelAnimationFrame(raf); raf = requestAnimationFrame(tick); }
+  function startTick() {
+    cancelAnimationFrame(raf);
+    _snapshotAudioClock();
+    raf = requestAnimationFrame(tick);
+  }
   function stopTick()  { cancelAnimationFrame(raf); }
 
   function openFor(btn) {
@@ -1093,13 +1112,15 @@
   });
 
   audio.addEventListener('play',     startTick);
-  audio.addEventListener('seeking',  () => { tick(); });
+  audio.addEventListener('seeking',  () => { _snapshotAudioClock(); tick(); });
+  audio.addEventListener('seeked',   _snapshotAudioClock);
   audio.addEventListener('pause',    () => { tick(); stopTick(); });
   audio.addEventListener('ended',    () => { playhead.style.left = '100%'; stopTick(); });
   audio.addEventListener('timeupdate', () => {
     if (loopRange && audio.currentTime >= loopRange.end) {
       audio.currentTime = loopRange.start;
     }
+    _snapshotAudioClock();
     tick();
   });
 

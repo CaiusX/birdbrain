@@ -1940,7 +1940,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return FileResponse(png, media_type="image/png")
 
     @app.get("/clips/{detection_id}")
-    def clip(detection_id: int) -> FileResponse:
+    def clip(detection_id: int, fmt: str = Query(default="auto")) -> FileResponse:
+        """Serve a detection clip. iOS Safari's OGG playback is jerky and
+        currentTime resolution is poor, which breaks the spectrogram
+        playhead sync; transcode to MP3 (cached on disk next to the OGG)
+        and serve that by default so audio works the same across browsers.
+        Use ``?fmt=original`` for the underlying OGG if you really want it.
+        """
         with db.session() as s:
             row = s.get(DetectionRow, detection_id)
             if row is None or row.clip_path is None:
@@ -1952,7 +1958,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Clip outside allowed root") from e
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Clip file missing")
-        media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac"}
+
+        if fmt == "auto" and path.suffix.lower() == ".ogg":
+            mp3 = path.parent / f"{path.stem}.mp3"
+            if not mp3.exists():
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-loglevel", "error",
+                            "-i", str(path),
+                            "-c:a", "libmp3lame", "-q:a", "4",
+                            str(mp3),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        timeout=15,
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                    # Fall back to OGG if transcode fails for any reason.
+                    mp3 = None
+            if mp3 and mp3.is_file():
+                return FileResponse(mp3, media_type="audio/mpeg")
+
+        media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac", ".mp3": "audio/mpeg"}
         return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "audio/wav"))
 
     return app
