@@ -291,13 +291,19 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
 
     def reconcile() -> None:
         desired = _desired_sources(static_sources, db)
-        # Stop workers whose source has been removed.
+        # Stop workers whose source has been removed OR whose config changed
+        # under us (e.g. min_confidence edited via /admin). Pydantic equality
+        # gives us a field-by-field comparison for free.
         for name in list(workers):
             if name not in desired:
                 log.info("supervisor.stopping", source=name)
                 workers[name].stop_event.set()
                 # Don't join here — joining can block if ffmpeg is mid-read.
                 # The thread will exit once it notices the event.
+                del workers[name]
+            elif workers[name].cfg != desired[name]:
+                log.info("supervisor.cfg_changed_restarting", source=name)
+                workers[name].stop_event.set()
                 del workers[name]
         # Start workers for newly-desired sources.
         for name, cfg in desired.items():

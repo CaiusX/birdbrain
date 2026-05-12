@@ -548,6 +548,31 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name})
 
+    @app.post("/api/sources/{name}/min_confidence")
+    def set_source_min_confidence(
+        request: Request,
+        name: str,
+        value: float = Form(..., ge=0.0, le=1.0),
+    ) -> Response:
+        """Edit a runtime source's detection floor. File-managed sources (in
+        sources.toml) are not mutable through the UI by design — return 400
+        with a hint to edit the file. The supervisor sees the row update on
+        its next reconcile tick (~15 s) and respawns the worker so the new
+        floor takes effect."""
+        ok = db.update_runtime_source(name, min_confidence=value)
+        if not ok:
+            # Distinguish "doesn't exist" from "exists but file-managed".
+            _, sources_by_name, _ = _all_sources()
+            if name in sources_by_name:
+                raise HTTPException(
+                    400,
+                    f"{name} is file-managed (sources.toml) — edit there instead.",
+                )
+            raise HTTPException(404, f"Runtime source not found: {name}")
+        if request.headers.get("hx-request"):
+            return admin_partial(request)
+        return JSONResponse({"ok": True, "name": name, "min_confidence": value})
+
     @app.delete("/api/sources/{name}")
     def remove_runtime_source(request: Request, name: str) -> Response:
         ok = db.soft_delete_runtime_source(name)

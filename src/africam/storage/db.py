@@ -327,6 +327,18 @@ class Database:
             row.deleted_at = None
         return row
 
+    def update_runtime_source(self, name: str, **fields) -> bool:
+        """Patch fields on an existing, non-deleted runtime source. Returns
+        False if the source doesn't exist or has been soft-deleted (use
+        enable_runtime_source first for the latter)."""
+        with self._Session() as s, s.begin():
+            row = s.get(RuntimeSourceRow, name)
+            if row is None or row.deleted_at is not None:
+                return False
+            for k, v in fields.items():
+                setattr(row, k, v)
+        return True
+
     def soft_delete_runtime_source(self, name: str) -> bool:
         with self._Session() as s, s.begin():
             row = s.get(RuntimeSourceRow, name)
