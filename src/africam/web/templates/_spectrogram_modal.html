@@ -798,17 +798,10 @@
     _drawSpecSelection(loFrac, hiFrac);
     const startSec = loFrac * audio.duration;
     const endSec   = hiFrac * audio.duration;
-    reanalyzeScope.textContent = `· selection ${startSec.toFixed(2)}–${endSec.toFixed(2)}s`;
+    reanalyzeScope.textContent =
+      `· selection ${startSec.toFixed(2)}–${endSec.toFixed(2)}s · click inside to loop`;
     reanalyzeScope.classList.remove('hidden');
     reanalyzeScopeClear.classList.remove('hidden');
-    // Auto-loop the slice. sci=null distinguishes a selection-driven loop
-    // from a chip-driven one, so chip highlights stay correct.
-    loopRange = { sci: null, start: startSec, end: endSec };
-    _paintLoopChips();
-    try {
-      audio.currentTime = startSec;
-    } catch (_) { /* readyState may not be loaded yet */ }
-    audio.play().catch(() => {});
     if (reanalyzeEl.open && currentId != null) {
       reanalyzeLoadedFor = null;
       loadReanalyze(currentId);
@@ -816,6 +809,20 @@
       // Opening the rolldown triggers the fetch naturally.
       reanalyzeEl.open = true;
     }
+  }
+
+  function _loopSelection() {
+    if (!specSelection || !audio.duration) return;
+    const startSec = specSelection.startFrac * audio.duration;
+    const endSec   = specSelection.endFrac * audio.duration;
+    // sci=null marks this as a selection-driven loop so chip highlights
+    // stay accurate.
+    loopRange = { sci: null, start: startSec, end: endSec };
+    _paintLoopChips();
+    try {
+      audio.currentTime = startSec;
+    } catch (_) { /* readyState may not be loaded yet */ }
+    audio.play().catch(() => {});
   }
 
   reanalyzeScopeClear.addEventListener('click', (e) => {
@@ -855,12 +862,20 @@
       const hi = Math.min(1, Math.max(dragActive.startX, x) / dragActive.width);
       _setSpecSelection(lo, hi);
     } else {
-      // Treat as a plain click: seek + clear loop + clear any existing
-      // selection so the user gets back to free playback in one gesture.
-      _clearLoop();
-      _clearSpecSelection();
+      // Plain click. If it lands inside the current selection, start/restart
+      // looping that slice; otherwise treat it as a normal scrub-and-clear.
       const frac = Math.max(0, Math.min(1, x / dragActive.width));
-      audio.currentTime = frac * audio.duration;
+      if (
+        specSelection &&
+        frac >= specSelection.startFrac &&
+        frac <= specSelection.endFrac
+      ) {
+        _loopSelection();
+      } else {
+        _clearLoop();
+        _clearSpecSelection();
+        audio.currentTime = frac * audio.duration;
+      }
     }
     dragActive = null;
   }
