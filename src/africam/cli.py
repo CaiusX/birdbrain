@@ -249,6 +249,52 @@ def probe(
                 )
 
 
+@app.command(name="seed-runtime")
+def seed_runtime(
+    sources_file: Annotated[
+        Path | None,
+        typer.Option("--sources", "-s", help="sources.toml to copy from."),
+    ] = None,
+) -> None:
+    """Copy sources.toml entries into the runtime_sources table.
+
+    File-managed sources can only be reconfigured by editing sources.toml +
+    restarting the pipeline. Runtime sources can be stopped, restarted,
+    and have their min_confidence edited from /admin. This command promotes
+    each toml entry to a runtime row so the UI can govern it.
+
+    Idempotent — running twice updates the existing row with the toml's
+    current values without duplicating.
+    """
+    cfg = AppConfig()
+    if sources_file is not None:
+        cfg.sources_file = sources_file
+    configure_logging(cfg.log_level)
+    sources = load_sources(cfg.sources_file)
+    if not sources:
+        console.print("[yellow]sources.toml is empty or missing — nothing to seed.[/yellow]")
+        raise typer.Exit(code=0)
+    db = Database(cfg.db_url)
+    for s_cfg in sources:
+        db.add_runtime_source(
+            name=s_cfg.name,
+            kind=s_cfg.kind,
+            url=s_cfg.url,
+            lat=s_cfg.lat,
+            lon=s_cfg.lon,
+            min_confidence=s_cfg.min_confidence,
+            multisite=s_cfg.multisite,
+            cookies_from_browser=s_cfg.cookies_from_browser,
+            cookies_file=str(s_cfg.cookies_file) if s_cfg.cookies_file else None,
+            timezone=s_cfg.timezone,
+        )
+        console.print(f"  ✓ {s_cfg.name}")
+    console.print(
+        f"\nSeeded {len(sources)} runtime sources. "
+        "Restart the pipeline so the supervisor reattaches under the new rows."
+    )
+
+
 @app.command()
 def prune(
     days: Annotated[int, typer.Option("--days", "-d", help="Delete clip files older than this many days.")] = 14,
