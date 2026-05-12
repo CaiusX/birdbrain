@@ -799,7 +799,7 @@
     const startSec = loFrac * audio.duration;
     const endSec   = hiFrac * audio.duration;
     reanalyzeScope.textContent =
-      `· selection ${startSec.toFixed(2)}–${endSec.toFixed(2)}s · click inside to loop`;
+      `· selection ${startSec.toFixed(2)}–${endSec.toFixed(2)}s · click inside to loop · outside to stop`;
     reanalyzeScope.classList.remove('hidden');
     reanalyzeScopeClear.classList.remove('hidden');
     if (reanalyzeEl.open && currentId != null) {
@@ -862,8 +862,11 @@
       const hi = Math.min(1, Math.max(dragActive.startX, x) / dragActive.width);
       _setSpecSelection(lo, hi);
     } else {
-      // Plain click. If it lands inside the current selection, start/restart
-      // looping that slice; otherwise treat it as a normal scrub-and-clear.
+      // Plain click. Three cases:
+      //   1) Selection exists + click inside  → loop the slice.
+      //   2) Selection exists + click outside → stop and rewind to t=0.
+      //      Selection stays so the user can click back in to loop again.
+      //   3) No selection                     → plain scrub to the click pos.
       const frac = Math.max(0, Math.min(1, x / dragActive.width));
       if (
         specSelection &&
@@ -871,9 +874,12 @@
         frac <= specSelection.endFrac
       ) {
         _loopSelection();
+      } else if (specSelection) {
+        _clearLoop();
+        audio.pause();
+        try { audio.currentTime = 0; } catch (_) { /* not loaded yet */ }
       } else {
         _clearLoop();
-        _clearSpecSelection();
         audio.currentTime = frac * audio.duration;
       }
     }
