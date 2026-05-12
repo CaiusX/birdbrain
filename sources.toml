@@ -1,5 +1,7 @@
-# Local sources file (gitignored).
-# Single fixed camera at Naledi Bush Lodge, Olifants West (Greater Kruger).
+# Africam stream roster. Force-added past .gitignore so the Pi deployment
+# can `git pull` instead of needing the file scp'd. Each source spins up a
+# pipeline worker; supervisor reads this list once at startup, so add a
+# source here and restart the `pipeline` service for it to take effect.
 
 [[source]]
 name = "Olifants (Naledi)"
@@ -10,3 +12,34 @@ lon = 30.905358
 min_confidence = 0.3
 cookies_file = "data/www.youtube.com_cookies.txt"
 timezone = "Africa/Johannesburg"
+
+[[source]]
+name = "Tembe"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=gdrNUUf-cQw"
+lat = -27.045674
+lon = 32.438341
+min_confidence = 0.3
+cookies_file = "data/www.youtube.com_cookies.txt"
+timezone = "Africa/Johannesburg"
+
+[[source]]
+name = "Timbavati"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=_AyumoafMOU"
+lat = -24.276074
+lon = 31.30743
+min_confidence = 0.3
+cookies_file = "data/www.youtube.com_cookies.txt"
+timezone = "Africa/Johannesburg"
+
+[[source]]
+name = "Twin Pan"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=2EZavJUNdLI"
+lat = -18.59
+lon = 23.53
+# Quieter cam — lower threshold lets weaker detections surface.
+min_confidence = 0.15
+cookies_file = "data/www.youtube.com_cookies.txt"
+timezone = "Africa/Gaborone"
