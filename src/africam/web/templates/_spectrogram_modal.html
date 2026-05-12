@@ -778,6 +778,11 @@
     reanalyzeScope.classList.add('hidden');
     reanalyzeScopeClear.classList.add('hidden');
     reanalyzeScope.textContent = '';
+    // Selection-driven loops have sci=null; chip-driven loops keep theirs.
+    if (loopRange && loopRange.sci == null) {
+      loopRange = null;
+      _paintLoopChips();
+    }
     if (reanalyzeEl.open && currentId != null) {
       reanalyzeLoadedFor = null;
       loadReanalyze(currentId);
@@ -791,11 +796,19 @@
     }
     specSelection = { startFrac: loFrac, endFrac: hiFrac };
     _drawSpecSelection(loFrac, hiFrac);
-    const s = (loFrac * audio.duration).toFixed(2);
-    const e = (hiFrac * audio.duration).toFixed(2);
-    reanalyzeScope.textContent = `· selection ${s}–${e}s`;
+    const startSec = loFrac * audio.duration;
+    const endSec   = hiFrac * audio.duration;
+    reanalyzeScope.textContent = `· selection ${startSec.toFixed(2)}–${endSec.toFixed(2)}s`;
     reanalyzeScope.classList.remove('hidden');
     reanalyzeScopeClear.classList.remove('hidden');
+    // Auto-loop the slice. sci=null distinguishes a selection-driven loop
+    // from a chip-driven one, so chip highlights stay correct.
+    loopRange = { sci: null, start: startSec, end: endSec };
+    _paintLoopChips();
+    try {
+      audio.currentTime = startSec;
+    } catch (_) { /* readyState may not be loaded yet */ }
+    audio.play().catch(() => {});
     if (reanalyzeEl.open && currentId != null) {
       reanalyzeLoadedFor = null;
       loadReanalyze(currentId);
