@@ -51,100 +51,29 @@
   </div>
 </section>
 
-<section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-  <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Top species · last hour</h2>
-    {% if top_recent %}
-      <ul class="divide-y divide-zinc-800">
-        {% for r in top_recent %}
-          <li class="py-2 flex items-baseline justify-between">
-            <div>
-              <span class="font-medium">{{ r.common_name }}</span>
-              <span class="text-zinc-500 italic text-sm ml-2">{{ r.scientific_name }}</span>
-            </div>
-            <div class="text-sm tabular-nums">
-              <span class="text-zinc-400 mr-3">max {{ "%.2f"|format(r.max_conf) }}</span>
-              <span class="font-semibold">{{ r.n }}</span>
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="text-zinc-500 text-sm">No detections in the last hour.</p>
-    {% endif %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 mb-6">
+  <div class="flex items-baseline justify-between mb-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Top species · last hour</h2>
+    <a href="/admin" class="text-xs text-zinc-500 hover:text-zinc-300">manage sources →</a>
   </div>
-
-  <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-    <div class="flex items-baseline justify-between mb-3">
-      <h2 class="text-sm uppercase tracking-wider text-zinc-400">Sources</h2>
-      <span class="text-xs text-zinc-500">add takes ~15s to start</span>
-    </div>
-    <div id="sources-panel"
-         hx-get="/partials/sources"
-         hx-trigger="load, every 30s"
-         hx-swap="innerHTML">
-    </div>
-    <details class="mt-3">
-      <summary class="text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer">+ add a live source</summary>
-      <p id="add-source-error" class="hidden text-xs text-rose-400 mt-2"></p>
-      <form
-        hx-post="/api/sources"
-        hx-target="#sources-panel"
-        hx-swap="innerHTML"
-        hx-on::after-request="
-          const err = document.getElementById('add-source-error');
-          if (event.detail.successful) {
-            err.classList.add('hidden');
-            this.reset();
-            setTimeout(() => location.reload(), 600);
-          } else {
-            let msg;
-            try {
-              const body = JSON.parse(event.detail.xhr.responseText || '{}');
-              msg = body.detail || ('HTTP ' + event.detail.xhr.status);
-              if (typeof msg !== 'string') msg = JSON.stringify(msg);
-            } catch (_) { msg = 'HTTP ' + event.detail.xhr.status; }
-            err.textContent = msg;
-            err.classList.remove('hidden');
-          }
-        "
-        class="mt-3 grid grid-cols-1 gap-2 text-sm">
-        <input type="text" name="name" placeholder="short name e.g. Twin Pan" required
-               maxlength="64"
-               class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
-        <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..." required
-               class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
-        <div class="grid grid-cols-3 gap-2">
-          <select name="kind" class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
-            <option value="youtube">youtube</option>
-            <option value="rtsp">rtsp</option>
-          </select>
-          <input type="number" name="lat" placeholder="lat" step="any"
-                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 tabular-nums">
-          <input type="number" name="lon" placeholder="lon" step="any"
-                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 tabular-nums">
-        </div>
-        <input type="text" name="cookies_file" placeholder="cookies file (optional, for YT auth)"
-               value="data/www.youtube.com_cookies.txt"
-               class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-400">
-        <div class="grid grid-cols-2 gap-2">
-          <input type="text" name="timezone" placeholder="timezone (IANA, e.g. Africa/Johannesburg)"
-                 value="UTC"
-                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs">
-          <input type="number" name="min_confidence" placeholder="min conf" step="0.05" min="0.05" max="0.95"
-                 value="0.3"
-                 class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs tabular-nums">
-        </div>
-        <label class="flex items-center gap-2 text-xs text-zinc-400">
-          <input type="checkbox" name="multisite" value="true"> multi-site (rotates between cameras)
-        </label>
-        <button type="submit"
-                class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-xs font-medium">
-          add source
-        </button>
-      </form>
-    </details>
-  </div>
+  {% if top_recent %}
+    <ul class="divide-y divide-zinc-800">
+      {% for r in top_recent %}
+        <li class="py-2 flex items-baseline justify-between">
+          <div>
+            <span class="font-medium">{{ r.common_name }}</span>
+            <span class="text-zinc-500 italic text-sm ml-2">{{ r.scientific_name }}</span>
+          </div>
+          <div class="text-sm tabular-nums">
+            <span class="text-zinc-400 mr-3">max {{ "%.2f"|format(r.max_conf) }}</span>
+            <span class="font-semibold">{{ r.n }}</span>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-zinc-500 text-sm">No detections in the last hour.</p>
+  {% endif %}
 </section>
 
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
