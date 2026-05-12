@@ -86,14 +86,31 @@
     </div>
     <details class="mt-3">
       <summary class="text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer">+ add a live source</summary>
+      <p id="add-source-error" class="hidden text-xs text-rose-400 mt-2"></p>
       <form
         hx-post="/api/sources"
         hx-target="#sources-panel"
         hx-swap="innerHTML"
-        hx-on::after-request="if(event.detail.successful) { this.reset(); setTimeout(() => location.reload(), 600); }"
+        hx-on::after-request="
+          const err = document.getElementById('add-source-error');
+          if (event.detail.successful) {
+            err.classList.add('hidden');
+            this.reset();
+            setTimeout(() => location.reload(), 600);
+          } else {
+            let msg;
+            try {
+              const body = JSON.parse(event.detail.xhr.responseText || '{}');
+              msg = body.detail || ('HTTP ' + event.detail.xhr.status);
+              if (typeof msg !== 'string') msg = JSON.stringify(msg);
+            } catch (_) { msg = 'HTTP ' + event.detail.xhr.status; }
+            err.textContent = msg;
+            err.classList.remove('hidden');
+          }
+        "
         class="mt-3 grid grid-cols-1 gap-2 text-sm">
-        <input type="text" name="name" placeholder="short name e.g. cornell-feeder" required
-               pattern="[A-Za-z0-9_-]+"
+        <input type="text" name="name" placeholder="short name e.g. Twin Pan" required
+               maxlength="64"
                class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
         <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..." required
                class="bg-zinc-950 border border-zinc-700 rounded px-2 py-1">
@@ -131,14 +148,55 @@
 </section>
 
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
-  <div class="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Recent detections · <span id="rows-source-label">all</span>
-    </h2>
-    <span class="text-xs text-zinc-500">auto-refreshes every 5s</span>
+  <div class="px-5 py-3 border-b border-zinc-800 flex flex-col gap-2">
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+        Recent detections · <span id="rows-source-label">all</span>
+      </h2>
+      <div id="source-chips" class="flex items-center gap-1 flex-wrap text-xs">
+        <span class="text-zinc-500 mr-1">sources</span>
+        <!-- chips rendered by JS from TILES -->
+      </div>
+    </div>
+    <div class="flex items-center gap-3 text-xs text-zinc-500 flex-wrap">
+      <label class="flex items-center gap-1">
+        last
+        <select id="last-minutes" class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200">
+          <option value="0">any time</option>
+          <option value="5">5 min</option>
+          <option value="15">15 min</option>
+          <option value="60">1 h</option>
+          <option value="360">6 h</option>
+          <option value="1440">24 h</option>
+        </select>
+      </label>
+      <label class="flex items-center gap-1">
+        species
+        <select id="top-species" class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200">
+          <option value="0">all</option>
+          <option value="3">top 3</option>
+          <option value="5">top 5</option>
+          <option value="10">top 10</option>
+          <option value="20">top 20</option>
+        </select>
+      </label>
+      <label class="flex items-center gap-1">
+        group
+        <select id="group-by" class="bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200">
+          <option value="0">off (all)</option>
+          <option value="1">1 min</option>
+          <option value="5" selected>5 min</option>
+          <option value="60">1 h</option>
+          <option value="1440">24 h</option>
+          <option value="10080">weekly</option>
+          <option value="525600">annually</option>
+        </select>
+      </label>
+      <span>auto-refreshes every 5s</span>
+    </div>
   </div>
   <div id="detections-list"
-       hx-get="/partials/detections?limit=50"
+       hx-get="/partials/detections?limit=50&group_minutes=5"
        hx-trigger="load, every 5s"
        hx-swap="innerHTML">
     {% include "_detection_rows.html" %}
@@ -152,7 +210,101 @@
   const SITES = {{ sites_json | tojson }};
   const TILE_BY_NAME = Object.fromEntries(TILES.map(t => [t.name, t]));
 
-  const ACTIVE_KEY = 'africam.activeSource';
+  const ACTIVE_KEY  = 'africam.activeSource';
+  const GROUP_KEY   = 'africam.groupMinutes';
+  const LAST_KEY    = 'africam.lastMinutes';
+  const TOPSP_KEY   = 'africam.topSpecies';
+  const SOURCES_KEY = 'africam.detectionSources';
+
+  // --- Detection-source multi-select chips ---
+
+  // localStorage: null = "all sources" (default); otherwise an array of
+  // selected source names. Stored as JSON.
+  function loadSourceFilter() {
+    const raw = localStorage.getItem(SOURCES_KEY);
+    if (!raw) return null;
+    try { const a = JSON.parse(raw); return Array.isArray(a) ? a : null; }
+    catch { return null; }
+  }
+  function saveSourceFilter(arr) {
+    if (arr === null) localStorage.removeItem(SOURCES_KEY);
+    else localStorage.setItem(SOURCES_KEY, JSON.stringify(arr));
+  }
+  function selectedSources() {
+    const all = TILES.map((t) => t.name);
+    const f = loadSourceFilter();
+    if (f === null) return all;
+    // Drop anything not in the current TILES (a source could have been removed).
+    return f.filter((n) => all.includes(n));
+  }
+
+  function renderSourceChips() {
+    const wrap = document.getElementById('source-chips');
+    // Strip everything after the "sources" label.
+    while (wrap.children.length > 1) wrap.removeChild(wrap.lastChild);
+    const all = TILES.map((t) => t.name);
+    const sel = new Set(selectedSources());
+    const baseCls = 'px-2 py-0.5 rounded text-xs border transition-colors';
+    const onCls   = 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300';
+    const offCls  = 'border-zinc-700 text-zinc-500 hover:text-zinc-300';
+
+    for (const name of all) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.dataset.source = name;
+      chip.textContent = name;
+      chip.className = baseCls + ' ' + (sel.has(name) ? onCls : offCls);
+      chip.addEventListener('click', () => {
+        const cur = new Set(selectedSources());
+        if (cur.has(name)) cur.delete(name); else cur.add(name);
+        saveSourceFilter(cur.size === all.length ? null : Array.from(cur));
+        renderSourceChips();
+        refreshDetections();
+      });
+      wrap.appendChild(chip);
+    }
+    // "all" reset chip — only useful when the selection differs from default.
+    if (sel.size !== all.length) {
+      const reset = document.createElement('button');
+      reset.type = 'button';
+      reset.textContent = 'all';
+      reset.className = baseCls + ' border-zinc-800 text-zinc-400 hover:text-zinc-100';
+      reset.addEventListener('click', () => {
+        saveSourceFilter(null);
+        renderSourceChips();
+        refreshDetections();
+      });
+      wrap.appendChild(reset);
+    }
+  }
+
+  function rowsUrl() {
+    const g  = document.getElementById('group-by').value;
+    const lm = document.getElementById('last-minutes').value;
+    const ts = document.getElementById('top-species').value;
+    const params = new URLSearchParams({ limit: '50' });
+    if (g  && g  !== '0') params.set('group_minutes', g);
+    if (lm && lm !== '0') params.set('last_minutes', lm);
+    if (ts && ts !== '0') params.set('top_species', ts);
+    const filter = loadSourceFilter();
+    if (filter) for (const s of filter) params.append('source', s);
+    return '/partials/detections?' + params.toString();
+  }
+
+  function refreshDetections() {
+    const list = document.getElementById('detections-list');
+    list.setAttribute('hx-get', rowsUrl());
+    const sel = selectedSources();
+    const all = TILES.map((t) => t.name);
+    let label;
+    if (sel.length === 0)         label = '(no sources)';
+    else if (sel.length === all.length) label = 'all sources';
+    else if (sel.length === 1)    label = sel[0];
+    else                          label = sel.length + ' sources';
+    document.getElementById('rows-source-label').textContent = label;
+    htmx.process(list);
+    htmx.ajax('GET', list.getAttribute('hx-get'), {target: list, swap: 'innerHTML'});
+  }
 
   // --- Map setup ---
   const map = L.map('map', { scrollWheelZoom: true });
@@ -239,6 +391,8 @@
   }
 
   function setActive(name) {
+    // Video / map / site-panel only. Detection-list filtering lives in the
+    // source chips below the rows header.
     const dropdown = document.getElementById('active-source');
     if (dropdown.value !== name) dropdown.value = name;
     localStorage.setItem(ACTIVE_KEY, name);
@@ -246,8 +400,6 @@
     const video = document.getElementById('active-video');
     const sitePanel = document.getElementById('active-site-panel');
     const openLink = document.getElementById('active-open');
-    const rowsLabel = document.getElementById('rows-source-label');
-    const rowsList = document.getElementById('detections-list');
 
     if (name === '__all__') {
       video.src = 'about:blank';
@@ -255,8 +407,6 @@
       sitePanel.removeAttribute('hx-get');
       openLink.href = '#';
       openLink.style.visibility = 'hidden';
-      rowsLabel.textContent = 'all sources';
-      rowsList.setAttribute('hx-get', '/partials/detections?limit=50');
     } else {
       const tile = TILE_BY_NAME[name];
       video.src = tile && tile.video_id
@@ -272,13 +422,7 @@
         sitePanel.innerHTML = '';
         sitePanel.removeAttribute('hx-get');
       }
-
-      rowsLabel.textContent = name;
-      rowsList.setAttribute('hx-get', `/partials/detections?limit=50&source=${encodeURIComponent(name)}`);
     }
-    // Re-process so HTMX picks up the new hx-get for the every-5s poll.
-    htmx.process(rowsList);
-    htmx.ajax('GET', rowsList.getAttribute('hx-get'), {target: rowsList, swap: 'innerHTML'});
     highlightActiveSite();
   }
 
@@ -310,7 +454,30 @@
 
   document.getElementById('active-source').addEventListener('change', (e) => setActive(e.target.value));
 
+  function rebindFilter(elemId, storageKey) {
+    document.getElementById(elemId).addEventListener('change', (e) => {
+      localStorage.setItem(storageKey, e.target.value);
+      refreshDetections();
+    });
+  }
+  rebindFilter('group-by',      GROUP_KEY);
+  rebindFilter('last-minutes',  LAST_KEY);
+  rebindFilter('top-species',   TOPSP_KEY);
+
+  function restoreFilter(elemId, storageKey) {
+    const saved = localStorage.getItem(storageKey);
+    const sel = document.getElementById(elemId);
+    if (saved && sel.querySelector(`option[value="${CSS.escape(saved)}"]`)) {
+      sel.value = saved;
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
+    restoreFilter('group-by',     GROUP_KEY);
+    restoreFilter('last-minutes', LAST_KEY);
+    restoreFilter('top-species',  TOPSP_KEY);
+    renderSourceChips();
+    refreshDetections();
     const saved = localStorage.getItem(ACTIVE_KEY);
     const dropdown = document.getElementById('active-source');
     const valid = saved && dropdown.querySelector(`option[value="${CSS.escape(saved)}"]`);

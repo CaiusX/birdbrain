@@ -78,6 +78,14 @@ class SpeciesNoteRow(Base):
     # Optional flag that styles the banner in the modal.
     # 'reliable' (green) | 'suspect' (amber) | 'rare' (blue) | NULL (neutral)
     tag: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # IUCN Red List code (LC/NT/VU/EN/CR/EW/EX/DD/NE), populated from the
+    # Wikipedia article's status icon. NULL until first looked up.
+    conservation_status: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Per-species detection threshold override. When set, the pipeline drops
+    # detections of this species below this confidence even if the source's
+    # min_confidence is lower. Lets us suppress loud common species (Egyptian
+    # Goose, Hadada Ibis) that otherwise drown out quieter detections.
+    min_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

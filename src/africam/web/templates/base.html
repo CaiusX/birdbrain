@@ -28,7 +28,7 @@
   {% block head_extra %}{% endblock %}
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans">
-  <header class="border-b border-zinc-800">
+  <header class="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/90 supports-[backdrop-filter]:bg-zinc-950/70 backdrop-blur">
     <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
       <div class="flex items-baseline gap-6">
         <a href="/" class="text-lg font-semibold tracking-tight">🐦 Africam Bird</a>
@@ -37,6 +37,7 @@
           <a href="/rollup" class="text-zinc-400 hover:text-zinc-100">rollup</a>
           <a href="/species" class="text-zinc-400 hover:text-zinc-100">species</a>
           <a href="/audition" class="text-zinc-400 hover:text-zinc-100">audition</a>
+          <a href="/soundscape" class="text-zinc-400 hover:text-zinc-100">soundscape</a>
           <a href="/admin" class="text-zinc-400 hover:text-zinc-100">admin</a>
         </nav>
       </div>

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 from africam.audio.source import AudioSource
 from africam.logging import get_logger
@@ -50,8 +52,23 @@ class YouTubeSource(AudioSource):
         # YouTube live streams don't publish a standalone audio format.
         cmd = ["yt-dlp", "-f", "bestaudio/best", "-g", "--no-warnings"]
         # cookies_file wins if both are set — it's the more reliable path on Windows.
+        # yt-dlp writes back to the cookies file at the end of each session,
+        # which gradually clobbers the canonical export when YouTube rejects
+        # auth. Work around that by copying the file to a per-invocation temp
+        # path: yt-dlp can write to its heart's content, the canonical export
+        # at self.cookies_file stays pristine for the next call.
+        tmp_cookies: Path | None = None
         if self.cookies_file:
-            cmd += ["--cookies", str(self.cookies_file)]
+            src = Path(self.cookies_file)
+            if src.is_file():
+                fd, tmp_path = tempfile.mkstemp(suffix=".cookies.txt")
+                tmp_cookies = Path(tmp_path)
+                import os
+                os.close(fd)
+                shutil.copy(src, tmp_cookies)
+                cmd += ["--cookies", str(tmp_cookies)]
+            else:
+                cmd += ["--cookies", str(self.cookies_file)]
         elif self.cookies_from_browser:
             cmd += ["--cookies-from-browser", self.cookies_from_browser]
         # Tell yt-dlp where to find a JS runtime so it can solve YouTube's
@@ -63,7 +80,14 @@ class YouTubeSource(AudioSource):
             cmd += ["--js-runtimes", runtime]
         cmd += [self.url]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        finally:
+            if tmp_cookies is not None:
+                try:
+                    tmp_cookies.unlink()
+                except OSError:
+                    pass
         if result.returncode != 0:
             raise RuntimeError(
                 f"yt-dlp failed for {self.url}: "

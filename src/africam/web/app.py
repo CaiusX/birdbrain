@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -98,6 +99,23 @@ def _build_tiles(sources: list[SourceConfig]) -> list[LiveTile]:
     ]
 
 
+# Module-level lazy detector for the /reanalyze endpoint. BirdNET's TF model
+# takes ~5 s to load and ~150 MB of RAM, so don't pay that cost at web-app
+# startup — only on first manual re-analysis request. The pipeline process
+# has its own independent detector instance; this one only services the UI.
+_reanalyze_lock = threading.Lock()
+_reanalyze_state: dict = {"detector": None}
+
+
+def _get_reanalyze_detector():
+    if _reanalyze_state["detector"] is None:
+        with _reanalyze_lock:
+            if _reanalyze_state["detector"] is None:
+                from africam.detector.birdnet import BirdNetDetector
+                _reanalyze_state["detector"] = BirdNetDetector()
+    return _reanalyze_state["detector"]
+
+
 def create_app(cfg: AppConfig | None = None) -> FastAPI:
     cfg = cfg or AppConfig()
     db = Database(cfg.db_url)
@@ -160,12 +178,43 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
         return out
 
+    def _group_detections(rows: list[DetectionRow], bucket_seconds: int) -> list[dict]:
+        """Collapse multiple detections of the same (source, species) in one
+        time bucket into a single representative row + count. ``rows`` must be
+        in descending ``started_at`` order — the first row encountered in each
+        bucket is also the latest, which keeps the visible ordering stable."""
+        if bucket_seconds <= 0:
+            return [{"r": r, "n": 1, "latest": r.started_at} for r in rows]
+        groups: dict[tuple, dict] = {}
+        order: list[tuple] = []
+        for r in rows:
+            ts = r.started_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            bucket = int(ts.timestamp() // bucket_seconds)
+            key = (r.source_name, r.scientific_name, bucket)
+            g = groups.get(key)
+            if g is None:
+                groups[key] = {"r": r, "n": 1, "latest": r.started_at}
+                order.append(key)
+            else:
+                g["n"] += 1
+                # Keep the highest-confidence row as the representative so the
+                # modal opens on the best clip in the bucket.
+                if r.confidence > g["r"].confidence:
+                    g["r"] = r
+        return [groups[k] for k in order]
+
     def _note_tag_context() -> dict:
         """Shared context for any page that renders detection rows with
         palette-aware spectrograms. Keeps the template-side lookup tidy."""
         with db.session() as s:
-            tag_by_sci = {
-                n.scientific_name: n.tag for n in s.scalars(select(SpeciesNoteRow))
+            notes = list(s.scalars(select(SpeciesNoteRow)))
+            tag_by_sci = {n.scientific_name: n.tag for n in notes}
+            status_by_sci = {
+                n.scientific_name: n.conservation_status
+                for n in notes
+                if n.conservation_status
             }
             all_species = list(
                 s.scalars(
@@ -176,6 +225,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
         return {
             "note_tag_by_sci": tag_by_sci,
+            "status_by_sci": status_by_sci,
             "palette_for_tag": {
                 k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
             },
@@ -186,14 +236,19 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
         _, sources_by_name, tiles = _all_sources()
+        # Initial render uses default grouping; JS swaps the URL on toggle.
+        group_minutes = 5
         with db.session() as s:
-            rows = list(
+            # Pull a wider window than ``limit`` so we have enough raw rows to
+            # form ``limit`` groups when grouping is on.
+            raw = list(
                 s.scalars(
                     select(DetectionRow)
                     .order_by(desc(DetectionRow.started_at))
-                    .limit(50)
+                    .limit(500)
                 )
             )
+            rows = _group_detections(raw, group_minutes * 60)[:50]
             row_sources = list(
                 s.scalars(
                     select(DetectionRow.source_name)
@@ -254,19 +309,56 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/partials/detections", response_class=HTMLResponse)
     def detections_partial(
         request: Request,
-        source: str | None = Query(default=None),
+        source: list[str] | None = Query(default=None),
         limit: int = Query(default=50, ge=1, le=500),
+        # Upper bound is ~1 year in minutes (allows "annually" bucket).
+        group_minutes: int = Query(default=5, ge=0, le=60 * 24 * 366),
+        # 0 = "all time" — no recency filter.
+        last_minutes: int = Query(default=0, ge=0, le=24 * 60 * 14),
+        # 0 = "all species" — no species cap.
+        top_species: int = Query(default=0, ge=0, le=200),
     ) -> HTMLResponse:
         _, sources_by_name, _ = _all_sources()
+        # Fetch enough raw rows to fill ``limit`` buckets even when one
+        # species dominates the window. The wider the bucket, the more raw
+        # data we need to back it — at hourly+ grouping we may need everything.
+        if group_minutes >= 60:
+            raw_limit = 50_000
+        elif group_minutes > 0:
+            raw_limit = max(limit, limit * 10)
+        else:
+            raw_limit = limit
+        # Normalise source filter: drop empty entries; empty list means "all".
+        sources_filter = [s for s in (source or []) if s]
         with db.session() as s:
             stmt = (
                 select(DetectionRow)
                 .order_by(desc(DetectionRow.started_at))
-                .limit(limit)
+                .limit(raw_limit)
             )
-            if source:
-                stmt = stmt.where(DetectionRow.source_name == source)
-            rows = list(s.scalars(stmt))
+            if sources_filter:
+                stmt = stmt.where(DetectionRow.source_name.in_(sources_filter))
+            if last_minutes > 0:
+                cutoff = datetime.now(UTC) - timedelta(minutes=last_minutes)
+                stmt = stmt.where(DetectionRow.started_at >= cutoff)
+            raw = list(s.scalars(stmt))
+        rows = _group_detections(raw, group_minutes * 60)
+        if top_species > 0:
+            # Keep rows belonging to the N most recently active species (first
+            # seen while scanning desc-by-time output). Order within each
+            # species is preserved.
+            allowed: list[str] = []
+            seen: set[str] = set()
+            for entry in rows:
+                sci = entry["r"].scientific_name
+                if sci not in seen:
+                    seen.add(sci)
+                    allowed.append(sci)
+                    if len(allowed) >= top_species:
+                        break
+            allowed_set = set(allowed)
+            rows = [e for e in rows if e["r"].scientific_name in allowed_set]
+        rows = rows[:limit]
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         return TEMPLATES.TemplateResponse(
             request,
@@ -542,6 +634,133 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/species/{scientific:path}", response_class=HTMLResponse)
+    def species_detail(request: Request, scientific: str) -> HTMLResponse:
+        from collections import Counter
+        _, sources_by_name, _ = _all_sources()
+        with db.session() as s:
+            all_rows = list(
+                s.scalars(
+                    select(DetectionRow)
+                    .where(DetectionRow.scientific_name == scientific)
+                    .order_by(desc(DetectionRow.started_at))
+                )
+            )
+            note = s.get(SpeciesNoteRow, scientific)
+        if not all_rows and note is None:
+            raise HTTPException(404, f"No detections or note for {scientific!r}")
+
+        common_name = (
+            all_rows[0].common_name
+            if all_rows
+            else (note.common_name if note else scientific)
+        )
+
+        # Per-source breakdown.
+        by_source: dict[str, list[DetectionRow]] = {}
+        for r in all_rows:
+            by_source.setdefault(r.source_name, []).append(r)
+        source_summary = []
+        for src in sorted(by_source, key=lambda x: -len(by_source[x])):
+            srows = by_source[src]
+            source_summary.append({
+                "source": src,
+                "count": len(srows),
+                "max_conf": max(r.confidence for r in srows),
+                "first_seen": min(r.started_at for r in srows),
+                "last_seen": max(r.started_at for r in srows),
+            })
+
+        # Daily timeline (last DAYS_BACK days, oldest → newest).
+        DAYS_BACK = 14
+        today_utc = datetime.now(UTC).date()
+        day_counts = [0] * DAYS_BACK
+        for r in all_rows:
+            ts = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
+            delta = (today_utc - ts.date()).days
+            if 0 <= delta < DAYS_BACK:
+                day_counts[DAYS_BACK - 1 - delta] += 1
+        # Y-axis labels: dates from oldest to today.
+        daily = [
+            {
+                "date": today_utc - timedelta(days=DAYS_BACK - 1 - i),
+                "count": c,
+            }
+            for i, c in enumerate(day_counts)
+        ]
+        peak_day = max(day_counts) or 1
+
+        # Hourly activity in each row's source-local tz.
+        hours = [0] * 24
+        for r in all_rows:
+            ts = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
+            cfg_src = sources_by_name.get(r.source_name)
+            tz_name = cfg_src.timezone if cfg_src else "UTC"
+            try:
+                tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                tz = UTC
+            hours[ts.astimezone(tz).hour] += 1
+        peak_hour = max(hours) or 1
+
+        # Label and suggested-species tallies.
+        label_counts_raw = Counter(r.label for r in all_rows)
+        label_counts = {
+            "good": label_counts_raw.get("good", 0),
+            "bad": label_counts_raw.get("bad", 0),
+            "unsure": label_counts_raw.get("unsure", 0),
+            "unreviewed": label_counts_raw.get(None, 0),
+        }
+        suggested_counter = Counter(
+            r.suggested_species for r in all_rows if r.suggested_species
+        )
+
+        # Confidence histogram (10 buckets, 0.0..1.0).
+        conf_bins = [0] * 10
+        for r in all_rows:
+            i = min(9, int(r.confidence * 10))
+            conf_bins[i] += 1
+        peak_conf_bin = max(conf_bins) or 1
+
+        # Sample clips: top by max conf, plus a spread (low/mid/high), plus labeled good.
+        with_clips = [r for r in all_rows if r.clip_path]
+        top_clips = sorted(with_clips, key=lambda r: -r.confidence)[:5]
+        if len(with_clips) >= 6:
+            sorted_by_conf = sorted(with_clips, key=lambda r: r.confidence)
+            step = max(1, len(sorted_by_conf) // 6)
+            spread_clips = sorted_by_conf[::step][:6]
+        else:
+            spread_clips = []
+        good_clips = [r for r in all_rows if r.label == "good" and r.clip_path][:8]
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "species_detail.html",
+            {
+                "scientific": scientific,
+                "common_name": common_name,
+                "note": note,
+                "total": len(all_rows),
+                "max_conf": max((r.confidence for r in all_rows), default=0),
+                "source_summary": source_summary,
+                "daily": daily,
+                "peak_day": peak_day,
+                "hours": hours,
+                "peak_hour": peak_hour,
+                "label_counts": label_counts,
+                "suggested": suggested_counter.most_common(8),
+                "conf_bins": conf_bins,
+                "peak_conf_bin": peak_conf_bin,
+                "top_clips": top_clips,
+                "spread_clips": spread_clips,
+                "good_clips": good_clips,
+                "source_tz": {
+                    name: cfg.timezone for name, cfg in sources_by_name.items()
+                },
+                **_note_tag_context(),
+            },
+        )
+
     def _admin_view() -> dict:
         """Build the per-source admin payload: status + knobs + heartbeat info.
         Combines file-defined sources (sources.toml), live runtime sources
@@ -678,7 +897,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 }
             )
 
-            # Top species for this source.
+            # Top species for this source, with a 24-hour-of-day histogram
+            # computed in the source's local timezone (so dawn-chorus peaks
+            # land on the morning hours regardless of where the camera is).
+            cfg_for_src = sources_by_name.get(src_name)
+            tz_name = cfg_for_src.timezone if cfg_for_src else "UTC"
+            try:
+                src_tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                src_tz = UTC
             stats: dict[str, dict] = {}
             for r in src_rows:
                 d = stats.setdefault(
@@ -690,6 +917,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         "max_conf": 0.0,
                         "best_id": r.id,
                         "best_at": r.started_at,
+                        "hours": [0] * 24,
                     },
                 )
                 d["count"] += 1
@@ -697,11 +925,17 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     d["max_conf"] = r.confidence
                     d["best_id"] = r.id
                     d["best_at"] = r.started_at
+                ts = r.started_at
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                d["hours"][ts.astimezone(src_tz).hour] += 1
             ordered = sorted(stats.values(), key=lambda d: d["count"], reverse=True)[:top]
+            for d in ordered:
+                d["peak_hour"] = max(d["hours"]) or 1
             per_source_top.append(
                 {
                     "source": src_name,
-                    "tz": sources_by_name.get(src_name).timezone if sources_by_name.get(src_name) else "UTC",
+                    "tz": tz_name,
                     "species": ordered,
                 }
             )
@@ -803,8 +1037,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             # Species → note tag, so each row can encode its palette in the
             # spectrogram URL (browser cache busts on re-tag without a full
             # page reload).
-            note_tag_by_sci = {
-                n.scientific_name: n.tag for n in s.scalars(select(SpeciesNoteRow))
+            _notes = list(s.scalars(select(SpeciesNoteRow)))
+            note_tag_by_sci = {n.scientific_name: n.tag for n in _notes}
+            status_by_sci = {
+                n.scientific_name: n.conservation_status
+                for n in _notes
+                if n.conservation_status
             }
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
@@ -816,6 +1054,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "all_sources": all_sources,
                 "all_species": all_species,
                 "note_tag_by_sci": note_tag_by_sci,
+                "status_by_sci": status_by_sci,
                 "palette_for_tag": {
                     k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
                 },
@@ -836,6 +1075,126 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "bad": label_counts.get("bad", 0),
                     "unsure": label_counts.get("unsure", 0),
                     "unreviewed": label_counts.get(None, 0),
+                },
+            },
+        )
+
+    @app.get("/soundscape", response_class=HTMLResponse)
+    def soundscape(
+        request: Request,
+        source: str | None = Query(default=None),
+        min_species: int = Query(default=2, ge=2, le=10),
+        order: str = Query(default="recent"),  # recent | n_species | max_conf
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> HTMLResponse:
+        """Browse chunks where the live pipeline detected multiple species at
+        once. Every DetectionRow sharing a ``clip_path`` came from the same
+        3 s window, so a clip_path with >=2 rows means BirdNET heard several
+        birds (or hedged between similar species) in the same instant."""
+        _, sources_by_name, _ = _all_sources()
+
+        with db.session() as s:
+            group_stmt = (
+                select(
+                    DetectionRow.clip_path.label("clip_path"),
+                    func.count().label("n"),
+                    func.max(DetectionRow.started_at).label("latest"),
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                )
+                .where(DetectionRow.clip_path.is_not(None))
+                .group_by(DetectionRow.clip_path)
+                .having(func.count() >= min_species)
+            )
+            if source:
+                group_stmt = group_stmt.where(DetectionRow.source_name == source)
+            if order == "n_species":
+                group_stmt = group_stmt.order_by(desc("n"), desc("latest"))
+            elif order == "max_conf":
+                group_stmt = group_stmt.order_by(desc("max_conf"))
+            else:
+                group_stmt = group_stmt.order_by(desc("latest"))
+
+            groups_meta = list(s.execute(group_stmt.limit(limit)).all())
+            clip_paths = [g.clip_path for g in groups_meta]
+
+            if clip_paths:
+                rows = list(
+                    s.scalars(
+                        select(DetectionRow)
+                        .where(DetectionRow.clip_path.in_(clip_paths))
+                        .order_by(desc(DetectionRow.confidence))
+                    )
+                )
+            else:
+                rows = []
+
+            by_clip: dict[str, list[DetectionRow]] = {}
+            for r in rows:
+                by_clip.setdefault(r.clip_path, []).append(r)
+
+            groups = [
+                {
+                    "clip_path": g.clip_path,
+                    "n": g.n,
+                    "latest": g.latest,
+                    "rows": by_clip.get(g.clip_path, []),
+                }
+                for g in groups_meta
+                if by_clip.get(g.clip_path)
+            ]
+
+            all_sources_list = list(
+                s.scalars(
+                    select(DetectionRow.source_name)
+                    .group_by(DetectionRow.source_name)
+                    .order_by(DetectionRow.source_name)
+                )
+            )
+            _notes = list(s.scalars(select(SpeciesNoteRow)))
+            note_tag_by_sci = {n.scientific_name: n.tag for n in _notes}
+            status_by_sci = {
+                n.scientific_name: n.conservation_status
+                for n in _notes
+                if n.conservation_status
+            }
+            all_species = list(
+                s.scalars(
+                    select(DetectionRow.common_name)
+                    .group_by(DetectionRow.common_name)
+                    .order_by(DetectionRow.common_name)
+                )
+            )
+            total_groups = s.scalar(
+                select(func.count()).select_from(
+                    select(DetectionRow.clip_path)
+                    .where(DetectionRow.clip_path.is_not(None))
+                    .group_by(DetectionRow.clip_path)
+                    .having(func.count() >= min_species)
+                    .subquery()
+                )
+            ) or 0
+
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        return TEMPLATES.TemplateResponse(
+            request,
+            "soundscape.html",
+            {
+                "groups": groups,
+                "total_groups": total_groups,
+                "all_sources": all_sources_list,
+                "all_species": all_species,
+                "note_tag_by_sci": note_tag_by_sci,
+                "status_by_sci": status_by_sci,
+                "palette_for_tag": {
+                    k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
+                },
+                "default_palette": SPEC_PALETTE_FOR_TAG[None],
+                "source_tz": source_tz,
+                "filters": {
+                    "source": source or "",
+                    "min_species": min_species,
+                    "order": order,
+                    "limit": limit,
                 },
             },
         )
@@ -873,6 +1232,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "r": row,
                     "source_tz": source_tz,
                     "note_tag_by_sci": {row.scientific_name: note.tag} if note else {},
+                    "status_by_sci": (
+                        {row.scientific_name: note.conservation_status}
+                        if note and note.conservation_status else {}
+                    ),
                     "palette_for_tag": {
                         k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
                     },
@@ -880,6 +1243,134 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 },
             )
         return JSONResponse({"ok": True, "id": detection_id, "label": new_label})
+
+    @app.get("/api/detections/{detection_id}/reanalyze")
+    def reanalyze(detection_id: int) -> JSONResponse:
+        """Re-run BirdNET on a saved clip and return the top candidates.
+
+        Useful in the audition flow when a detection's confidence sits near
+        the threshold and you want to see what *else* the model considered.
+        Uses a lower min_confidence than the live pipeline so runners-up
+        surface. lat/lon are taken from the original detection row so the
+        species filter matches what was applied during ingest.
+        """
+        import librosa
+        import numpy as np
+
+        from africam.audio.source import AudioChunk
+
+        with db.session() as s:
+            row = s.get(DetectionRow, detection_id)
+            if row is None or row.clip_path is None:
+                raise HTTPException(404, "no clip for this detection")
+            wav_path = Path(row.clip_path).resolve()
+            lat = row.latitude
+            lon = row.longitude
+            started_at = row.started_at
+            source_name = row.source_name
+            orig_sci = row.scientific_name
+            orig_common = row.common_name
+            orig_conf = row.confidence
+
+        try:
+            wav_path.relative_to(clips_root)
+        except ValueError as e:
+            raise HTTPException(403, "clip outside allowed root") from e
+        if not wav_path.is_file():
+            raise HTTPException(404, "clip file missing")
+
+        try:
+            samples, sr = librosa.load(str(wav_path), sr=48_000, mono=True)
+        except Exception as e:
+            raise HTTPException(500, f"failed to load clip: {e}") from e
+        samples = np.asarray(samples, dtype=np.float32)
+
+        if started_at is not None and started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        chunk = AudioChunk(
+            samples=samples,
+            sample_rate=int(sr),
+            started_at=started_at or datetime.now(UTC),
+            source_name=source_name,
+        )
+        detector = _get_reanalyze_detector()
+        # Low floor on purpose — we want to see runners-up the live pipeline
+        # would have suppressed. Per-species overrides are deliberately NOT
+        # applied here either.
+        detections = detector.analyze(
+            chunk, lat=lat, lon=lon, week=None, min_confidence=0.05
+        )
+        detections.sort(key=lambda d: d.confidence, reverse=True)
+        top = [
+            {
+                "scientific_name": d.scientific_name,
+                "common_name": d.common_name,
+                "confidence": round(float(d.confidence), 4),
+                "is_original": d.scientific_name == orig_sci,
+            }
+            for d in detections[:10]
+        ]
+        return JSONResponse(
+            {
+                "detections": top,
+                "original": {
+                    "scientific_name": orig_sci,
+                    "common_name": orig_common,
+                    "confidence": round(float(orig_conf), 4),
+                },
+                "clip_duration_s": round(len(samples) / float(sr), 3),
+            }
+        )
+
+    @app.get("/api/detections/{detection_id}/locate")
+    def locate(detection_id: int) -> JSONResponse:
+        """For the clip containing this detection, return an approximate
+        time/frequency marker for every species detected in that clip —
+        the peak of spectrogram energy inside the species's typical
+        frequency band. Useful overlay on the modal spectrogram for
+        multi-species chunks ("which call belongs to which species?").
+        """
+        from africam.audio.locator import locate_species_in_clip
+
+        with db.session() as s:
+            row = s.get(DetectionRow, detection_id)
+            if row is None or row.clip_path is None:
+                raise HTTPException(404, "no clip for this detection")
+            wav_path = Path(row.clip_path).resolve()
+            siblings = list(
+                s.scalars(
+                    select(DetectionRow)
+                    .where(DetectionRow.clip_path == row.clip_path)
+                    .order_by(desc(DetectionRow.confidence))
+                )
+            )
+
+        try:
+            wav_path.relative_to(clips_root)
+        except ValueError as e:
+            raise HTTPException(403, "clip outside allowed root") from e
+        if not wav_path.is_file():
+            raise HTTPException(404, "clip file missing")
+
+        species = [(r.scientific_name, r.common_name) for r in siblings]
+        try:
+            markers = locate_species_in_clip(wav_path, species)
+        except Exception as e:
+            raise HTTPException(500, f"failed to locate: {e}") from e
+
+        conf_by_sci = {r.scientific_name: float(r.confidence) for r in siblings}
+        for m in markers:
+            m["confidence"] = round(conf_by_sci.get(m["scientific_name"], 0.0), 3)
+
+        return JSONResponse(
+            {
+                "markers": markers,
+                # Visual frequency range used by the spectrogram image. The
+                # client needs these to map Hz → y%.
+                "spec_freq_lo_hz": 80.0,
+                "spec_freq_hi_hz": 12000.0,
+            }
+        )
 
     SPEC_SIZES = {
         "small": "240x60",   # inline conf-bar background
@@ -967,18 +1458,33 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             or _wp_fetch(common)
             or {"thumbnail": None, "page_url": None}
         )
-        # Augment with a Wikipedia range/distribution map when we can find one.
-        # Resolved against the same page title we landed on (or the input
-        # scientific/common name), since the article's image list is the most
-        # reliable source for the species' specific range map.
+        # Augment with the Wikipedia range/distribution map and IUCN status
+        # icon. One image-list fetch covers both — resolved against the same
+        # page title we landed on (or the input scientific/common name).
         for title in (payload.get("wp_title"), scientific, common):
-            map_payload = _wp_range_map(title) if title else None
+            if not title:
+                continue
+            images = _wp_article_images(title)
+            if not images:
+                continue
+            map_payload = _pick_range_map(images)
             if map_payload:
                 payload = {**payload, **map_payload}
-                break
+            status = _pick_status(images)
+            if status:
+                payload["conservation_status"] = status
+            break
+        # Persist conservation status so row templates can show a badge
+        # without hitting Wikipedia per page render.
+        if payload.get("conservation_status"):
+            db.set_species_status(scientific, payload["conservation_status"])
         # Only cache when we actually got *something* useful — otherwise a
         # transient Wikipedia hiccup poisons the cache for 24h.
-        if payload.get("thumbnail") or payload.get("range_map"):
+        if (
+            payload.get("thumbnail")
+            or payload.get("range_map")
+            or payload.get("conservation_status")
+        ):
             _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
         return JSONResponse(payload)
 
@@ -989,10 +1495,21 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     _RANGE_EXCLUDES = ("status_iucn", "commons-logo", "ooui_icon", "oojs_ui")
 
     _RANGE_SPLIT = re.compile(r"[^a-z0-9]+")
+    # IUCN status icon filenames: "Status_iucn3.1_LC.svg", "Status_iucn_VU.svg",
+    # legacy "Status_LC.svg". Code is the last all-caps token before .svg.
+    _IUCN_STATUS_RE = re.compile(
+        r"Status[_ ](?:iucn[\d.]*[_ ])?([A-Z]{2,3})\.svg",
+        re.IGNORECASE,
+    )
+    # Canonical codes — guard against accidental matches on unrelated filenames.
+    _IUCN_CODES = {"LC", "NT", "VU", "EN", "CR", "EW", "EX", "DD", "NE"}
 
-    def _wp_range_map(title: str) -> dict | None:
+    def _wp_article_images(title: str) -> list[str]:
+        """Fetch the list of image File: titles for a Wikipedia article. We
+        reuse this list to find both a range map and an IUCN status icon in
+        a single round-trip."""
         if not title:
-            return None
+            return []
         title_enc = urllib.parse.quote(title.strip().replace(" ", "_"))
         list_url = (
             "https://en.wikipedia.org/w/api.php"
@@ -1006,19 +1523,33 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
                 data = json.load(resp)
         except Exception:
-            return None
-        candidates: list[str] = []
+            return []
+        out: list[str] = []
         for page in (data.get("query") or {}).get("pages", {}).values():
             for img in page.get("images") or []:
-                t = img.get("title") or ""
-                tl = t.lower()
-                if any(x in tl for x in _RANGE_EXCLUDES):
-                    continue
-                # "File:..." prefix + extension contribute noise; just compare
-                # tokens against the keyword set.
-                tokens = {tk for tk in _RANGE_SPLIT.split(tl) if tk}
-                if tokens & _RANGE_TOKENS:
-                    candidates.append(t)
+                t = img.get("title")
+                if t:
+                    out.append(t)
+        return out
+
+    def _pick_status(images: list[str]) -> str | None:
+        for t in images:
+            m = _IUCN_STATUS_RE.search(t)
+            if m:
+                code = m.group(1).upper()
+                if code in _IUCN_CODES:
+                    return code
+        return None
+
+    def _pick_range_map(images: list[str]) -> dict | None:
+        candidates: list[str] = []
+        for t in images:
+            tl = t.lower()
+            if any(x in tl for x in _RANGE_EXCLUDES):
+                continue
+            tokens = {tk for tk in _RANGE_SPLIT.split(tl) if tk}
+            if tokens & _RANGE_TOKENS:
+                candidates.append(t)
         if not candidates:
             return None
         # Prefer 'distribution' over 'range' over plain 'map'.
@@ -1030,7 +1561,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 return 1
             return 2
         candidates.sort(key=_rank)
-        fname_enc = urllib.parse.quote(candidates[0].replace(" ", "_"))
+        fname = candidates[0]
+        fname_enc = urllib.parse.quote(fname.replace(" ", "_"))
         info_url = (
             "https://en.wikipedia.org/w/api.php"
             f"?action=query&titles={fname_enc}"
@@ -1056,13 +1588,21 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     def get_species_note(scientific_name: str) -> JSONResponse:
         row = db.get_species_note(scientific_name)
         if row is None:
-            return JSONResponse({"scientific_name": scientific_name, "note": "", "tag": None})
+            return JSONResponse(
+                {
+                    "scientific_name": scientific_name,
+                    "note": "",
+                    "tag": None,
+                    "min_confidence": None,
+                }
+            )
         return JSONResponse(
             {
                 "scientific_name": row.scientific_name,
                 "common_name": row.common_name,
                 "note": row.note,
                 "tag": row.tag,
+                "min_confidence": row.min_confidence,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
         )
@@ -1076,18 +1616,55 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         tag = tag_raw or None
         if tag is not None and tag not in ("reliable", "suspect", "rare"):
             raise HTTPException(400, "tag must be reliable/suspect/rare or empty")
-        if not note:
-            db.delete_species_note(scientific_name)
-            return JSONResponse({"deleted": True, "scientific_name": scientific_name})
-        row = db.set_species_note(
-            scientific_name, common_name=common_name, note=note, tag=tag
-        )
+
+        # Optional per-species min_confidence override. Only applied when the
+        # field is present in the form (else we leave whatever was there).
+        # Empty string clears it.
+        mc_raw = form.get("min_confidence")
+        mc_supplied = mc_raw is not None
+        mc_value: float | None = None
+        if mc_supplied and (mc_raw or "").strip():
+            try:
+                mc_value = float(mc_raw)
+            except ValueError as e:
+                raise HTTPException(400, "min_confidence must be a number") from e
+            if not (0.0 <= mc_value <= 1.0):
+                raise HTTPException(400, "min_confidence must be in [0, 1]")
+
+        # When there's no note text AND no threshold to set, treat as delete.
+        if not note and (not mc_supplied or mc_value is None):
+            existing = db.get_species_note(scientific_name)
+            if existing is not None and existing.min_confidence is not None and not mc_supplied:
+                # The user is clearing just the note; keep the threshold.
+                pass
+            else:
+                db.delete_species_note(scientific_name)
+                return JSONResponse({"deleted": True, "scientific_name": scientific_name})
+
+        if note:
+            row = db.set_species_note(
+                scientific_name, common_name=common_name, note=note, tag=tag
+            )
+        else:
+            # Note empty but we have a threshold to persist — keep existing
+            # note/tag if any.
+            existing = db.get_species_note(scientific_name)
+            if existing is None:
+                row = db.set_species_note(
+                    scientific_name, common_name=common_name, note="", tag=tag
+                )
+            else:
+                row = existing
+        if mc_supplied:
+            db.set_species_min_confidence(scientific_name, mc_value)
+            row = db.get_species_note(scientific_name)
         return JSONResponse(
             {
                 "scientific_name": row.scientific_name,
                 "common_name": row.common_name,
                 "note": row.note,
                 "tag": row.tag,
+                "min_confidence": row.min_confidence,
                 "updated_at": row.updated_at.isoformat(),
             }
         )

@@ -165,6 +165,12 @@ def _consume_stream(
     stop_event: threading.Event,
 ) -> None:
     last_hb = 0.0
+    last_species_floor_refresh = 0.0
+    species_floor: dict[str, float] = {}
+    # How often to refresh per-species threshold overrides. Cheap query, but
+    # we don't need millisecond freshness — once a minute is plenty given the
+    # UI tweaks land seconds-to-minutes after the user wants them.
+    SPECIES_FLOOR_REFRESH_S = 60.0
     for chunk in source.stream(stop_event=stop_event):
         if stop_event.is_set():
             return
@@ -175,6 +181,12 @@ def _consume_stream(
             except Exception:
                 slog.exception("worker.heartbeat_update_failed")
             last_hb = now
+        if now - last_species_floor_refresh > SPECIES_FLOOR_REFRESH_S:
+            try:
+                species_floor = db.species_min_confidence_map()
+            except Exception:
+                slog.exception("worker.species_floor_refresh_failed")
+            last_species_floor_refresh = now
         resolved = resolver.current()
         try:
             detections = detector.analyze(
@@ -187,6 +199,15 @@ def _consume_stream(
         except Exception:
             slog.exception("detect.failed")
             continue
+
+        # Apply per-species overrides: a species' own floor can be ABOVE the
+        # source default (to suppress loud common species like Egyptian Goose
+        # / Hadada that otherwise drown out everything quieter).
+        if species_floor and detections:
+            detections = [
+                d for d in detections
+                if d.confidence >= species_floor.get(d.scientific_name, cfg.min_confidence)
+            ]
 
         if not detections:
             continue

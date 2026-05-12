@@ -50,6 +50,8 @@ class Database:
             ("detections", "label", "TEXT"),
             ("detections", "labeled_at", "TIMESTAMP"),
             ("detections", "suggested_species", "TEXT"),
+            ("species_notes", "conservation_status", "TEXT"),
+            ("species_notes", "min_confidence", "REAL"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
         ]
         with self.engine.begin() as conn:
@@ -233,6 +235,24 @@ class Database:
             row.updated_at = datetime.now(UTC)
         return row
 
+    def set_species_status(self, scientific_name: str, status: str | None) -> None:
+        """Cache a Wikipedia-derived IUCN status code on the species row.
+        Creates a minimal note row if one doesn't already exist so we have
+        somewhere to hang the status — the curated note stays NULL/empty."""
+        if status and len(status) > 8:
+            return
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                row = SpeciesNoteRow(
+                    scientific_name=scientific_name,
+                    common_name="",
+                    note="",
+                    updated_at=datetime.now(UTC),
+                )
+                s.add(row)
+            row.conservation_status = status
+
     def delete_species_note(self, scientific_name: str) -> bool:
         with self._Session() as s, s.begin():
             row = s.get(SpeciesNoteRow, scientific_name)
@@ -240,6 +260,36 @@ class Database:
                 return False
             s.delete(row)
         return True
+
+    def species_min_confidence_map(self) -> dict[str, float]:
+        """Map of scientific_name → per-species minimum confidence override
+        (only for species that have one set). The pipeline polls this so
+        workers can suppress loud common species without restarting."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(SpeciesNoteRow.scientific_name, SpeciesNoteRow.min_confidence)
+                .where(SpeciesNoteRow.min_confidence.is_not(None))
+            ).all()
+        return {sci: float(mc) for sci, mc in rows}
+
+    def set_species_min_confidence(
+        self, scientific_name: str, value: float | None
+    ) -> None:
+        """Set/clear the per-species detection floor. Creates a minimal note
+        row if none exists so we have somewhere to hang the override."""
+        if value is not None and not (0.0 <= value <= 1.0):
+            raise ValueError("min_confidence must be in [0, 1]")
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                row = SpeciesNoteRow(
+                    scientific_name=scientific_name,
+                    common_name="",
+                    note="",
+                    updated_at=datetime.now(UTC),
+                )
+                s.add(row)
+            row.min_confidence = value
 
     def list_species_notes(self) -> list[SpeciesNoteRow]:
         with self._Session() as s:
