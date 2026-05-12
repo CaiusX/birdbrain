@@ -93,7 +93,7 @@
       </div>
     </div>
 
-    <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none">
+    <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none touch-none">
       <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-cover">
       <div id="spec-modal-locators"
            class="absolute inset-0 pointer-events-none transition-opacity duration-150"
@@ -832,18 +832,20 @@
   });
 
   let dragActive = null;
-  specEl.addEventListener('mousedown', (e) => {
-    if (e.button !== 0 || !audio.duration) return;
+  specEl.addEventListener('pointerdown', (e) => {
+    if (!e.isPrimary || !audio.duration) return;
     const rect = specEl.getBoundingClientRect();
     dragActive = {
+      pointerId: e.pointerId,
       startX: e.clientX - rect.left,
       width: rect.width,
       moved: false,
     };
+    try { specEl.setPointerCapture(e.pointerId); } catch (_) { /* unsupported */ }
     e.preventDefault();
   });
-  specEl.addEventListener('mousemove', (e) => {
-    if (!dragActive) return;
+  specEl.addEventListener('pointermove', (e) => {
+    if (!dragActive || e.pointerId !== dragActive.pointerId) return;
     const rect = specEl.getBoundingClientRect();
     const x = e.clientX - rect.left;
     if (Math.abs(x - dragActive.startX) > 4) dragActive.moved = true;
@@ -854,7 +856,8 @@
     }
   });
   function _finishDrag(e) {
-    if (!dragActive) return;
+    if (!dragActive || (e.pointerId != null && e.pointerId !== dragActive.pointerId)) return;
+    try { specEl.releasePointerCapture(dragActive.pointerId); } catch (_) { /* ignore */ }
     const rect = specEl.getBoundingClientRect();
     const x = e.clientX - rect.left;
     if (dragActive.moved) {
@@ -885,8 +888,8 @@
     }
     dragActive = null;
   }
-  specEl.addEventListener('mouseup', _finishDrag);
-  specEl.addEventListener('mouseleave', () => { dragActive = null; });
+  specEl.addEventListener('pointerup', _finishDrag);
+  specEl.addEventListener('pointercancel', () => { dragActive = null; });
 
   async function loadReanalyze(detectionId) {
     reanalyzeTable.classList.add('hidden');
