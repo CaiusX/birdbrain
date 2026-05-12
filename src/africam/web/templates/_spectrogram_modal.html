@@ -407,6 +407,7 @@
     locatorLayer.innerHTML = '';
     locatorChips.innerHTML = '';
     locatorLegend.classList.add('hidden');
+    loopRange = null;
     loadLocators(currentId);
     // Pre-fill the species hint + search-↗ link so they're useful even when
     // the rolldown is collapsed.
@@ -419,7 +420,6 @@
     } else {
       dialog.setAttribute('open', '');
     }
-    audio.play().catch(() => {});
   }
 
   function applyNoteView(data) {
@@ -599,6 +599,14 @@
     '#fbbf24', '#34d399', '#60a5fa', '#f472b6',
     '#a78bfa', '#fb7185', '#facc15', '#22d3ee',
   ];
+  // Marker box width as a fraction of clip duration. Also the loop window
+  // when a chip is clicked — ~0.5 s on a 3 s clip, enough to hear a call
+  // plus a little context on either side without bleeding into other calls.
+  const LOCATOR_WIDTH_FRAC = 0.16;
+
+  // Active loop range and the species/chip it's attached to. Null when free
+  // play. Only one section loops at a time — clicking another chip switches.
+  let loopRange = null;
 
   function _freqToYPct(f, loHz, hiHz) {
     // Spectrogram uses log frequency axis; bottom = loHz, top = hiHz.
@@ -620,14 +628,11 @@
       if (!markers.length) return;
       const fLo = data.spec_freq_lo_hz || 80;
       const fHi = data.spec_freq_hi_hz || 12000;
-      // ~0.25 s wide marker — typical call duration, gives visual breathing
-      // room without dominating the spectrogram.
-      const markerWidthFrac = 0.083;
       markers.forEach((m, i) => {
         const color = LOCATOR_PALETTE[i % LOCATOR_PALETTE.length];
         const dur = m.duration_s || 3;
         const xCenter = (m.peak_time_s / dur) * 100;
-        const halfW = (markerWidthFrac * 100) / 2;
+        const halfW = (LOCATOR_WIDTH_FRAC * 100) / 2;
         const xLeft = Math.max(0, xCenter - halfW);
         const xWidth = Math.min(100 - xLeft, halfW * 2);
         const yTop = _freqToYPct(m.freq_hi_hz, fLo, fHi);
@@ -651,12 +656,14 @@
           `· SNR ${m.snr_vs_median.toFixed(1)}× · conf ${m.confidence.toFixed(2)}${fallbackNote}`;
         locatorLayer.appendChild(box);
 
-        const chip = document.createElement('span');
+        const chip = document.createElement('button');
+        chip.type = 'button';
         chip.className =
           'inline-flex items-center gap-1 px-1.5 py-0.5 rounded border cursor-pointer transition';
         chip.style.borderColor = color;
         chip.style.color = color;
         chip.dataset.sci = m.scientific_name;
+        chip.dataset.color = color;
         const dot = document.createElement('span');
         dot.className = 'w-1.5 h-1.5 rounded-full';
         dot.style.background = color;
@@ -664,8 +671,14 @@
         const name = document.createElement('span');
         name.textContent = m.common_name + (m.is_fallback ? ' *' : '');
         chip.appendChild(name);
+        const loopIcon = document.createElement('span');
+        loopIcon.className = 'ml-0.5 text-[10px] opacity-60';
+        loopIcon.textContent = '↻';
+        chip.appendChild(loopIcon);
+        chip.title = 'click to loop this section';
         chip.addEventListener('mouseenter', () => _highlightLocator(m.scientific_name));
         chip.addEventListener('mouseleave', () => _highlightLocator(null));
+        chip.addEventListener('click', () => _toggleLoopFor(m, chip));
         locatorChips.appendChild(chip);
       });
       locatorLegend.classList.remove('hidden');
@@ -693,6 +706,43 @@
     locatorLayer.style.display = locatorToggle.checked ? '' : 'none';
   }
   locatorToggle.addEventListener('change', _applyLocatorVisibility);
+
+  function _toggleLoopFor(marker, chipEl) {
+    if (loopRange && loopRange.sci === marker.scientific_name) {
+      _clearLoop();
+      audio.pause();
+      return;
+    }
+    const dur = marker.duration_s || audio.duration || 3;
+    const half = (LOCATOR_WIDTH_FRAC / 2) * dur;
+    const start = Math.max(0, marker.peak_time_s - half);
+    const end = Math.min(dur, marker.peak_time_s + half);
+    loopRange = { sci: marker.scientific_name, start, end };
+    _paintLoopChips();
+    try {
+      audio.currentTime = start;
+    } catch (_) { /* readyState may not be loaded yet */ }
+    audio.play().catch(() => {});
+  }
+
+  function _clearLoop() {
+    loopRange = null;
+    _paintLoopChips();
+  }
+
+  function _paintLoopChips() {
+    locatorChips.querySelectorAll('button[data-sci]').forEach((c) => {
+      const active = loopRange && loopRange.sci === c.dataset.sci;
+      const color = c.dataset.color || '#a3a3a3';
+      if (active) {
+        c.style.background = color + '33';
+        c.style.boxShadow = `inset 0 0 0 1px ${color}`;
+      } else {
+        c.style.background = '';
+        c.style.boxShadow = '';
+      }
+    });
+  }
 
   async function loadReanalyze(detectionId) {
     reanalyzeTable.classList.add('hidden');
@@ -884,12 +934,19 @@
   audio.addEventListener('seeking',  () => { tick(); });
   audio.addEventListener('pause',    () => { tick(); stopTick(); });
   audio.addEventListener('ended',    () => { playhead.style.left = '100%'; stopTick(); });
-  audio.addEventListener('timeupdate', tick);
+  audio.addEventListener('timeupdate', () => {
+    if (loopRange && audio.currentTime >= loopRange.end) {
+      audio.currentTime = loopRange.start;
+    }
+    tick();
+  });
 
   specEl.addEventListener('click', (e) => {
     if (!audio.duration) return;
     const rect = specEl.getBoundingClientRect();
     const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    // Manual scrub takes the user out of any active loop.
+    _clearLoop();
     audio.currentTime = frac * audio.duration;
   });
 
