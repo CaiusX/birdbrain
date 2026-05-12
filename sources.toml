@@ -1,0 +1,12 @@
+# Local sources file (gitignored).
+# Single fixed camera at Naledi Bush Lodge, Olifants West (Greater Kruger).
+
+[[source]]
+name = "Olifants (Naledi)"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=NapztoCaKFY"
+lat = -24.175278
+lon = 30.905358
+min_confidence = 0.3
+cookies_file = "data/www.youtube.com_cookies.txt"
+timezone = "Africa/Johannesburg"
