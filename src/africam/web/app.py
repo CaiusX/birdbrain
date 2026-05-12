@@ -1270,11 +1270,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return JSONResponse({"ok": True, "id": detection_id, "label": new_label})
 
     @app.get("/api/detections/{detection_id}/reanalyze")
-    def reanalyze(detection_id: int) -> JSONResponse:
+    def reanalyze(
+        detection_id: int,
+        start_s: float | None = Query(default=None, ge=0.0),
+        end_s: float | None = Query(default=None, ge=0.0),
+    ) -> JSONResponse:
         """Re-run BirdNET on a saved clip and return the top candidates.
 
-        Useful in the audition flow when a detection's confidence sits near
-        the threshold and you want to see what *else* the model considered.
+        Pass ``start_s`` + ``end_s`` (seconds, both required if either given)
+        to analyse only a slice of the clip — useful when the user drags a
+        region on the spectrogram to ask "what's that sound at 1.5s?".
+        Slices shorter than 3 s are zero-padded so BirdNET's 3-second
+        window is satisfied; longer slices get sliding-window analysis
+        from birdnetlib internally.
+
         Uses a lower min_confidence than the live pipeline so runners-up
         surface. lat/lon are taken from the original detection row so the
         species filter matches what was applied during ingest.
@@ -1309,6 +1318,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         except Exception as e:
             raise HTTPException(500, f"failed to load clip: {e}") from e
         samples = np.asarray(samples, dtype=np.float32)
+        full_duration_s = float(len(samples)) / float(sr)
+
+        analyzed_window: tuple[float, float] | None = None
+        if start_s is not None and end_s is not None and end_s > start_s:
+            s0 = max(0.0, min(start_s, full_duration_s))
+            s1 = max(s0, min(end_s, full_duration_s))
+            i0 = int(s0 * sr)
+            i1 = int(s1 * sr)
+            samples = samples[i0:i1]
+            analyzed_window = (round(s0, 3), round(s1, 3))
+            min_len = int(3 * sr)
+            if len(samples) < min_len:
+                samples = np.pad(samples, (0, min_len - len(samples)))
+                samples = np.asarray(samples, dtype=np.float32)
 
         if started_at is not None and started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=UTC)
@@ -1343,7 +1366,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "common_name": orig_common,
                     "confidence": round(float(orig_conf), 4),
                 },
-                "clip_duration_s": round(len(samples) / float(sr), 3),
+                "clip_duration_s": round(full_duration_s, 3),
+                "analyzed_window_s": list(analyzed_window) if analyzed_window else None,
             }
         )
 

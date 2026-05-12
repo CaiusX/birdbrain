@@ -151,9 +151,13 @@
       <summary class="flex items-center justify-between gap-3 flex-wrap cursor-pointer list-none">
         <h4 class="text-xs uppercase tracking-wider text-zinc-400 flex items-center gap-1">
           <span class="inline-block w-3 text-zinc-500 transition-transform group-open:rotate-90">▸</span>
-          Re-analyze clip with BirdNET
+          Re-analyze
+          <span id="spec-modal-reanalyze-scope" class="hidden ml-1 text-amber-300 normal-case tracking-normal"></span>
+          <span id="spec-modal-reanalyze-scope-clear"
+                class="hidden ml-1 text-zinc-500 hover:text-zinc-200 cursor-pointer normal-case tracking-normal"
+                title="clear selection — analyses the whole clip">×</span>
         </h4>
-        <span class="text-[11px] text-zinc-500">first run loads the model (~5 s)</span>
+        <span class="text-[11px] text-zinc-500">drag the spectrogram to scope · first run loads the model (~5 s)</span>
       </summary>
       <div class="mt-2">
         <p id="spec-modal-reanalyze-status" class="text-xs text-zinc-500"></p>
@@ -228,6 +232,8 @@
   const reanalyzeStatus= document.getElementById('spec-modal-reanalyze-status');
   const reanalyzeTable = document.getElementById('spec-modal-reanalyze-table');
   const reanalyzeTbody = document.getElementById('spec-modal-reanalyze-tbody');
+  const reanalyzeScope = document.getElementById('spec-modal-reanalyze-scope');
+  const reanalyzeScopeClear = document.getElementById('spec-modal-reanalyze-scope-clear');
   const locatorLayer   = document.getElementById('spec-modal-locators');
   const locatorLegend  = document.getElementById('spec-modal-locator-legend');
   const locatorChips   = document.getElementById('spec-modal-locator-chips');
@@ -408,6 +414,7 @@
     locatorChips.innerHTML = '';
     locatorLegend.classList.add('hidden');
     loopRange = null;
+    _clearSpecSelection();
     loadLocators(currentId);
     // Pre-fill the species hint + search-↗ link so they're useful even when
     // the rolldown is collapsed.
@@ -607,6 +614,10 @@
   // Active loop range and the species/chip it's attached to. Null when free
   // play. Only one section loops at a time — clicking another chip switches.
   let loopRange = null;
+  // User-drawn spectrogram selection (drag to scope re-analysis). Null when
+  // no selection — re-analyse acts on the whole clip in that case. Fractions
+  // of clip duration so the visual maps 1:1 to the spectrogram image.
+  let specSelection = null;
 
   function _freqToYPct(f, loHz, hiHz) {
     // Spectrogram uses log frequency axis; bottom = loHz, top = hiHz.
@@ -744,21 +755,135 @@
     });
   }
 
+  // ---- Spectrogram drag-to-select (scopes re-analysis to a slice) ----
+
+  function _drawSpecSelection(loFrac, hiFrac) {
+    let el = document.getElementById('spec-modal-selection');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'spec-modal-selection';
+      el.className = 'absolute top-0 bottom-0 pointer-events-none';
+      el.style.background = 'rgba(250, 204, 21, 0.18)';
+      el.style.boxShadow = 'inset 2px 0 0 #facc15, inset -2px 0 0 #facc15';
+      specEl.appendChild(el);
+    }
+    el.style.left = (loFrac * 100) + '%';
+    el.style.width = ((hiFrac - loFrac) * 100) + '%';
+  }
+
+  function _clearSpecSelection() {
+    specSelection = null;
+    const el = document.getElementById('spec-modal-selection');
+    if (el) el.remove();
+    reanalyzeScope.classList.add('hidden');
+    reanalyzeScopeClear.classList.add('hidden');
+    reanalyzeScope.textContent = '';
+    if (reanalyzeEl.open && currentId != null) {
+      reanalyzeLoadedFor = null;
+      loadReanalyze(currentId);
+    }
+  }
+
+  function _setSpecSelection(loFrac, hiFrac) {
+    if (hiFrac - loFrac < 0.005 || !audio.duration) {
+      _clearSpecSelection();
+      return;
+    }
+    specSelection = { startFrac: loFrac, endFrac: hiFrac };
+    _drawSpecSelection(loFrac, hiFrac);
+    const s = (loFrac * audio.duration).toFixed(2);
+    const e = (hiFrac * audio.duration).toFixed(2);
+    reanalyzeScope.textContent = `· selection ${s}–${e}s`;
+    reanalyzeScope.classList.remove('hidden');
+    reanalyzeScopeClear.classList.remove('hidden');
+    if (reanalyzeEl.open && currentId != null) {
+      reanalyzeLoadedFor = null;
+      loadReanalyze(currentId);
+    } else if (currentId != null) {
+      // Opening the rolldown triggers the fetch naturally.
+      reanalyzeEl.open = true;
+    }
+  }
+
+  reanalyzeScopeClear.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    _clearSpecSelection();
+  });
+
+  let dragActive = null;
+  specEl.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !audio.duration) return;
+    const rect = specEl.getBoundingClientRect();
+    dragActive = {
+      startX: e.clientX - rect.left,
+      width: rect.width,
+      moved: false,
+    };
+    e.preventDefault();
+  });
+  specEl.addEventListener('mousemove', (e) => {
+    if (!dragActive) return;
+    const rect = specEl.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (Math.abs(x - dragActive.startX) > 4) dragActive.moved = true;
+    if (dragActive.moved) {
+      const lo = Math.max(0, Math.min(dragActive.startX, x) / dragActive.width);
+      const hi = Math.min(1, Math.max(dragActive.startX, x) / dragActive.width);
+      _drawSpecSelection(lo, hi);
+    }
+  });
+  function _finishDrag(e) {
+    if (!dragActive) return;
+    const rect = specEl.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (dragActive.moved) {
+      const lo = Math.max(0, Math.min(dragActive.startX, x) / dragActive.width);
+      const hi = Math.min(1, Math.max(dragActive.startX, x) / dragActive.width);
+      _setSpecSelection(lo, hi);
+    } else {
+      // Treat as a plain click: seek + clear loop + clear any existing
+      // selection so the user gets back to free playback in one gesture.
+      _clearLoop();
+      _clearSpecSelection();
+      const frac = Math.max(0, Math.min(1, x / dragActive.width));
+      audio.currentTime = frac * audio.duration;
+    }
+    dragActive = null;
+  }
+  specEl.addEventListener('mouseup', _finishDrag);
+  specEl.addEventListener('mouseleave', () => { dragActive = null; });
+
   async function loadReanalyze(detectionId) {
     reanalyzeTable.classList.add('hidden');
     reanalyzeTbody.innerHTML = '';
     reanalyzeStatus.textContent = 'loading model + re-running BirdNET…';
     try {
-      const resp = await fetch(`/api/detections/${encodeURIComponent(detectionId)}/reanalyze`);
+      const url = new URL(
+        `/api/detections/${encodeURIComponent(detectionId)}/reanalyze`,
+        window.location.origin,
+      );
+      if (specSelection && audio.duration) {
+        const s0 = (specSelection.startFrac * audio.duration).toFixed(3);
+        const s1 = (specSelection.endFrac * audio.duration).toFixed(3);
+        url.searchParams.set('start_s', s0);
+        url.searchParams.set('end_s', s1);
+      }
+      const resp = await fetch(url);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const data = await resp.json();
       const dets = data.detections || [];
+      const win = data.analyzed_window_s;
+      const scopeLabel = win
+        ? `selection ${win[0].toFixed(2)}–${win[1].toFixed(2)}s`
+        : 'full clip';
       if (!dets.length) {
-        reanalyzeStatus.textContent = 'BirdNET returned no candidates above 0.05 confidence.';
+        reanalyzeStatus.textContent =
+          `BirdNET returned no candidates above 0.05 confidence (${scopeLabel}).`;
         return;
       }
       reanalyzeStatus.textContent =
-        `Top ${dets.length} candidate${dets.length === 1 ? '' : 's'} ` +
+        `Top ${dets.length} candidate${dets.length === 1 ? '' : 's'} on ${scopeLabel} ` +
         `(min_conf 0.05, location filter applied) — original row was ` +
         `${data.original.common_name} @ ${Number(data.original.confidence).toFixed(2)}.`;
       dets.forEach((d, i) => {
@@ -939,15 +1064,6 @@
       audio.currentTime = loopRange.start;
     }
     tick();
-  });
-
-  specEl.addEventListener('click', (e) => {
-    if (!audio.duration) return;
-    const rect = specEl.getBoundingClientRect();
-    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    // Manual scrub takes the user out of any active loop.
-    _clearLoop();
-    audio.currentTime = frac * audio.duration;
   });
 
   labelBtns.forEach((btn) => {
