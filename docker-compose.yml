@@ -1,0 +1,61 @@
+# Africam Bird deployment for a single host (e.g. Raspberry Pi 5 + SSD).
+#
+# Three services share one internal network:
+#   - pipeline: reads streams, runs BirdNET, writes to ./data/africam.sqlite
+#   - web:      serves the dashboard on http://web:8765 (inside the network)
+#   - caddy:    public TLS + basic-auth, reverse-proxies to web
+#
+# State is persisted via bind mounts so docker compose down -v doesn't wipe
+# detections / clips:
+#   ./data/                       sqlite + clip files
+#   ./data/www.youtube.com_cookies.txt  YouTube auth cookies (scp from your
+#                                       laptop after the first deploy)
+#   ./sources.toml                stream list — edit on host, restart pipeline
+#   ./sites.toml                  optional multisite roster
+
+services:
+  pipeline:
+    build: .
+    image: africam:latest
+    command: uv run africam run
+    volumes:
+      - ./data:/app/data
+      - ./sources.toml:/app/sources.toml:ro
+      # sites.toml is optional; comment out if you don't run multisite cams
+      - ./sites.toml:/app/sites.toml:ro
+    environment:
+      AFRICAM_LOG_LEVEL: INFO
+    restart: unless-stopped
+
+  web:
+    image: africam:latest        # reuses the build above
+    command: uv run africam web --host 0.0.0.0 --port 8765
+    depends_on:
+      - pipeline
+    volumes:
+      - ./data:/app/data
+      - ./sources.toml:/app/sources.toml:ro
+      - ./sites.toml:/app/sites.toml:ro
+    environment:
+      AFRICAM_LOG_LEVEL: INFO
+      AFRICAM_XENO_CANTO_KEY: ${AFRICAM_XENO_CANTO_KEY:-}
+    expose:
+      - "8765"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"       # required for Let's Encrypt HTTP-01 challenge
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

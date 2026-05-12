@@ -1,0 +1,35 @@
+# Africam Bird public ingress.
+#
+# Steps before docker compose up:
+#   1. Point your domain's A record at this Pi's public IP (and forward
+#      tcp/80 and tcp/443 on your router).
+#   2. Generate a bcrypt hash for the dashboard password:
+#         docker run --rm caddy:2-alpine caddy hash-password
+#      paste the output where REPLACE_WITH_HASH is below.
+#   3. Replace `birds.example.com` with your actual hostname.
+#
+# Caddy auto-provisions a Let's Encrypt certificate on first start. Logs
+# live in the caddy_data named volume.
+
+birds.example.com {
+    # Single dashboard user. Add more lines for additional users.
+    basic_auth /* {
+        admin REPLACE_WITH_HASH
+    }
+
+    # Long-lived streaming / HTMX polling — keep timeouts generous.
+    reverse_proxy web:8765 {
+        transport http {
+            read_timeout 5m
+            write_timeout 5m
+        }
+    }
+
+    encode gzip
+
+    # Modest access log so you can see who's hammering /spectrograms.
+    log {
+        output stdout
+        format console
+    }
+}
