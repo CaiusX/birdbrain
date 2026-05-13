@@ -20,6 +20,12 @@ log = get_logger(__name__)
 # How often the supervisor reconciles desired sources (toml + DB) with running threads.
 SUPERVISOR_INTERVAL = 15.0
 
+# A worker that hasn't heartbeat in this long is presumed stuck (e.g. ffmpeg
+# blocked on a dead HLS stream). The watchdog kicks it and lets reconcile()
+# spawn a replacement. Generous vs. the 15 s heartbeat cadence so a slow
+# chunk or DB blip doesn't trigger a false restart.
+STALE_HEARTBEAT_S = 180.0
+
 # Normal-failure backoff: fast retries for transient blips (ffmpeg disconnect,
 # network glitch). 5 → 10 → 20 → 40 → 60 capped.
 NORMAL_BACKOFF_INITIAL = 5.0
@@ -320,12 +326,40 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
             workers[name] = _Worker(cfg=cfg, thread=t, stop_event=stop_event)
             log.info("supervisor.started", source=name, kind=cfg.kind)
 
+    def kick_stale() -> None:
+        """Drop stuck workers from the registry so reconcile() respawns them.
+
+        A worker can heartbeat-silently if its chunk iterator is blocked
+        (most common: ffmpeg reading a stalled HLS segment that never EOFs).
+        The thread can't be joined safely — it's wedged in a kernel read —
+        but we can signal stop_event, mark the slot 'stalled' for the admin
+        UI, and let the next reconcile() launch a fresh worker. The wedged
+        thread will eventually die when ffmpeg times out or the process is
+        cleaned up.
+        """
+        for name in db.stale_workers(STALE_HEARTBEAT_S):
+            w = workers.get(name)
+            if w is None:
+                continue
+            log.warning(
+                "supervisor.stalled",
+                source=name,
+                stale_threshold_s=STALE_HEARTBEAT_S,
+            )
+            try:
+                db.worker_stalled(name)
+            except Exception:
+                log.exception("supervisor.worker_stalled_write_failed", source=name)
+            w.stop_event.set()
+            del workers[name]
+
     reconcile()
     log.info("pipeline.workers_started", count=len(workers))
 
     try:
         while True:
             time.sleep(SUPERVISOR_INTERVAL)
+            kick_stale()
             reconcile()
     except KeyboardInterrupt:
         log.info("pipeline.interrupt")

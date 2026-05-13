@@ -1,0 +1,508 @@
+{% extends "base.html" %}
+{% block title %}Africam · diurnal{% endblock %}
+
+{% block head_extra %}
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6/dist/plot.umd.min.js"></script>
+<style>
+  .plot-host { width: 100%; min-height: 1px; }
+  .plot-host svg { width: 100%; height: auto; }
+  /* Plot draws axis text in black by default — recolor for the dark theme. */
+  .plot-host text { fill: #a1a1aa; }
+  .plot-host [aria-label="y-axis tick label"] text,
+  .plot-host [aria-label="x-axis tick label"] text { fill: #d4d4d8; }
+  .plot-host [aria-label="y-axis label"],
+  .plot-host [aria-label="x-axis label"] { fill: #71717a; font-size: 11px; }
+  .plot-host [aria-label="legend-swatches"] text,
+  .plot-host figcaption { fill: #a1a1aa; color: #a1a1aa; }
+  .plot-host [stroke="currentColor"] { stroke: #3f3f46; }
+  /* Tone down Plot's color legend at the top of the heatmap. */
+  .plot-host figure.plot-ramp,
+  .plot-host figure[class*="ramp"] { margin: 0 0 4px 0; }
+  .plot-host figure[class*="ramp"] svg { max-width: 220px; }
+  .plot-host figure[class*="ramp"] text { font-size: 9px; fill: #71717a; }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Diurnal activity
+      <span class="text-zinc-500 ml-2 text-xs">{{ window_label }} · {{ data.tz_label }}</span>
+    </h2>
+    <span class="text-xs text-zinc-500">hour of day, source-local</span>
+  </div>
+
+  {% set _custom_window = filters.since and filters.until %}
+  <form method="get" action="/diurnal"
+        class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-12 gap-3 text-xs">
+    <label class="flex flex-col gap-1 md:col-span-3">
+      <span class="text-zinc-500 uppercase tracking-wider">Source</span>
+      <select name="source" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        <option value="">— any —</option>
+        {% for s in all_sources %}
+          <option value="{{ s }}" {% if filters.source == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <div class="flex flex-col gap-1.5 md:col-span-5">
+      <span class="text-zinc-500 uppercase tracking-wider">Window</span>
+      <div class="flex flex-wrap gap-1">
+        {% for d, lbl in preset_days %}
+          <label class="cursor-pointer">
+            <input type="radio" name="days" value="{{ d }}" class="sr-only peer"
+                   {% if not _custom_window and filters.days == d %}checked{% endif %}
+                   onchange="this.form.since.value=''; this.form.until.value=''; this.form.submit()">
+            <span class="px-2.5 py-1 rounded border border-zinc-800
+                         peer-checked:bg-zinc-100 peer-checked:text-zinc-900 peer-checked:border-zinc-100
+                         text-zinc-400 hover:text-zinc-100">{{ lbl }}</span>
+          </label>
+        {% endfor %}
+      </div>
+      <div class="flex items-center gap-1.5">
+        <input type="date" name="since" value="{{ filters.since }}"
+               class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-100 tabular-nums
+                      {% if _custom_window %}ring-1 ring-zinc-100{% endif %}">
+        <span class="text-zinc-600">→</span>
+        <input type="date" name="until" value="{{ filters.until }}"
+               class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-100 tabular-nums
+                      {% if _custom_window %}ring-1 ring-zinc-100{% endif %}">
+      </div>
+    </div>
+
+    <label class="flex flex-col gap-1 md:col-span-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Top</span>
+      <input name="top_n" type="number" step="1" min="3" max="40"
+             value="{{ filters.top_n }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1 md:col-span-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Min conf</span>
+      <input name="min_conf" type="number" step="0.05" min="0" max="1"
+             value="{{ '%.2f' | format(filters.min_conf) }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <div class="flex items-end justify-end gap-2 md:col-span-2">
+      <a href="/diurnal" class="px-3 py-1.5 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</a>
+      <button type="submit" class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 font-medium">apply</button>
+    </div>
+  </form>
+
+  <div class="px-5 py-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+    <div class="bg-zinc-950/60 border border-zinc-800 rounded px-3 py-2">
+      <div class="text-zinc-500 uppercase tracking-wider">Detections</div>
+      <div class="text-xl text-zinc-100 tabular-nums mt-0.5">{{ "{:,}".format(data.total) }}</div>
+    </div>
+    <div class="bg-zinc-950/60 border border-zinc-800 rounded px-3 py-2">
+      <div class="text-zinc-500 uppercase tracking-wider">Species</div>
+      <div class="text-xl text-zinc-100 tabular-nums mt-0.5">{{ data.n_species }}</div>
+    </div>
+    <div class="bg-zinc-950/60 border border-zinc-800 rounded px-3 py-2">
+      <div class="text-zinc-500 uppercase tracking-wider">Peak hour</div>
+      <div class="text-xl text-zinc-100 tabular-nums mt-0.5">
+        {% if data.peak_hour is not none %}
+          {{ "%02d:00"|format(data.peak_hour) }}
+        {% else %}—{% endif %}
+      </div>
+    </div>
+    <div class="bg-zinc-950/60 border border-zinc-800 rounded px-3 py-2">
+      <div class="text-zinc-500 uppercase tracking-wider">Peak count</div>
+      <div class="text-xl text-zinc-100 tabular-nums mt-0.5">{{ "{:,}".format(data.peak_hour_count) }}</div>
+    </div>
+  </div>
+</section>
+
+{% if data.total == 0 %}
+  <section class="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-10 text-center text-zinc-500 text-sm">
+    No detections in the selected window. Try widening the days or lowering min confidence.
+  </section>
+{% else %}
+  {% if data.bands %}
+    {# Swatch colors are the bandFill rgbas painted over #18181b (zinc-900,
+       same as the chart card background) so the chip matches what the eye
+       sees on the chart. #}
+    <div class="flex flex-wrap gap-2 text-[11px] text-zinc-400 mb-4">
+      {% for key, fill, label in [
+        ('night',   'rgba(2,6,23,0.65)',     'night'),
+        ('dawn',    'rgba(244,63,94,0.28)',  'dawn'),
+        ('sunrise', 'rgba(251,146,60,0.42)', 'sunrise'),
+        ('day',     'rgba(56,189,248,0.14)', 'day'),
+        ('sunset',  'rgba(249,115,22,0.42)', 'sunset'),
+        ('dusk',    'rgba(225,29,72,0.28)',  'dusk'),
+      ] %}
+        <span class="inline-flex items-center gap-1.5">
+          <span class="inline-block w-3 h-3 rounded border border-zinc-800"
+                style="background-image: linear-gradient({{ fill }}, {{ fill }}); background-color: #18181b;"></span>
+          {{ label }}
+        </span>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+    <div class="px-5 py-3 border-b border-zinc-800">
+      <h3 class="text-sm uppercase tracking-wider text-zinc-400">Hour-of-day activity</h3>
+    </div>
+    <div id="chart-hour" class="plot-host px-5 py-4"></div>
+  </section>
+
+  <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+    <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+      <h3 class="text-sm uppercase tracking-wider text-zinc-400">
+        Top species × hour
+        <span class="text-zinc-500 ml-2 text-xs">{{ data.hour_by_species | length }} species</span>
+      </h3>
+    </div>
+    <div id="chart-heatmap-legend" class="px-5 pt-3"></div>
+    <div id="chart-heatmap" class="plot-host px-5 pb-4"></div>
+    <div class="px-5 pb-4 text-[11px] text-zinc-500">
+      Tip: click a cell to see species &amp; weather for that hour.
+    </div>
+  </section>
+
+  <div id="diurnal-popup-backdrop"
+       class="fixed inset-0 z-50 hidden bg-zinc-950/70 backdrop-blur-sm
+              flex items-center justify-center p-4">
+    <div id="diurnal-popup"
+         class="bg-zinc-900 border border-zinc-800 rounded-xl
+                w-full max-w-md max-h-[85vh] overflow-y-auto shadow-2xl"
+         role="dialog" aria-modal="true">
+    </div>
+  </div>
+{% endif %}
+
+<script type="application/json" id="diurnal-data">{{ data_json | safe }}</script>
+<script>
+(function () {
+  const dataEl = document.getElementById('diurnal-data');
+  if (!dataEl || typeof Plot === 'undefined') return;
+  const data = JSON.parse(dataEl.textContent);
+  if (!data.total) return;
+
+  const dark = {
+    background: 'transparent',
+    color: '#d4d4d8',
+    fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+  };
+
+  // Tints layered behind the data. Night maps to fully transparent so the
+  // card background shows through — keeps the chart's "off hours" feel.
+  // Single palette used everywhere: legend chips, bar-chart full-height
+  // backdrop, and heatmap behind-cell shading. Night = near-black so the
+  // off-hours feel like night sky; day = sky blue; dawn/dusk pick up warm
+  // pinks; sunrise/sunset stay punchy orange.
+  const bandFill = {
+    night:   'rgba(2, 6, 23, 0.65)',
+    dawn:    'rgba(244, 63, 94, 0.28)',
+    sunrise: 'rgba(251, 146, 60, 0.42)',
+    day:     'rgba(56, 189, 248, 0.14)',
+    sunset:  'rgba(249, 115, 22, 0.42)',
+    dusk:    'rgba(225, 29, 72, 0.28)',
+  };
+  const visibleBands = data.bands || [];
+
+  // Same constellation data as the server-rendered dial. Stars stored as
+  // (x_norm, y_norm, magnitude_scale) in a [0,1]² box; ``lines`` are pairs
+  // of star indices. Drawn as SVG children after each Plot render.
+  const CONST_CRUX = {
+    stars: [
+      [0.50, 0.08, 1.4],
+      [0.20, 0.45, 1.2],
+      [0.78, 0.40, 1.1],
+      [0.48, 0.92, 1.6],
+      [0.62, 0.68, 0.7],
+    ],
+    lines: [[0, 3], [1, 2]],
+  };
+  const CONST_SCORPIUS = {
+    stars: [
+      [0.25, 0.05, 1.0], [0.20, 0.18, 0.8], [0.27, 0.32, 1.0],
+      [0.30, 0.45, 1.6], [0.35, 0.60, 0.9], [0.45, 0.72, 0.9],
+      [0.58, 0.80, 1.0], [0.72, 0.72, 0.8], [0.82, 0.55, 1.3],
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8]],
+  };
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function drawConstellation(svg, c, cx, cy, size) {
+    for (const [i, j] of c.lines) {
+      const [x1n, y1n] = c.stars[i];
+      const [x2n, y2n] = c.stars[j];
+      const ln = document.createElementNS(SVG_NS, 'line');
+      ln.setAttribute('x1', cx + (x1n - 0.5) * size);
+      ln.setAttribute('y1', cy + (y1n - 0.5) * size);
+      ln.setAttribute('x2', cx + (x2n - 0.5) * size);
+      ln.setAttribute('y2', cy + (y2n - 0.5) * size);
+      ln.setAttribute('stroke', '#e4e4e7');
+      ln.setAttribute('stroke-width', '0.5');
+      ln.setAttribute('stroke-opacity', '0.30');
+      ln.setAttribute('pointer-events', 'none');
+      svg.appendChild(ln);
+    }
+    for (const [nx, ny, mag] of c.stars) {
+      const dot = document.createElementNS(SVG_NS, 'circle');
+      dot.setAttribute('cx', cx + (nx - 0.5) * size);
+      dot.setAttribute('cy', cy + (ny - 0.5) * size);
+      dot.setAttribute('r', 1.1 * mag);
+      dot.setAttribute('fill', '#e4e4e7');
+      dot.setAttribute('fill-opacity', '0.85');
+      dot.setAttribute('pointer-events', 'none');
+      svg.appendChild(dot);
+    }
+  }
+
+  function drawNightConstellations(plotEl, bands, geom) {
+    const svg = (plotEl instanceof SVGSVGElement)
+      ? plotEl : plotEl.querySelector('svg');
+    if (!svg) return;
+    for (const b of bands) {
+      if (b.name !== 'night') continue;
+      const span = b.end - b.start;
+      if (span < 1.0) continue;
+      const xMid = b.start + span / 2;
+      const plotW = geom.plotRight - geom.plotLeft;
+      const cxPlot = geom.plotLeft + (xMid / 24) * plotW;
+      const cyPlot = (geom.plotTop + geom.plotBottom) / 2;
+      const wPx = (span / 24) * plotW;
+      const hPx = geom.plotBottom - geom.plotTop;
+      const size = Math.min(wPx * 0.55, hPx * 0.7, 110);
+      if (size < 18) continue;
+      const c = xMid < 12 ? CONST_SCORPIUS : CONST_CRUX;
+      drawConstellation(svg, c, cxPlot, cyPlot, size);
+    }
+  }
+
+  function widthFor(el, fallback) {
+    const w = el.clientWidth;
+    return w > 0 ? w : fallback;
+  }
+
+  function render() {
+    const hourHost = document.getElementById('chart-hour');
+    const heatHost = document.getElementById('chart-heatmap');
+
+    if (hourHost) {
+      hourHost.replaceChildren();
+      const hourW = widthFor(hourHost, 760) - 32;
+      const maxY = Math.max(1, ...data.hour_overall.map(d => d.count));
+      const yMax = maxY * 1.08;
+      const hourBar = Plot.plot({
+        style: dark,
+        width: hourW,
+        height: 240,
+        marginLeft: 50,
+        marginBottom: 40,
+        marginTop: 12,
+        x: {
+          label: 'hour of day (' + data.tz_label + ')',
+          domain: [0, 24],
+          tickFormat: d => String(d).padStart(2, '0'),
+          ticks: 12,
+        },
+        y: {label: 'detections', domain: [0, yMax]},
+        marks: [
+          Plot.rect(visibleBands, {
+            x1: 'start', x2: 'end',
+            y1: 0, y2: yMax,
+            fill: d => bandFill[d.name] || 'transparent',
+          }),
+          Plot.gridY({stroke: '#52525b', strokeOpacity: 0.45}),
+          Plot.rectY(data.hour_overall, {
+            x1: d => d.hour + 0.1,
+            x2: d => d.hour + 0.9,
+            y: 'count',
+            fill: '#10b981',
+            title: d => String(d.hour).padStart(2,'0') + ':00 · ' + d.count + ' detections',
+          }),
+          Plot.ruleY([0], {stroke: '#3f3f46'}),
+        ],
+      });
+      hourHost.append(hourBar);
+      drawNightConstellations(hourBar, visibleBands, {
+        plotLeft: 50, plotRight: hourW - 20,
+        plotTop: 12, plotBottom: 240 - 40,
+      });
+    }
+
+    if (heatHost && data.hour_by_species.length) {
+      heatHost.replaceChildren();
+      const cells = [];
+      for (const sp of data.hour_by_species) {
+        for (let h = 0; h < 24; h++) {
+          const c = sp.hours[h];
+          if (c > 0) {
+            cells.push({species: sp.species, hour: h, count: c, total: sp.total});
+          }
+        }
+      }
+      const heatW = widthFor(heatHost, 760) - 32;
+      const rowOrder = data.hour_by_species.map(d => d.species);
+      const heat = Plot.plot({
+        style: dark,
+        width: heatW,
+        height: 60 + rowOrder.length * 22,
+        marginLeft: 200,
+        marginRight: 70,
+        marginBottom: 40,
+        marginTop: 4,
+        x: {
+          label: 'hour of day (' + data.tz_label + ')',
+          domain: [0, 24],
+          tickFormat: d => String(d).padStart(2, '0'),
+          ticks: [0, 3, 6, 9, 12, 15, 18, 21, 24],
+        },
+        y: {label: null, domain: rowOrder},
+        color: {
+          scheme: 'viridis',
+          label: 'detections',
+          type: 'sqrt',
+        },
+        marks: [
+          // Time-of-day bands behind cells. One rect per row × band so the
+          // band-scale y axis gives each rect the row's full height.
+          Plot.rect(
+            rowOrder.flatMap(sp => visibleBands.map(b => ({
+              species: sp, name: b.name, start: b.start, end: b.end,
+            }))),
+            {
+              x1: 'start', x2: 'end',
+              y: 'species',
+              fill: d => bandFill[d.name] || 'transparent',
+            },
+          ),
+          // Cells as 1-hour-wide rects with the same linear x scale.
+          Plot.rectX(cells, {
+            x1: d => d.hour,
+            x2: d => d.hour + 1,
+            y: 'species',
+            fill: 'count',
+            inset: 1,
+            className: 'diurnal-cell',
+            title: d => d.species + ' · ' + String(d.hour).padStart(2,'0') + ':00 · ' + d.count,
+          }),
+        ],
+      });
+      heatHost.append(heat);
+      drawNightConstellations(heat, visibleBands, {
+        plotLeft: 200, plotRight: heatW - 70,
+        plotTop: 4,
+        plotBottom: (60 + rowOrder.length * 22) - 40,
+      });
+
+      const legendHost = document.getElementById('chart-heatmap-legend');
+      if (legendHost && typeof heat.legend === 'function') {
+        legendHost.replaceChildren();
+        const legendEl = heat.legend('color', {
+          width: 180,
+          marginLeft: 0,
+          tickSize: 0,
+          label: 'detections',
+        });
+        if (legendEl) {
+          legendEl.style.color = '#a1a1aa';
+          legendEl.style.opacity = '0.75';
+          legendHost.append(legendEl);
+        }
+      }
+
+      // Cell click → drill-down. Rather than walk Plot's SVG (which gives
+      // different aria-labels/structure across versions), compute the
+      // (species, hour) from event coordinates using the known geometry.
+      // Plot.plot() returns the SVG directly when there's no auto-legend,
+      // or a <figure> wrapping it — handle both.
+      const heatSvg = (heat instanceof SVGSVGElement)
+        ? heat
+        : heat.querySelector('svg');
+      if (heatSvg) {
+        const internalH = 60 + rowOrder.length * 22;
+        const mL = 200, mR = 70, mT = 4, mB = 40;
+        heatSvg.style.cursor = 'pointer';
+        heatSvg.addEventListener('click', (ev) => {
+          const rect = heatSvg.getBoundingClientRect();
+          if (!rect.width || !rect.height) return;
+          // Convert display-pixel click back into Plot's internal coords.
+          const xPlot = (ev.clientX - rect.left) * (heatW / rect.width);
+          const yPlot = (ev.clientY - rect.top) * (internalH / rect.height);
+          const plotLeft = mL, plotRight = heatW - mR;
+          const plotTop = mT, plotBottom = internalH - mB;
+          if (xPlot < plotLeft || xPlot >= plotRight) return;
+          if (yPlot < plotTop || yPlot >= plotBottom) return;
+          const hour = Math.min(23, Math.max(0,
+            Math.floor((xPlot - plotLeft) / (plotRight - plotLeft) * 24)));
+          const rowIdx = Math.min(rowOrder.length - 1, Math.max(0,
+            Math.floor((yPlot - plotTop) / (plotBottom - plotTop) * rowOrder.length)));
+          const speciesCommon = rowOrder[rowIdx];
+          openDetail(speciesScientific(speciesCommon), hour);
+        });
+      }
+    }
+  }
+
+  // Map common-name (heatmap row key) → scientific. The scientific name is
+  // what /partials/diurnal-detections filters on, so we look it up from the
+  // payload rather than splitting the displayed label.
+  const sciByCommon = new Map(
+    (data.hour_by_species || []).map(d => [d.species, d.scientific])
+  );
+  function speciesScientific(common) {
+    return sciByCommon.get(common) || common;
+  }
+
+  function showPopup() {
+    const bd = document.getElementById('diurnal-popup-backdrop');
+    if (bd) bd.classList.remove('hidden');
+  }
+  function hidePopup() {
+    const bd = document.getElementById('diurnal-popup-backdrop');
+    const body = document.getElementById('diurnal-popup');
+    if (bd) bd.classList.add('hidden');
+    if (body) body.replaceChildren();
+  }
+
+  function openDetail(scientific, hour) {
+    const params = new URLSearchParams({
+      scientific: scientific,
+      hour: String(hour),
+      days: String(data.filters.days),
+      min_conf: String(data.filters.min_conf),
+    });
+    if (data.filters.source) params.set('source', data.filters.source);
+    if (data.filters.since) params.set('since', data.filters.since);
+    if (data.filters.until) params.set('until', data.filters.until);
+    const body = document.getElementById('diurnal-popup');
+    if (!body) return;
+    body.innerHTML = '<div class="px-5 py-8 text-zinc-500 text-sm text-center">Loading…</div>';
+    showPopup();
+    const url = '/partials/diurnal-popup?' + params.toString();
+    if (window.htmx) {
+      htmx.ajax('GET', url, '#diurnal-popup');
+    } else {
+      fetch(url).then(r => r.text()).then(html => { body.innerHTML = html; });
+    }
+  }
+
+  // Close on X button, backdrop click, or Escape.
+  document.addEventListener('click', (ev) => {
+    if (ev.target.closest('[data-diurnal-popup-close]')) {
+      hidePopup();
+      return;
+    }
+    if (ev.target.id === 'diurnal-popup-backdrop') {
+      hidePopup();
+    }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') hidePopup();
+  });
+
+  render();
+  let rafId = null;
+  window.addEventListener('resize', () => {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(render);
+  });
+})();
+</script>
+{% endblock %}

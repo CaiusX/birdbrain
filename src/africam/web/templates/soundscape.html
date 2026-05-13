@@ -2,20 +2,55 @@
 {% block title %}Africam · soundscape{% endblock %}
 
 {% block content %}
+{% set _qs_base = [] %}
+{% if filters.source %}{% set _ = _qs_base.append('source=' ~ filters.source) %}{% endif %}
+{% set _ = _qs_base.append('min_species=' ~ filters.min_species) %}
+{% set _ = _qs_base.append('order=' ~ filters.order) %}
+{% set _ = _qs_base.append('limit=' ~ filters.limit) %}
+{% set _qs_genuine = '?' ~ ('&'.join(_qs_base + ['bucket=genuine'])) %}
+{% set _qs_confusions = '?' ~ ('&'.join(_qs_base + ['bucket=confusions'])) %}
+{% if bucket == 'genuine' %}
+  {% set _title = 'Genuine soundscape' %}
+  {% set _subtitle = 'distinct species calling in the same 3-second window' %}
+  {% set _empty = 'No genuine multi-species chunks match these filters. Try the confusions tab — likely hedges still worth a listen.' %}
+{% else %}
+  {% set _title = 'Probable confusions' %}
+  {% set _subtitle = 'overlapping or hedged detections — same chunk, similar species or weak runners-up' %}
+  {% set _empty = 'No probable confusions match these filters.' %}
+{% endif %}
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="px-5 pt-3 pb-0 border-b border-zinc-800/60 flex items-center gap-1 text-xs">
+    <a href="{{ _qs_genuine }}"
+       class="px-3 py-2 -mb-px border-b-2 {% if bucket == 'genuine' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
+      Genuine
+      <span class="ml-1 tabular-nums {% if bucket == 'genuine' %}text-zinc-300{% else %}text-zinc-600{% endif %}">{{ genuine_count }}</span>
+    </a>
+    <a href="{{ _qs_confusions }}"
+       class="px-3 py-2 -mb-px border-b-2 {% if bucket == 'confusions' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
+      Probable confusions
+      <span class="ml-1 tabular-nums {% if bucket == 'confusions' %}text-zinc-300{% else %}text-zinc-600{% endif %}">{{ confusion_count }}</span>
+    </a>
+    <span class="ml-auto text-zinc-600 text-[11px] hidden md:inline"
+          title="A chunk is a confusion if any two species share a genus, the weakest row is below 0.50 confidence, or the weakest is below half the strongest. Otherwise genuine.">
+      classification rule ⓘ
+    </span>
+  </div>
+
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Soundscape
+      {{ _title }}
       <span class="text-zinc-200 ml-2">{{ groups | length }}</span>
       <span class="text-zinc-500 ml-1 text-xs">
         of {{ total_groups }} multi-species chunks (≥ {{ filters.min_species }} species)
       </span>
     </h2>
-    <span class="text-xs text-zinc-500">birds calling in the same 3-second window</span>
+    <span class="text-xs text-zinc-500">{{ _subtitle }}</span>
   </div>
 
   <form method="get" action="/soundscape"
         class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+    <input type="hidden" name="bucket" value="{{ bucket }}">
     <label class="flex flex-col gap-1">
       <span class="text-zinc-500 uppercase tracking-wider">Source</span>
       <select name="source" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
@@ -50,7 +85,7 @@
              class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
     </label>
     <div class="flex items-end justify-end gap-2">
-      <a href="/soundscape" class="px-3 py-1.5 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</a>
+      <a href="/soundscape?bucket={{ bucket }}" class="px-3 py-1.5 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</a>
       <button type="submit" class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 font-medium">apply</button>
     </div>
   </form>
@@ -83,7 +118,7 @@
     </ul>
   {% else %}
     <p class="text-zinc-500 text-sm px-5 py-6">
-      No multi-species chunks match these filters.
+      {{ _empty }}
     </p>
   {% endif %}
 </section>
