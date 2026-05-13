@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import threading
@@ -8,7 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,7 +17,7 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import desc, func, select
+from sqlalchemy import and_, case, desc, func, or_, select
 
 from africam.config import AppConfig, SourceConfig, load_sources
 from africam.site_resolver import state_to_resolved
@@ -54,6 +55,78 @@ def _tz_abbr(tz_name: str | None) -> str:
 
 TEMPLATES.env.filters["localtime"] = _localtime
 TEMPLATES.env.filters["tz_abbr"] = _tz_abbr
+
+
+def _solar_event_utc_hours(d: date, lat: float, lon: float,
+                           altitude_deg: float, morning: bool) -> float | None:
+    """Sunrise-equation solver. Returns the UTC fractional hour on date ``d``
+    when the sun crosses ``altitude_deg`` (degrees above horizon; negative
+    for twilight). ``morning=True`` for the ascending crossing, False for
+    descending. Returns None if the crossing doesn't happen that day (polar
+    summer/winter). Good to ~1 minute — plenty for hour-of-day shading."""
+    n = (d - date(d.year, 1, 1)).days + 1
+    lng_hour = lon / 15.0
+    t = n + ((6.0 if morning else 18.0) - lng_hour) / 24.0
+    M = 0.9856 * t - 3.289
+    L = (M
+         + 1.916 * math.sin(math.radians(M))
+         + 0.020 * math.sin(math.radians(2 * M))
+         + 282.634) % 360
+    RA = math.degrees(math.atan(0.91764 * math.tan(math.radians(L)))) % 360
+    # Force RA into the same quadrant as L.
+    L_q = (L // 90) * 90
+    RA_q = (RA // 90) * 90
+    RA = (RA + (L_q - RA_q)) / 15.0  # hours
+    sinDec = 0.39782 * math.sin(math.radians(L))
+    cosDec = math.cos(math.asin(sinDec))
+    cosH = (
+        (math.sin(math.radians(altitude_deg)) - sinDec * math.sin(math.radians(lat)))
+        / (cosDec * math.cos(math.radians(lat)))
+    )
+    if cosH > 1 or cosH < -1:
+        return None
+    H = (360 - math.degrees(math.acos(cosH))) if morning else math.degrees(math.acos(cosH))
+    H = H / 15.0
+    T = H + RA - 0.06571 * t - 6.622
+    return (T - lng_hour) % 24
+
+
+def _solar_local_hour(d: date, lat: float, lon: float, tz: ZoneInfo,
+                      altitude_deg: float, morning: bool) -> float | None:
+    """Convenience: ``_solar_event_utc_hours`` projected into ``tz`` as a
+    fractional hour-of-day in 0–24."""
+    ut = _solar_event_utc_hours(d, lat, lon, altitude_deg, morning)
+    if ut is None:
+        return None
+    base = datetime(d.year, d.month, d.day, tzinfo=UTC)
+    local = (base + timedelta(hours=ut)).astimezone(tz)
+    return local.hour + local.minute / 60.0 + local.second / 3600.0
+
+
+def _solar_bands(d: date, lat: float, lon: float, tz: ZoneInfo) -> list[dict]:
+    """Six time-of-day bands as fractional hours in ``tz`` for the given date.
+    The night band wraps midnight, so it's emitted as two rects (start-of-day
+    + end-of-day). Returns ``[]`` if any solar event can't be computed."""
+    sr = _solar_local_hour(d, lat, lon, tz, -0.833, morning=True)   # sunrise
+    ss = _solar_local_hour(d, lat, lon, tz, -0.833, morning=False)  # sunset
+    cd_morning = _solar_local_hour(d, lat, lon, tz, -6.0, morning=True)   # civil dawn
+    cd_evening = _solar_local_hour(d, lat, lon, tz, -6.0, morning=False)  # civil dusk
+    if None in (sr, ss, cd_morning, cd_evening):
+        return []
+    # ~15 min strips bracket sunrise/sunset so the "moment" gets its own band.
+    strip = 0.25
+    bands = [
+        # night wraps: two rects
+        {"name": "night", "start": 0.0, "end": cd_morning},
+        {"name": "dawn",     "start": cd_morning,  "end": sr - strip},
+        {"name": "sunrise",  "start": sr - strip,  "end": sr + strip},
+        {"name": "day",      "start": sr + strip,  "end": ss - strip},
+        {"name": "sunset",   "start": ss - strip,  "end": ss + strip},
+        {"name": "dusk",     "start": ss + strip,  "end": cd_evening},
+        {"name": "night", "start": cd_evening, "end": 24.0},
+    ]
+    # Drop zero/negative-width bands (e.g. if dawn strip overlaps sunrise).
+    return [b for b in bands if b["end"] > b["start"]]
 
 # Captures the 11-char YouTube video id from /watch?v=, youtu.be/ or /embed/ URLs.
 _YT_VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/embed/)([A-Za-z0-9_-]{11})")
@@ -1086,24 +1159,76 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         min_species: int = Query(default=2, ge=2, le=10),
         order: str = Query(default="recent"),  # recent | n_species | max_conf
         limit: int = Query(default=50, ge=1, le=200),
+        bucket: str = Query(default="genuine"),  # genuine | confusions
     ) -> HTMLResponse:
         """Browse chunks where the live pipeline detected multiple species at
         once. Every DetectionRow sharing a ``clip_path`` came from the same
         3 s window, so a clip_path with >=2 rows means BirdNET heard several
-        birds (or hedged between similar species) in the same instant."""
+        birds — or hedged between similar species — in the same instant.
+
+        Split into two buckets:
+
+        * **genuine** — distinct genera AND a tight confidence cluster: the
+          model is confident about each species separately, so we treat the
+          chunk as a real multi-bird moment.
+        * **confusions** — anything else: two species sharing a genus, a
+          weak runner-up next to a strong leader, or any below-floor row.
+          We err here on purpose; better to under-celebrate a soundscape
+          than to mistake a hedge for one.
+        """
+        if bucket not in ("genuine", "confusions"):
+            bucket = "genuine"
         _, sources_by_name, _ = _all_sources()
+
+        # Pull the genus out of the scientific name in SQL so we can count
+        # distinct genera per chunk. Two species sharing a genus is the
+        # cleanest "BirdNET is hedging" signal we have.
+        space_idx = func.instr(DetectionRow.scientific_name, " ")
+        genus_expr = case(
+            (space_idx > 0,
+             func.substr(DetectionRow.scientific_name, 1, space_idx - 1)),
+            else_=DetectionRow.scientific_name,
+        )
+
+        # Thresholds that define "genuine." See the docstring above for the
+        # rationale; tuning these is the main lever if results drift.
+        conf_floor = 0.50      # absolute floor for the weakest row
+        conf_ratio_min = 0.50  # min_conf / max_conf must clear this
+
+        n_col = func.count().label("n")
+        n_genera_col = func.count(func.distinct(genus_expr)).label("n_genera")
+        min_conf_col = func.min(DetectionRow.confidence).label("min_conf")
+        max_conf_col = func.max(DetectionRow.confidence).label("max_conf")
+
+        genuine_having = and_(
+            n_col >= min_species,
+            n_genera_col == n_col,
+            min_conf_col >= conf_floor,
+            min_conf_col >= conf_ratio_min * max_conf_col,
+        )
+        confusion_having = and_(
+            n_col >= min_species,
+            or_(
+                n_genera_col < n_col,
+                min_conf_col < conf_floor,
+                min_conf_col < conf_ratio_min * max_conf_col,
+            ),
+        )
+        bucket_having = genuine_having if bucket == "genuine" else confusion_having
 
         with db.session() as s:
             group_stmt = (
                 select(
                     DetectionRow.clip_path.label("clip_path"),
-                    func.count().label("n"),
+                    n_col,
                     func.max(DetectionRow.started_at).label("latest"),
-                    func.max(DetectionRow.confidence).label("max_conf"),
+                    max_conf_col,
+                    min_conf_col,
+                    n_genera_col,
                 )
                 .where(DetectionRow.clip_path.is_not(None))
                 .group_by(DetectionRow.clip_path)
-                .having(func.count() >= min_species)
+                .having(bucket_having)
             )
             if source:
                 group_stmt = group_stmt.where(DetectionRow.source_name == source)
@@ -1164,15 +1289,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     .order_by(DetectionRow.common_name)
                 )
             )
-            total_groups = s.scalar(
-                select(func.count()).select_from(
+
+            def _bucket_count(having_clause) -> int:
+                sub = (
                     select(DetectionRow.clip_path)
                     .where(DetectionRow.clip_path.is_not(None))
-                    .group_by(DetectionRow.clip_path)
-                    .having(func.count() >= min_species)
-                    .subquery()
                 )
-            ) or 0
+                if source:
+                    sub = sub.where(DetectionRow.source_name == source)
+                sub = sub.group_by(DetectionRow.clip_path).having(having_clause)
+                return s.scalar(
+                    select(func.count()).select_from(sub.subquery())
+                ) or 0
+
+            genuine_count = _bucket_count(genuine_having)
+            confusion_count = _bucket_count(confusion_having)
+            total_groups = genuine_count + confusion_count
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         return TEMPLATES.TemplateResponse(
@@ -1181,6 +1313,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             {
                 "groups": groups,
                 "total_groups": total_groups,
+                "genuine_count": genuine_count,
+                "confusion_count": confusion_count,
+                "bucket": bucket,
                 "all_sources": all_sources_list,
                 "all_species": all_species,
                 "note_tag_by_sci": note_tag_by_sci,
@@ -1195,7 +1330,437 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "min_species": min_species,
                     "order": order,
                     "limit": limit,
+                    "bucket": bucket,
                 },
+            },
+        )
+
+    @app.get("/diurnal", response_class=HTMLResponse)
+    def diurnal(
+        request: Request,
+        source: str | None = Query(default=None),
+        days: int = Query(default=7, ge=1, le=365),
+        # Strings, not ``date``, because the form posts empty ``since=`` when
+        # the calendar inputs are blank — and FastAPI would 422 on that.
+        since: str | None = Query(default=None),
+        until: str | None = Query(default=None),
+        top_n: int = Query(default=12, ge=3, le=40),
+        min_conf: float = Query(default=0.5, ge=0.0, le=1.0),
+    ) -> HTMLResponse:
+        def _parse_iso_date(s: str | None) -> date | None:
+            if not s:
+                return None
+            try:
+                return date.fromisoformat(s.strip())
+            except ValueError:
+                return None
+        since_d = _parse_iso_date(since)
+        until_d = _parse_iso_date(until)
+        """Activity by hour of day, in each source's local timezone.
+
+        Two charts:
+          * total detections per hour across the selection (bar)
+          * top species × hour cells (heatmap)
+
+        Hour is computed in the *source's* configured timezone so dawn-chorus
+        peaks line up regardless of which camera the row came from."""
+        _, sources_by_name, _ = _all_sources()
+
+        # Cache per-source ZoneInfo so we don't re-parse for every row.
+        tz_cache: dict[str, ZoneInfo] = {}
+
+        def _tz_for(name: str) -> ZoneInfo:
+            tz = tz_cache.get(name)
+            if tz is not None:
+                return tz
+            cfg = sources_by_name.get(name)
+            tz_name = cfg.timezone if cfg else "UTC"
+            try:
+                tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                tz = UTC  # type: ignore[assignment]
+            tz_cache[name] = tz
+            return tz
+
+        # Effective window. If both date pickers filled, they win and we
+        # back-compute ``days`` from the span (used downstream for the
+        # weather call and the chart header).
+        now = datetime.now(UTC)
+        if since_d is not None and until_d is not None and until_d >= since_d:
+            since_dt = datetime(since_d.year, since_d.month, since_d.day, tzinfo=UTC)
+            until_dt = datetime(
+                until_d.year, until_d.month, until_d.day, tzinfo=UTC
+            ) + timedelta(days=1)
+            days = max(1, min(365, (until_dt - since_dt).days))
+            window_label = f"{since_d.isoformat()} → {until_d.isoformat()}"
+        else:
+            since_dt = now - timedelta(days=days)
+            until_dt = now
+            window_label = f"last {days} day" + ("" if days == 1 else "s")
+
+        with db.session() as s:
+            stmt = (
+                select(DetectionRow)
+                .where(DetectionRow.started_at >= since_dt)
+                .where(DetectionRow.started_at < until_dt)
+                .where(DetectionRow.confidence >= min_conf)
+            )
+            if source:
+                stmt = stmt.where(DetectionRow.source_name == source)
+            rows = list(s.scalars(stmt))
+
+            all_sources_list = list(
+                s.scalars(
+                    select(DetectionRow.source_name)
+                    .group_by(DetectionRow.source_name)
+                    .order_by(DetectionRow.source_name)
+                )
+            )
+
+        hour_overall = [0] * 24
+        per_species: dict[str, dict] = {}
+        # Track which timezone is producing the most rows. When sources span
+        # different tzs (e.g., a UTC-default runtime source mixed with the
+        # Africa/Johannesburg cams) we use this to pick the tz the bars are
+        # mostly drawn in — and align the solar bands to it.
+        tz_counts: dict[str, int] = {}
+        for r in rows:
+            ts = r.started_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            cfg = sources_by_name.get(r.source_name)
+            tz_name = cfg.timezone if cfg else "UTC"
+            tz_counts[tz_name] = tz_counts.get(tz_name, 0) + 1
+            hr = ts.astimezone(_tz_for(r.source_name)).hour
+            hour_overall[hr] += 1
+            d = per_species.setdefault(
+                r.scientific_name,
+                {
+                    "scientific": r.scientific_name,
+                    "common": r.common_name,
+                    "hours": [0] * 24,
+                    "total": 0,
+                },
+            )
+            d["hours"][hr] += 1
+            d["total"] += 1
+
+        dominant_tz_name = (
+            max(tz_counts, key=tz_counts.get) if tz_counts else "UTC"
+        )
+
+        ranked = sorted(per_species.values(), key=lambda d: d["total"], reverse=True)
+        top_species = ranked[:top_n]
+
+        peak_hour = max(range(24), key=lambda h: hour_overall[h]) if rows else None
+        peak_hour_count = hour_overall[peak_hour] if peak_hour is not None else 0
+
+        # Pick the tz used for the chart axis and the bands. Always prefer
+        # the tz that owns the most detections in the window (matches the
+        # bars). For a single selected source, that's just its tz.
+        if source and source in sources_by_name:
+            axis_tz_name = sources_by_name[source].timezone
+        else:
+            axis_tz_name = dominant_tz_name
+        tz_label = _tz_abbr(axis_tz_name)
+
+        # Solar bands: average lat/lon across the relevant sources and use
+        # the window midpoint date. For a single selected source, that's
+        # just that source. Sun times only meaningfully differ within
+        # southern Africa by a few minutes across these cameras.
+        if source and source in sources_by_name:
+            band_cfgs = [sources_by_name[source]]
+        else:
+            band_cfgs = [c for c in sources_by_name.values()
+                         if c.lat is not None and c.lon is not None]
+        lats = [c.lat for c in band_cfgs if c.lat is not None]
+        lons = [c.lon for c in band_cfgs if c.lon is not None]
+        bands: list[dict] = []
+        if lats and lons:
+            avg_lat = sum(lats) / len(lats)
+            avg_lon = sum(lons) / len(lons)
+            mid_dt = since_dt + (until_dt - since_dt) / 2
+            try:
+                band_tz = ZoneInfo(axis_tz_name)
+            except ZoneInfoNotFoundError:
+                band_tz = UTC  # type: ignore[assignment]
+            mid_date = mid_dt.astimezone(band_tz).date()
+            bands = _solar_bands(mid_date, avg_lat, avg_lon, band_tz)
+
+        payload = {
+            "tz_label": tz_label,
+            "total": len(rows),
+            "n_species": len(per_species),
+            "peak_hour": peak_hour,
+            "peak_hour_count": peak_hour_count,
+            "hour_overall": [{"hour": h, "count": hour_overall[h]} for h in range(24)],
+            "hour_by_species": [
+                {
+                    "species": d["common"],
+                    "scientific": d["scientific"],
+                    "total": d["total"],
+                    "hours": d["hours"],
+                }
+                for d in top_species
+            ],
+            "bands": bands,
+            "filters": {
+                "source": source or "",
+                "days": days,
+                "since": since_d.isoformat() if since_d else "",
+                "until": until_d.isoformat() if until_d else "",
+                "min_conf": min_conf,
+            },
+        }
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "diurnal.html",
+            {
+                "data_json": json.dumps(payload),
+                "data": payload,
+                "all_sources": all_sources_list,
+                "window_label": window_label,
+                "filters": {
+                    "source": source or "",
+                    "days": days,
+                    "since": since_d.isoformat() if since_d else "",
+                    "until": until_d.isoformat() if until_d else "",
+                    "top_n": top_n,
+                    "min_conf": min_conf,
+                },
+                "preset_days": [
+                    (1, "1d"),
+                    (7, "7d"),
+                    (30, "30d"),
+                    (90, "3mo"),
+                    (365, "1y"),
+                ],
+            },
+        )
+
+    @app.get("/partials/diurnal-popup", response_class=HTMLResponse)
+    def diurnal_popup(
+        request: Request,
+        scientific: str = Query(..., min_length=1),
+        hour: int = Query(..., ge=0, le=23),
+        source: str | None = Query(default=None),
+        days: int = Query(default=7, ge=1, le=365),
+        since: str | None = Query(default=None),
+        until: str | None = Query(default=None),
+        min_conf: float = Query(default=0.5, ge=0.0, le=1.0),
+    ) -> HTMLResponse:
+        """Cell popup: species summary, 24-hour radial activity dial, and
+        weather at this hour averaged across the lookback window. The dial
+        sums detections per source-local hour over the same window the
+        chart used. Weather requires a single source with lat/lon."""
+        _, sources_by_name, _ = _all_sources()
+
+        def _parse_iso_date(s: str | None) -> date | None:
+            if not s:
+                return None
+            try:
+                return date.fromisoformat(s.strip())
+            except ValueError:
+                return None
+
+        since_d = _parse_iso_date(since)
+        until_d = _parse_iso_date(until)
+        now = datetime.now(UTC)
+        if since_d is not None and until_d is not None and until_d >= since_d:
+            since_dt = datetime(since_d.year, since_d.month, since_d.day, tzinfo=UTC)
+            until_dt = datetime(
+                until_d.year, until_d.month, until_d.day, tzinfo=UTC
+            ) + timedelta(days=1)
+        else:
+            since_dt = now - timedelta(days=days)
+            until_dt = now
+        weather_days = max(1, min(92, (until_dt - since_dt).days or 1))
+
+        tz_cache: dict[str, ZoneInfo] = {}
+
+        def _tz_for(name: str) -> ZoneInfo:
+            tz = tz_cache.get(name)
+            if tz is not None:
+                return tz
+            cfg = sources_by_name.get(name)
+            tz_name = cfg.timezone if cfg else "UTC"
+            try:
+                tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                tz = UTC  # type: ignore[assignment]
+            tz_cache[name] = tz
+            return tz
+
+        with db.session() as s:
+            note = s.get(SpeciesNoteRow, scientific)
+            sample = s.scalar(
+                select(DetectionRow)
+                .where(DetectionRow.scientific_name == scientific)
+                .order_by(desc(DetectionRow.confidence))
+                .limit(1)
+            )
+            stmt = (
+                select(DetectionRow)
+                .where(DetectionRow.scientific_name == scientific)
+                .where(DetectionRow.started_at >= since_dt)
+                .where(DetectionRow.started_at < until_dt)
+                .where(DetectionRow.confidence >= min_conf)
+            )
+            if source:
+                stmt = stmt.where(DetectionRow.source_name == source)
+            species_rows = list(s.scalars(stmt))
+
+        hours_arr = [0] * 24
+        for r in species_rows:
+            ts = r.started_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            hours_arr[ts.astimezone(_tz_for(r.source_name)).hour] += 1
+        peak_hour = (
+            max(range(24), key=lambda h: hours_arr[h]) if any(hours_arr) else None
+        )
+
+        # Solar bands for the dial coloring — same logic as the chart route
+        # so dial wedges align with the chart's time-of-day shading.
+        if source and source in sources_by_name:
+            band_cfgs = [sources_by_name[source]]
+        else:
+            band_cfgs = [
+                c for c in sources_by_name.values()
+                if c.lat is not None and c.lon is not None
+            ]
+        lats = [c.lat for c in band_cfgs if c.lat is not None]
+        lons = [c.lon for c in band_cfgs if c.lon is not None]
+        dial_bands: list[dict] = []
+        if lats and lons:
+            avg_lat = sum(lats) / len(lats)
+            avg_lon = sum(lons) / len(lons)
+            mid_dt = since_dt + (until_dt - since_dt) / 2
+            if source and source in sources_by_name:
+                band_tz_name = sources_by_name[source].timezone or "UTC"
+            elif len({cfg.timezone for cfg in sources_by_name.values()}) == 1:
+                band_tz_name = next(iter(sources_by_name.values())).timezone or "UTC"
+            else:
+                band_tz_name = "UTC"
+            try:
+                band_tz = ZoneInfo(band_tz_name)
+            except ZoneInfoNotFoundError:
+                band_tz = UTC  # type: ignore[assignment]
+            mid_date = mid_dt.astimezone(band_tz).date()
+            dial_bands = _solar_bands(mid_date, avg_lat, avg_lon, band_tz)
+
+        common = (
+            (note.common_name if note and note.common_name else None)
+            or (sample.common_name if sample else None)
+            or scientific
+        )
+
+        weather = None
+        weather_note = None
+        if source and source in sources_by_name:
+            cfg = sources_by_name[source]
+            if cfg.lat is not None and cfg.lon is not None:
+                tz_name = cfg.timezone or "UTC"
+                data = _open_meteo_hourly(cfg.lat, cfg.lon, weather_days, tz_name)
+                if data:
+                    weather = _weather_at_hour(data, hour) or None
+                if weather is None and data is None:
+                    weather_note = "Open-Meteo lookup failed."
+            else:
+                weather_note = "This source has no lat/lon configured."
+        else:
+            weather_note = "Pick a single source to see weather."
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "_diurnal_popup.html",
+            {
+                "scientific": scientific,
+                "common": common,
+                "hour": hour,
+                "source": source,
+                "days": days,
+                "min_conf": min_conf,
+                "note": note,
+                "weather": weather,
+                "weather_note": weather_note,
+                "dial_svg": _radial_dial_svg(
+                    hours_arr, highlight=hour, bands=dial_bands
+                ),
+                "species_total": sum(hours_arr),
+                "peak_hour": peak_hour,
+            },
+        )
+
+    @app.get("/partials/diurnal-detections", response_class=HTMLResponse)
+    def diurnal_detections_partial(
+        request: Request,
+        scientific: str = Query(..., min_length=1),
+        hour: int = Query(..., ge=0, le=23),
+        source: str | None = Query(default=None),
+        days: int = Query(default=7, ge=1, le=365),
+        min_conf: float = Query(default=0.5, ge=0.0, le=1.0),
+        limit: int = Query(default=40, ge=1, le=200),
+    ) -> HTMLResponse:
+        """Drill-down for a heatmap cell: detections of one scientific name,
+        filtered to one hour-of-day in source-local time, within the diurnal
+        window. Returns rendered ``_audition_row.html`` items."""
+        _, sources_by_name, _ = _all_sources()
+
+        def _local_hour(ts: datetime, src_name: str) -> int:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            cfg = sources_by_name.get(src_name)
+            tz_name = cfg.timezone if cfg else "UTC"
+            try:
+                tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                tz = UTC  # type: ignore[assignment]
+            return ts.astimezone(tz).hour
+
+        since = datetime.now(UTC) - timedelta(days=days)
+        with db.session() as s:
+            stmt = (
+                select(DetectionRow)
+                .where(DetectionRow.started_at >= since)
+                .where(DetectionRow.scientific_name == scientific)
+                .where(DetectionRow.confidence >= min_conf)
+                .order_by(desc(DetectionRow.confidence))
+            )
+            if source:
+                stmt = stmt.where(DetectionRow.source_name == source)
+            # Fetch a generous slice from SQL, then filter the hour in Python
+            # because hour-of-day depends on each source's timezone (not
+            # something SQLite can do cleanly in a WHERE clause).
+            candidates = list(s.scalars(stmt.limit(limit * 8)))
+            rows = [r for r in candidates if _local_hour(r.started_at, r.source_name) == hour][:limit]
+
+            note = s.get(SpeciesNoteRow, scientific)
+            common_name = rows[0].common_name if rows else scientific
+
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        return TEMPLATES.TemplateResponse(
+            request,
+            "_diurnal_detail.html",
+            {
+                "rows": rows,
+                "common_name": common_name,
+                "scientific": scientific,
+                "source": source,
+                "hour": hour,
+                "days": days,
+                "min_conf": min_conf,
+                "source_tz": source_tz,
+                "note_tag_by_sci": {scientific: note.tag} if note and note.tag else {},
+                "status_by_sci": (
+                    {scientific: note.conservation_status}
+                    if note and note.conservation_status else {}
+                ),
+                "palette_for_tag": {
+                    k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
+                },
+                "default_palette": SPEC_PALETTE_FOR_TAG[None],
             },
         )
 
@@ -1412,6 +1977,354 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # Wikimedia's REST API.
     _wp_cache: dict[str, tuple[float, dict]] = {}
     _WP_TTL_SECONDS = 24 * 3600
+
+    # Open-Meteo hourly archive cache: (lat, lon, past_days, tz) → (expiry, json).
+    # Their data updates hourly at most; 1h TTL is generous given how stale
+    # the diurnal view's lookback window is. Free API, no key required.
+    _om_cache: dict[tuple, tuple[float, dict]] = {}
+    _OM_TTL_SECONDS = 3600
+
+    def _open_meteo_hourly(
+        lat: float, lon: float, past_days: int, tz_name: str
+    ) -> dict | None:
+        key = (round(lat, 3), round(lon, 3), past_days, tz_name)
+        now = time.monotonic()
+        cached = _om_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+        params = urllib.parse.urlencode(
+            {
+                "latitude": f"{lat:.4f}",
+                "longitude": f"{lon:.4f}",
+                "past_days": past_days,
+                "forecast_days": 1,
+                "hourly": (
+                    "temperature_2m,relative_humidity_2m,"
+                    "precipitation,wind_speed_10m,cloud_cover,weather_code"
+                ),
+                "timezone": tz_name,
+            }
+        )
+        url = f"https://api.open-meteo.com/v1/forecast?{params}"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "africam-bird/0.1"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        _om_cache[key] = (now + _OM_TTL_SECONDS, data)
+        return data
+
+    def _weather_at_hour(data: dict, hour: int) -> dict:
+        """Aggregate hourly weather values for one hour-of-day across the
+        Open-Meteo response window. Returns ``{}`` if no samples landed on
+        the requested hour."""
+        hourly = (data or {}).get("hourly") or {}
+        times = hourly.get("time") or []
+        if not times:
+            return {}
+        idxs = []
+        for i, t in enumerate(times):
+            # times look like "2026-05-13T07:00"; the hour lives at offset 11:13.
+            if isinstance(t, str) and len(t) >= 13 and t[10] == "T":
+                try:
+                    if int(t[11:13]) == hour:
+                        idxs.append(i)
+                except ValueError:
+                    continue
+        if not idxs:
+            return {}
+
+        def _gather(name: str) -> list[float]:
+            arr = hourly.get(name) or []
+            return [arr[i] for i in idxs if i < len(arr) and arr[i] is not None]
+
+        temps = _gather("temperature_2m")
+        codes = [
+            int(c) for c in _gather("weather_code") if c is not None
+        ]
+        wmo_modal = None
+        if codes:
+            counts: dict[int, int] = {}
+            for c in codes:
+                counts[c] = counts.get(c, 0) + 1
+            wmo_modal = max(counts, key=counts.get)
+        icon, label = _wmo_summary(wmo_modal)
+        return {
+            "n_samples": len(idxs),
+            "temp_mean": (sum(temps) / len(temps)) if temps else None,
+            "wmo_code": wmo_modal,
+            "icon": icon,
+            "label": label,
+        }
+
+    # Time-of-day band fills shared by every chart that paints solar bands.
+    # Night = deep navy (almost black); twilight ramps through warm pinks
+    # and oranges around sunrise/sunset; day = sky blue. Stars are added on
+    # top of the night band in the dial only.
+    _DIAL_BAND_FILL = {
+        "night":   "#020617",  # slate-950
+        "dawn":    "#f43f5e",  # rose-500   — warm pre-sunrise glow
+        "sunrise": "#fb923c",  # orange-400 — peak sunrise
+        "day":     "#38bdf8",  # sky-400
+        "sunset":  "#f97316",  # orange-500 — peak sunset
+        "dusk":    "#e11d48",  # rose-600   — warm post-sunset glow
+    }
+    _DIAL_BAND_OPACITY = {
+        "night":   0.85,
+        "dawn":    0.50,
+        "sunrise": 0.65,
+        "day":     0.30,
+        "sunset":  0.65,
+        "dusk":    0.50,
+    }
+    _DIAL_DEFAULT_FILL = "#10b981"  # emerald-500 — wedge bars / no-band fallback
+
+    # Emblematic Southern-Hemisphere May-evening constellations. Stars are
+    # (x_norm, y_norm, magnitude_scale) in their own [0,1]² bounding box;
+    # ``lines`` connect star indices to suggest the figure. Scorpius is
+    # high in the morning sky in May; Crux is high in the evening.
+    _CONSTELLATIONS: dict[str, dict] = {
+        "crux": {
+            "stars": (
+                (0.50, 0.08, 1.4),  # Gacrux (top)
+                (0.20, 0.45, 1.2),  # Mimosa (left)
+                (0.78, 0.40, 1.1),  # Delta (right)
+                (0.48, 0.92, 1.6),  # Acrux (bottom, brightest)
+                (0.62, 0.68, 0.7),  # Epsilon (faint)
+            ),
+            "lines": ((0, 3), (1, 2)),
+        },
+        "scorpius": {
+            "stars": (
+                # Pincers (chelae) — two claw arms branching off the head.
+                (0.10, 0.08, 0.9),  # 0 — β1 (Graffias, upper claw tip)
+                (0.22, 0.20, 0.7),  # 1 — upper claw joint
+                (0.50, 0.05, 0.9),  # 2 — ω (lower claw tip)
+                (0.40, 0.20, 0.7),  # 3 — lower claw joint
+                # Head & body.
+                (0.30, 0.30, 1.0),  # 4 — δ Dschubba (head)
+                (0.32, 0.42, 0.9),  # 5 — σ
+                (0.35, 0.54, 1.7),  # 6 — α Antares (brightest, body)
+                (0.38, 0.64, 0.9),  # 7 — τ
+                # Tail hooking right.
+                (0.46, 0.74, 0.9),  # 8 — ε
+                (0.56, 0.80, 0.9),  # 9 — μ
+                (0.68, 0.82, 1.0),  # 10 — ζ
+                (0.80, 0.72, 0.8),  # 11 — η
+                (0.88, 0.55, 1.3),  # 12 — λ Shaula (stinger)
+            ),
+            "lines": (
+                (0, 1), (1, 4),          # upper pincer → head
+                (2, 3), (3, 4),          # lower pincer → head
+                (4, 5), (5, 6), (6, 7),  # body
+                (7, 8), (8, 9), (9, 10),
+                (10, 11), (11, 12),      # tail curling to stinger
+            ),
+        },
+    }
+
+    def _render_constellation_svg(
+        name: str, cx: float, cy: float, size: float,
+        color: str = "#e4e4e7",
+    ) -> str:
+        """Place a constellation centered at (cx, cy), scaled to ``size`` px
+        on its longest axis. Lines render first so dots draw on top."""
+        const = _CONSTELLATIONS.get(name)
+        if not const:
+            return ""
+        stars = const["stars"]
+        parts: list[str] = []
+        for i, j in const.get("lines", ()):
+            x1n, y1n, _ = stars[i]
+            x2n, y2n, _ = stars[j]
+            x1 = cx + (x1n - 0.5) * size
+            y1 = cy + (y1n - 0.5) * size
+            x2 = cx + (x2n - 0.5) * size
+            y2 = cy + (y2n - 0.5) * size
+            parts.append(
+                f'<line x1="{x1:.2f}" y1="{y1:.2f}" '
+                f'x2="{x2:.2f}" y2="{y2:.2f}" '
+                f'stroke="{color}" stroke-width="0.4" '
+                f'stroke-opacity="0.35"/>'
+            )
+        for nx, ny, mag in stars:
+            sx = cx + (nx - 0.5) * size
+            sy = cy + (ny - 0.5) * size
+            r = 0.85 * mag
+            parts.append(
+                f'<circle cx="{sx:.2f}" cy="{sy:.2f}" r="{r:.2f}" '
+                f'fill="{color}" fill-opacity="0.85"/>'
+            )
+        return "".join(parts)
+
+    def _radial_dial_svg(
+        hours: list[int],
+        highlight: int | None = None,
+        bands: list[dict] | None = None,
+    ) -> str:
+        """Render a 24-hour radial bar dial as inline SVG.
+
+        Background = a translucent annulus segmented by the time-of-day
+        bands (night, dawn, sunrise, day, sunset, dusk) at their actual
+        fractional-hour edges. Foreground = one emerald wedge per hour with
+        length ∝ detection count; the ``highlight`` hour gets an amber
+        stroke. All geometry is computed here so the template stays
+        declarative."""
+        W, H = 220, 220
+        cx, cy = W / 2.0, H / 2.0
+        r_in, r_out = 26.0, 90.0
+        max_v = max(hours) if hours else 0
+        if max_v <= 0:
+            max_v = 1
+        slice_rad = math.pi / 12.0  # 15° per hour
+
+        # Layout: 12:00 anchors the top of the dial and hours advance
+        # clockwise — putting sunrise (~06:00) on the left and sunset
+        # (~18:00) on the right, with night arcing across the bottom.
+        def _dial_angle(h: float) -> float:
+            return -math.pi / 2 + (h - 12.0) * slice_rad
+
+        parts: list[str] = [
+            f'<svg viewBox="0 0 {W} {H}" '
+            f'width="{W}" height="{H}" '
+            f'class="block mx-auto" '
+            f'style="max-width:220px;height:auto">',
+        ]
+
+        # Background: annulus segments for each time-of-day band, drawn at
+        # the band's actual fractional-hour edges. Night gets a starfield
+        # sprinkled on top.
+        if bands:
+            for b in bands:
+                start_h = max(0.0, b["start"])
+                end_h = min(24.0, b["end"])
+                if end_h - start_h < 0.01:
+                    continue
+                a1 = _dial_angle(start_h)
+                a2 = _dial_angle(end_h)
+                large_arc = 1 if (a2 - a1) > math.pi else 0
+                x1o = cx + math.cos(a1) * r_out
+                y1o = cy + math.sin(a1) * r_out
+                x2o = cx + math.cos(a2) * r_out
+                y2o = cy + math.sin(a2) * r_out
+                x2i = cx + math.cos(a2) * r_in
+                y2i = cy + math.sin(a2) * r_in
+                x1i = cx + math.cos(a1) * r_in
+                y1i = cy + math.sin(a1) * r_in
+                d = (
+                    f"M {x1o:.2f} {y1o:.2f} "
+                    f"A {r_out:.2f} {r_out:.2f} 0 {large_arc} 1 {x2o:.2f} {y2o:.2f} "
+                    f"L {x2i:.2f} {y2i:.2f} "
+                    f"A {r_in:.2f} {r_in:.2f} 0 {large_arc} 0 {x1i:.2f} {y1i:.2f} Z"
+                )
+                fill = _DIAL_BAND_FILL.get(b["name"], "#27272a")
+                opacity = _DIAL_BAND_OPACITY.get(b["name"], 0.30)
+                parts.append(
+                    f'<path d="{d}" fill="{fill}" '
+                    f'fill-opacity="{opacity:.2f}"/>'
+                )
+                if b.get("name") == "night":
+                    # Pick the constellation that's high in the sky during
+                    # this part of the night for southern Africa in May:
+                    # Scorpius dominates the morning hours, Crux dominates
+                    # the evening sky.
+                    mid_h = (start_h + end_h) / 2
+                    const_name = "scorpius" if mid_h < 12 else "crux"
+                    a_mid = _dial_angle(mid_h)
+                    r_mid = (r_in + r_out) / 2
+                    center_x = cx + math.cos(a_mid) * r_mid
+                    center_y = cy + math.sin(a_mid) * r_mid
+                    # Conservative size so the figure stays inside the
+                    # annulus even for short night spans.
+                    size = min((r_out - r_in) - 6, 36)
+                    parts.append(
+                        _render_constellation_svg(
+                            const_name, center_x, center_y, size
+                        )
+                    )
+
+        parts.extend([
+            # Faint outer reference ring at max radius.
+            f'<circle cx="{cx}" cy="{cy}" r="{r_out}" '
+            f'fill="none" stroke="#27272a" stroke-width="1"/>',
+            # Inner hub.
+            f'<circle cx="{cx}" cy="{cy}" r="{r_in}" '
+            f'fill="#0a0a0a" stroke="#27272a" stroke-width="1"/>',
+        ])
+
+        for h in range(24):
+            v = hours[h] / max_v
+            r = r_in + (r_out - r_in) * v
+            a1 = _dial_angle(h)
+            a2 = a1 + slice_rad
+            cos1, sin1 = math.cos(a1), math.sin(a1)
+            cos2, sin2 = math.cos(a2), math.sin(a2)
+            x1i, y1i = cx + cos1 * r_in, cy + sin1 * r_in
+            x2i, y2i = cx + cos2 * r_in, cy + sin2 * r_in
+            x1o, y1o = cx + cos1 * r, cy + sin1 * r
+            x2o, y2o = cx + cos2 * r, cy + sin2 * r
+            if hours[h] == 0:
+                continue
+            fill = _DIAL_DEFAULT_FILL
+            opacity = 0.90
+            stroke_attr = (
+                ' stroke="#fbbf24" stroke-width="1.5"'
+                if h == highlight else ""
+            )
+            d = (
+                f"M {x1i:.2f} {y1i:.2f} "
+                f"L {x1o:.2f} {y1o:.2f} "
+                f"A {r:.2f} {r:.2f} 0 0 1 {x2o:.2f} {y2o:.2f} "
+                f"L {x2i:.2f} {y2i:.2f} "
+                f"A {r_in:.2f} {r_in:.2f} 0 0 0 {x1i:.2f} {y1i:.2f} Z"
+            )
+            title = f"{h:02d}:00 · {hours[h]} detections"
+            parts.append(
+                f'<path d="{d}" fill="{fill}" '
+                f'fill-opacity="{opacity:.2f}"{stroke_attr}>'
+                f"<title>{title}</title></path>"
+            )
+
+        for h, label in ((0, "00"), (6, "06"), (12, "12"), (18, "18")):
+            # Labels sit at the hour boundary (not wedge center) so the
+            # cardinal hours land exactly at top/right/bottom/left.
+            a = _dial_angle(h)
+            x = cx + math.cos(a) * (r_out + 12)
+            y = cy + math.sin(a) * (r_out + 12)
+            parts.append(
+                f'<text x="{x:.2f}" y="{y:.2f}" '
+                f'text-anchor="middle" dominant-baseline="middle" '
+                f'fill="#71717a" font-size="10" '
+                f'font-family="ui-sans-serif, system-ui">{label}</text>'
+            )
+
+        parts.append("</svg>")
+        return "".join(parts)
+
+    def _wmo_summary(code: int | None) -> tuple[str, str]:
+        """WMO weather code → (icon key, human label). The icon key is one
+        of clear/partly/overcast/fog/rain/thunder; the template renders an
+        inline SVG per key. Returns ('', '') when the code is unknown."""
+        if code is None:
+            return ("", "")
+        if code == 0:
+            return ("clear", "clear")
+        if code in (1, 2):
+            return ("partly", "partly cloudy")
+        if code == 3:
+            return ("overcast", "overcast")
+        if code in (45, 48):
+            return ("fog", "fog")
+        if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
+            return ("rain", "rain")
+        if code in (95, 96, 99):
+            return ("thunder", "thunderstorm")
+        if code in (71, 73, 75, 77, 85, 86):
+            return ("overcast", "wintry")
+        return ("overcast", "")
 
     def _wp_fetch(title: str) -> dict | None:
         """Fetch the Wikipedia REST summary for a page title and return the

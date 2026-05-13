@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -206,6 +206,29 @@ class Database:
     def list_worker_heartbeats(self) -> list[WorkerHeartbeatRow]:
         with self._Session() as s:
             return list(s.scalars(select(WorkerHeartbeatRow)))
+
+    def stale_workers(self, max_age_s: float) -> list[str]:
+        """Source names whose worker still claims to be running but hasn't
+        sent a heartbeat in ``max_age_s`` seconds. These are stuck —
+        typically blocked on an ffmpeg read against a frozen HLS stream.
+        The supervisor uses this to kick replacements."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=max_age_s)
+        with self._Session() as s:
+            rows = s.scalars(
+                select(WorkerHeartbeatRow)
+                .where(WorkerHeartbeatRow.state == "running")
+                .where(WorkerHeartbeatRow.last_heartbeat_at < cutoff)
+            )
+            return [r.source_name for r in rows]
+
+    def worker_stalled(self, source_name: str, error: str = "") -> None:
+        """Mark a worker as stalled. Set by the supervisor watchdog when it
+        kicks a worker whose heartbeat went silent."""
+        with self._Session() as s, s.begin():
+            row = s.get(WorkerHeartbeatRow, source_name)
+            if row is not None:
+                row.state = "stalled"
+                row.last_error = (error or "no heartbeat — supervisor restarting")[:512]
 
     # --- Species notes (curated commentary shown in audition) ---
 
