@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from africam.detector.birdnet import Detection
 from africam.storage.models import (
     Base,
+    DailyBriefRow,
     DetectionRow,
     RuntimeSourceRow,
+    SiteNoteRow,
     SourceStateRow,
     SpeciesNoteRow,
     WorkerHeartbeatRow,
@@ -577,3 +579,432 @@ class Database:
             if not include_deleted:
                 stmt = stmt.where(RuntimeSourceRow.deleted_at.is_(None))
             return list(s.scalars(stmt))
+
+    # --- Site-level evidence + AI notes (one per source_name) ---
+
+    def gather_site_evidence(self, source_name: str) -> dict | None:
+        """Aggregate this site's detection footprint for the notes worker.
+
+        Counterpart to gather_species_evidence — same shape philosophy:
+        deterministic JSON, bucketed for signature stability, enough
+        structure for Claude to find the story without us pre-chewing it."""
+        from sqlalchemy import func
+
+        with self._Session() as s:
+            count, mean_conf, max_conf, first_seen, last_seen, distinct_species = (
+                s.execute(
+                    select(
+                        func.count(DetectionRow.id),
+                        func.avg(DetectionRow.confidence),
+                        func.max(DetectionRow.confidence),
+                        func.min(DetectionRow.started_at),
+                        func.max(DetectionRow.started_at),
+                        func.count(func.distinct(DetectionRow.scientific_name)),
+                    ).where(DetectionRow.source_name == source_name)
+                ).one()
+            )
+            if not count:
+                return None
+
+            top_species = s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    func.count(DetectionRow.id),
+                    func.max(DetectionRow.confidence),
+                )
+                .where(DetectionRow.source_name == source_name)
+                .group_by(DetectionRow.scientific_name)
+                .order_by(func.count(DetectionRow.id).desc())
+                .limit(10)
+            ).all()
+
+            per_hour = s.execute(
+                select(
+                    func.strftime("%H", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.source_name == source_name)
+                .group_by(func.strftime("%H", DetectionRow.started_at))
+            ).all()
+
+            label_counts = dict(s.execute(
+                select(DetectionRow.label, func.count(DetectionRow.id))
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.label.is_not(None))
+                .group_by(DetectionRow.label)
+            ).all())
+
+            top_clips = s.execute(
+                select(
+                    DetectionRow.confidence,
+                    DetectionRow.common_name,
+                    DetectionRow.scientific_name,
+                    DetectionRow.started_at,
+                )
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.clip_path.is_not(None))
+                .order_by(DetectionRow.confidence.desc())
+                .limit(3)
+            ).all()
+
+        hourly = [0] * 24
+        for hr_str, c in per_hour:
+            if hr_str is not None:
+                hourly[int(hr_str)] = c
+
+        return {
+            "source_name": source_name,
+            "detection_count": int(count),
+            "distinct_species": int(distinct_species or 0),
+            "mean_confidence": round(float(mean_conf or 0), 3),
+            "max_confidence": round(float(max_conf or 0), 3),
+            "first_seen_utc": first_seen.isoformat() if first_seen else None,
+            "last_seen_utc": last_seen.isoformat() if last_seen else None,
+            "top_species": [
+                {
+                    "scientific_name": sci,
+                    "common_name": com,
+                    "count": int(c),
+                    "max_confidence": round(float(mc), 3),
+                }
+                for sci, com, c, mc in top_species
+            ],
+            "hourly_utc": hourly,
+            "audition_labels": {k: int(v) for k, v in label_counts.items()},
+            "top_clips_utc": [
+                {
+                    "confidence": round(float(conf), 3),
+                    "common_name": com,
+                    "scientific_name": sci,
+                    "at_utc": at.isoformat(),
+                }
+                for conf, com, sci, at in top_clips
+            ],
+        }
+
+    def pick_stale_site_for_note(
+        self,
+        *,
+        candidate_sources: Iterable[str],
+        max_age_days: int,
+        min_detections: int,
+        regen_count_factor: float = 2.0,
+    ) -> str | None:
+        """Return the source_name most overdue for a site note, or None.
+
+        Unlike species (where the candidate set is "any species ever
+        detected"), the candidate set for sites is the small static list of
+        sources from sources.toml — the worker passes it in. Priority order
+        matches the species picker."""
+        from sqlalchemy import func
+
+        candidates = list(candidate_sources)
+        if not candidates:
+            return None
+
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        with self._Session() as s:
+            counts = dict(s.execute(
+                select(DetectionRow.source_name, func.count(DetectionRow.id))
+                .where(DetectionRow.source_name.in_(candidates))
+                .group_by(DetectionRow.source_name)
+                .having(func.count(DetectionRow.id) >= min_detections)
+            ).all())
+            if not counts:
+                return None
+
+            notes = {
+                r.source_name: r
+                for r in s.scalars(
+                    select(SiteNoteRow).where(SiteNoteRow.source_name.in_(counts.keys()))
+                )
+            }
+
+        # 1. Sites with enough detections but no AI note yet — biggest first.
+        missing = sorted(
+            (n for n in counts if notes.get(n) is None or notes[n].generated_at is None),
+            key=lambda n: counts[n],
+            reverse=True,
+        )
+        if missing:
+            return missing[0]
+
+        # 2. Sites that have roughly doubled since last gen.
+        grown = []
+        for name, row in notes.items():
+            at_gen = row.detection_count_at_gen or 0
+            if at_gen and counts[name] >= at_gen * regen_count_factor:
+                grown.append((name, counts[name] - at_gen))
+        if grown:
+            grown.sort(key=lambda kv: kv[1], reverse=True)
+            return grown[0][0]
+
+        # 3. Aged out — oldest first.
+        aged = sorted(
+            (n for n, r in notes.items() if r.generated_at and r.generated_at < cutoff),
+            key=lambda n: notes[n].generated_at,
+        )
+        if aged:
+            return aged[0]
+        return None
+
+    def set_generated_site_note(
+        self,
+        source_name: str,
+        *,
+        note: str,
+        generated_by: str,
+        evidence_signature: str,
+        detection_count_at_gen: int,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(SiteNoteRow, source_name)
+            if row is None:
+                row = SiteNoteRow(source_name=source_name)
+                s.add(row)
+            row.note = note
+            row.updated_at = now
+            row.generated_at = now
+            row.generated_by = generated_by
+            row.evidence_signature = evidence_signature
+            row.detection_count_at_gen = detection_count_at_gen
+
+    def get_site_note(self, source_name: str) -> SiteNoteRow | None:
+        with self._Session() as s:
+            return s.get(SiteNoteRow, source_name)
+
+    def list_site_notes(self) -> list[SiteNoteRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(SiteNoteRow)))
+
+    # --- Daily soundscape brief (one row per UTC date, generated once) ---
+
+    def gather_daily_evidence(self, date_utc: date) -> dict | None:
+        """Aggregate one UTC day across all sites for the daily-brief worker.
+
+        Returns None if there are no detections on that date — keeps the
+        worker from generating an empty brief for a day the pipeline was
+        down. Includes a "newly heard this week" list (species that appear
+        on the date but weren't heard the prior 7 days at that source)
+        which is the most interesting story angle for the digest."""
+        from sqlalchemy import func
+
+        start = datetime.combine(date_utc, time(0, 0), tzinfo=UTC)
+        end = start + timedelta(days=1)
+        week_start = start - timedelta(days=7)
+
+        with self._Session() as s:
+            base = (
+                select(
+                    func.count(DetectionRow.id),
+                    func.count(func.distinct(DetectionRow.scientific_name)),
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+            )
+            total, distinct = s.execute(base).one()
+            if not total:
+                return None
+
+            per_site_count = dict(s.execute(
+                select(DetectionRow.source_name, func.count(DetectionRow.id))
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .group_by(DetectionRow.source_name)
+            ).all())
+
+            per_site_top = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    func.count(DetectionRow.id),
+                    func.max(DetectionRow.confidence),
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+                .order_by(
+                    DetectionRow.source_name,
+                    func.count(DetectionRow.id).desc(),
+                )
+            ).all()
+
+            # Order by count desc so the first row per source = its peak hour.
+            peak_rows = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    func.strftime("%H", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .group_by(
+                    DetectionRow.source_name,
+                    func.strftime("%H", DetectionRow.started_at),
+                )
+                .order_by(func.count(DetectionRow.id).desc())
+            ).all()
+            per_site_peak: dict[str, int | None] = {}
+            for src_n, hr_str, _ in peak_rows:
+                if src_n not in per_site_peak and hr_str is not None:
+                    per_site_peak[src_n] = int(hr_str)
+
+            standouts = s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    DetectionRow.source_name,
+                    DetectionRow.confidence,
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .where(DetectionRow.confidence >= 0.9)
+                .order_by(DetectionRow.confidence.desc())
+                .limit(8)
+            ).all()
+
+            # Newly heard: species at a source today that we did NOT detect
+            # at that source during the prior 7 days.
+            today_pairs = set(s.execute(
+                select(DetectionRow.source_name, DetectionRow.scientific_name)
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .distinct()
+            ).all())
+            prior_pairs = set(s.execute(
+                select(DetectionRow.source_name, DetectionRow.scientific_name)
+                .where(DetectionRow.started_at >= week_start)
+                .where(DetectionRow.started_at < start)
+                .distinct()
+            ).all())
+            new_pairs = today_pairs - prior_pairs
+
+            common_lookup = {}
+            if new_pairs:
+                sci_names = {sci for _, sci in new_pairs}
+                for sci, com in s.execute(
+                    select(DetectionRow.scientific_name, DetectionRow.common_name)
+                    .where(DetectionRow.scientific_name.in_(sci_names))
+                    .group_by(DetectionRow.scientific_name)
+                ).all():
+                    common_lookup[sci] = com
+
+        # Group top species by site (keep top 3 per site).
+        per_site_top_by_src: dict[str, list[dict]] = {}
+        for src, sci, com, c, mc in per_site_top:
+            bucket = per_site_top_by_src.setdefault(src, [])
+            if len(bucket) < 3:
+                bucket.append({
+                    "scientific_name": sci,
+                    "common_name": com,
+                    "count": int(c),
+                    "max_confidence": round(float(mc), 3),
+                })
+
+        return {
+            "date_utc": date_utc.isoformat(),
+            "total_detections": int(total),
+            "distinct_species": int(distinct),
+            "per_site": [
+                {
+                    "source_name": src,
+                    "count": int(per_site_count.get(src, 0)),
+                    "peak_hour_utc": per_site_peak.get(src),
+                    "top_species": per_site_top_by_src.get(src, []),
+                }
+                for src in sorted(per_site_count.keys())
+            ],
+            "high_confidence_standouts": [
+                {
+                    "scientific_name": sci,
+                    "common_name": com,
+                    "source_name": src,
+                    "confidence": round(float(conf), 3),
+                }
+                for sci, com, src, conf in standouts
+            ],
+            "newly_heard_this_week": [
+                {
+                    "source_name": src,
+                    "scientific_name": sci,
+                    "common_name": common_lookup.get(sci, ""),
+                }
+                for src, sci in sorted(new_pairs)
+            ],
+        }
+
+    def missing_daily_briefs(self, lookback_days: int = 3) -> list[date]:
+        """Return UTC dates within the lookback for which a brief is missing
+        AND data exists. Excludes today (in-progress). Oldest first so the
+        worker fills gaps in order."""
+        from sqlalchemy import func
+
+        today = datetime.now(UTC).date()
+        earliest = today - timedelta(days=lookback_days)
+        with self._Session() as s:
+            existing = {
+                r.date_utc
+                for r in s.scalars(
+                    select(DailyBriefRow).where(DailyBriefRow.date_utc >= earliest)
+                )
+            }
+            days_with_data = set(s.execute(
+                select(func.distinct(func.date(DetectionRow.started_at)))
+                .where(
+                    DetectionRow.started_at
+                    >= datetime.combine(earliest, time(0, 0), tzinfo=UTC)
+                )
+                .where(
+                    DetectionRow.started_at
+                    < datetime.combine(today, time(0, 0), tzinfo=UTC)
+                )
+            ).scalars())
+
+        # SQLite returns date strings here; normalize.
+        normalized = set()
+        for d in days_with_data:
+            if isinstance(d, str):
+                normalized.add(date.fromisoformat(d))
+            else:
+                normalized.add(d)
+        return sorted(normalized - existing)
+
+    def set_daily_brief(
+        self,
+        date_utc: date,
+        *,
+        brief_text: str,
+        generated_by: str,
+        total_detections: int,
+        distinct_species: int,
+        evidence_signature: str,
+    ) -> None:
+        """Insert (or replace) the brief for one UTC date. Idempotent so a
+        manual re-trigger from the shell can overwrite a bad first draft."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(DailyBriefRow, date_utc)
+            if row is None:
+                row = DailyBriefRow(date_utc=date_utc)
+                s.add(row)
+            row.brief_text = brief_text
+            row.generated_at = now
+            row.generated_by = generated_by
+            row.total_detections = total_detections
+            row.distinct_species = distinct_species
+            row.evidence_signature = evidence_signature
+
+    def list_daily_briefs(self, limit: int = 60) -> list[DailyBriefRow]:
+        with self._Session() as s:
+            return list(s.scalars(
+                select(DailyBriefRow).order_by(DailyBriefRow.date_utc.desc()).limit(limit)
+            ))
+
+    def get_latest_daily_brief(self) -> DailyBriefRow | None:
+        with self._Session() as s:
+            return s.scalar(
+                select(DailyBriefRow).order_by(DailyBriefRow.date_utc.desc()).limit(1)
+            )

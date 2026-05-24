@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import Date, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -117,6 +117,44 @@ class WorkerHeartbeatRow(Base):
     state: Mapped[str] = mapped_column(String(16), default="running")
     # Last error message that triggered backoff (truncated). NULL when healthy.
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
+class SiteNoteRow(Base):
+    """AI-generated commentary about a site/source as a sonic place — what
+    defines its soundscape, its diurnal rhythm, signature species, contrasts
+    with other sites. Written by the background notes worker and refreshed
+    on a slow cadence (weekly aged, or when detection volume doubles).
+
+    Keyed by source_name to match how detections are grouped today (single-
+    site sources only; the `site` column on DetectionRow is always NULL).
+    """
+
+    __tablename__ = "site_notes"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    note: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detection_count_at_gen: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class DailyBriefRow(Base):
+    """One-paragraph cross-site digest of a single UTC date. Generated once
+    after midnight UTC and never regenerated — the day's data is fixed.
+    Surfaces as a banner on the dashboard and an archive list at /briefs."""
+
+    __tablename__ = "daily_briefs"
+
+    date_utc: Mapped[date] = mapped_column(Date, primary_key=True)
+    brief_text: Mapped[str] = mapped_column(Text)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    generated_by: Mapped[str] = mapped_column(String(64))
+    # Cached aggregates for the archive listing — saves a recount per row.
+    total_detections: Mapped[int] = mapped_column(Integer, default=0)
+    distinct_species: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class SourceStateRow(Base):

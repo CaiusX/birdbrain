@@ -1,10 +1,20 @@
-"""Background species-note generator.
+"""Background commentary generator.
 
-Wakes every ``cfg.notes_tick_seconds`` (default 5 min), picks the species
-most in need of a refreshed commentary, gathers the evidence from the DB,
-and asks Claude to write 1–2 paragraphs grounded in *our* detection
-footprint — not encyclopedia material. Stays dormant when ANTHROPIC_API_KEY
-isn't set so the pipeline still boots cleanly on a Pi with no API access.
+Single daemon thread, three task types in priority order:
+
+  1. Daily soundscape brief — one paragraph per UTC date, generated once
+     after midnight UTC. Highest priority because it's time-bounded:
+     yesterday's brief is the headline on the dashboard.
+  2. Site-level note — one per source/site, refreshed weekly or when
+     detection volume doubles. Low cardinality (4 sites), low cadence.
+  3. Species note — per-species commentary refreshed weekly or on growth.
+     The highest-volume work; falls through after the higher-priority
+     queues are quiet.
+
+Each tick tries the queues in order and runs the first one that has work.
+Most ticks land on species (or are no-ops if everything is fresh). Stays
+dormant when ANTHROPIC_API_KEY is missing so the pipeline still boots
+cleanly on a Pi with no API access.
 """
 from __future__ import annotations
 
@@ -13,31 +23,40 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterable
 
-from africam.config import AppConfig
+from africam.config import AppConfig, SourceConfig
 from africam.logging import get_logger
 from africam.storage import Database
+from africam.weather import daily_weather_summary, recent_weather_summary
 
 log = get_logger(__name__)
 
 
-# Stable across species → eligible for prompt caching once it crosses the
-# model's cache-floor token count. Don't interpolate dynamic content here.
-SYSTEM_PROMPT = """\
-You are the resident analyst for a Southern African live-stream bird monitor.
-A BirdNET-Analyzer classifier runs continuously over audio from four public
-YouTube wildlife cams:
+# Shared site context — referenced by all three prompts so the model has
+# a consistent mental map of the sites regardless of which task type fires.
+_SITES_CONTEXT = """\
+The monitor watches four Southern African live-stream wildlife cams:
 
   • Olifants (Naledi)  — riverine bushveld, Kruger NP (Limpopo)
   • Tembe              — coastal sand forest, KZN/Mozambique border
   • Timbavati          — Lowveld savanna, private reserve adjoining Kruger
   • Twin Pan           — Kalahari pan, Nxai Pan area, northern Botswana
 
+A BirdNET-Analyzer classifier runs continuously over the audio. All times
+in the evidence dossiers are UTC; local clock is UTC+2 (SAST or CAT)."""
+
+
+# Stable across species → eligible for prompt caching once the prompt
+# crosses the model's cache-floor token count.
+SPECIES_SYSTEM_PROMPT = f"""\
+You are the resident analyst for a Southern African live-stream bird monitor.
+{_SITES_CONTEXT}
+
 For each species the operator gives you a JSON evidence dossier drawn from
 our own detections: total count, per-source distribution, hour-of-day
-histogram (UTC; local = UTC+2 SAST or UTC+2 CAT for Botswana), confidence
-stats, audition labels the operator has applied to clips, and a few top
-clips' timestamps.
+histogram, confidence stats, audition labels the operator has applied to
+clips, and a few top clips' timestamps.
 
 Your job is to write a 1–2 paragraph commentary, ~120–200 words, that helps
 the operator interpret what BirdNET is detecting at these specific sites.
@@ -68,64 +87,185 @@ Style:
     what's interesting.
   • Refer to sources by the short names above (Tembe, Twin Pan, etc.).
 
-Output the commentary as plain text, nothing else. No JSON, no preamble,
-no sign-off."""
+Output the commentary as plain text, nothing else."""
 
 
-# Inputs whose change should re-trigger generation. We deliberately omit
-# things like exact detection_count (use the count-factor trigger instead)
-# and per-clip timestamps (constant churn from new arrivals shouldn't
-# invalidate the note).
-def _evidence_signature(evidence: dict) -> str:
+SITE_SYSTEM_PROMPT = f"""\
+You are the resident analyst for a Southern African live-stream bird monitor.
+{_SITES_CONTEXT}
+
+The operator gives you a JSON evidence dossier for ONE site: its total
+detection count, distinct species count, hour-of-day histogram (UTC), top
+species (by count, with max confidence), audition labels on this site's
+clips, the three highest-confidence clips, and a ``weather_recent`` block
+summarizing the last week's conditions at the site (temps, rainfall days,
+wind, dominant condition). ``weather_recent`` may be missing if Open-Meteo
+didn't respond — handle gracefully.
+
+Your job is to write a 2–3 paragraph commentary, ~180–280 words, that
+captures this site as a sonic *place*. Cover:
+
+  • What defines this site's soundscape — the resident voices that dominate
+    the top-species list, what they tell you about the habitat.
+  • The diurnal rhythm — when this site comes alive, the dawn/dusk story,
+    any nocturnal signals. Read it from the hourly histogram.
+  • What's distinctive vs. what you'd expect — anything unusual for the
+    biome, any species the evidence shows are *defining* of this place vs.
+    common everywhere.
+  • Honest caveats — short detection window, BirdNET confusions worth
+    flagging, dominant species crowding out quieter ones.
+
+Use weather when it shapes interpretation: lots of recent rain at a normally
+dry site, a hot dry stretch coinciding with low afternoon activity, a windy
+week explaining quieter readings. Don't force weather into a note when
+conditions are unremarkable — silence is fine.
+
+Style:
+  • Plain prose. No markdown headers, no bullet lists.
+  • Open with the site's character, not a recap of its name and coordinates.
+  • Name the most distinctive species in prose; don't recite the top-10 list.
+  • If the data is thin (low count, narrow window, one obvious dominant),
+    say so plainly and keep it short.
+  • Skip throat-clearing.
+
+Output the commentary as plain text, nothing else."""
+
+
+DAILY_BRIEF_SYSTEM_PROMPT = f"""\
+You are the resident analyst for a Southern African live-stream bird monitor,
+writing a daily newspaper-style soundscape brief.
+{_SITES_CONTEXT}
+
+The operator gives you a JSON evidence dossier for ONE UTC date: per-site
+detection counts, each site's top species and peak hour, high-confidence
+standouts across all sites, a "newly heard this week" list (species that
+appeared at a site yesterday but not in the prior seven days at the same
+site — the most interesting story angle), and a ``weather`` block on each
+per-site entry summarizing that date's local conditions at that site
+(min/max/mean temp, total rain in mm, hours of rain, sunrise/sunset, modal
+condition). ``weather`` may be missing if Open-Meteo didn't respond.
+
+Your job is to write a SINGLE PARAGRAPH digest, ~120–200 words, that a
+reader could skim in 30 seconds to know what yesterday sounded like
+across the network. Cover:
+
+  • The day's headline — the most interesting thing across all sites
+    (often a "newly heard" species or a striking confidence standout).
+  • Contrasts between sites — who was loud, who was quiet, any unusual
+    pairings.
+  • One or two specific calls worth flagging — by common name, with the
+    site where they landed.
+
+Use weather when it explains or contrasts the day: overnight rain
+suppressing dawn activity, a cold front, a hot still afternoon, fog at
+sunrise, a thunderstorm explaining a midday silence. Don't recite a
+weather report when conditions are unremarkable — only mention it when
+it's part of the story.
+
+Style:
+  • ONE paragraph, plain prose, no markdown.
+  • Reader-facing voice: this surfaces on the dashboard. Confident,
+    interested, not breathless.
+  • Refer to sites by short name (Tembe, Twin Pan, …).
+  • Don't recite numbers — convey the shape ("a thin morning at Tembe",
+    "the busiest day this week at Twin Pan").
+  • If a site was silent (count of zero), it's worth noting briefly.
+  • Skip throat-clearing and sign-offs.
+
+Output the brief as a single paragraph of plain text, nothing else."""
+
+
+# ---------- evidence signatures (re-trigger when these change) ----------
+
+
+def _species_signature(evidence: dict) -> str:
+    """Inputs whose change should re-trigger species-note regeneration. We
+    deliberately omit exact counts (use the count-factor trigger instead)
+    and per-clip timestamps (constant churn shouldn't invalidate the note)."""
+    hourly = evidence["hourly_utc"]
+    peak = max(hourly) if hourly else 0
     canonical = {
         "common_name": evidence["common_name"],
-        # Bucket count to nearest 25 so a single new detection doesn't
-        # change the signature; the count-doubled trigger handles real shifts.
         "count_bucket": (evidence["detection_count"] // 25) * 25,
         "sources": sorted(
             (s["source"], s["count"] // 10 * 10) for s in evidence["per_source"]
         ),
-        # Hour-of-day distribution, bucketed coarsely.
         "peak_hours": sorted(
-            i for i, c in enumerate(evidence["hourly_utc"])
-            if c >= max(evidence["hourly_utc"]) * 0.5 and c > 0
+            i for i, c in enumerate(hourly) if c >= peak * 0.5 and c > 0
         ),
         "labels": evidence["audition_labels"],
         "conservation_status": evidence["conservation_status"],
     }
+    return _hash(canonical)
+
+
+def _site_signature(evidence: dict) -> str:
+    hourly = evidence["hourly_utc"]
+    peak = max(hourly) if hourly else 0
+    canonical = {
+        "count_bucket": (evidence["detection_count"] // 100) * 100,
+        "distinct_species_bucket": (evidence["distinct_species"] // 5) * 5,
+        # Top species by name only — small reorderings or count drift below
+        # the species_signature threshold shouldn't churn the site note.
+        "top_species": [s["scientific_name"] for s in evidence["top_species"]],
+        "peak_hours": sorted(
+            i for i, c in enumerate(hourly) if c >= peak * 0.5 and c > 0
+        ),
+        "labels": evidence["audition_labels"],
+    }
+    return _hash(canonical)
+
+
+def _brief_signature(evidence: dict) -> str:
+    canonical = {
+        "date_utc": evidence["date_utc"],
+        "total_bucket": (evidence["total_detections"] // 50) * 50,
+        "distinct": evidence["distinct_species"],
+        "per_site": sorted(
+            (p["source_name"], p["count"] // 20 * 20, p["peak_hour_utc"])
+            for p in evidence["per_site"]
+        ),
+        "newly_heard": sorted(
+            (p["source_name"], p["scientific_name"])
+            for p in evidence["newly_heard_this_week"]
+        ),
+    }
+    return _hash(canonical)
+
+
+def _hash(canonical: dict) -> str:
     return hashlib.sha256(
         json.dumps(canonical, sort_keys=True).encode("utf-8")
     ).hexdigest()[:32]
 
 
 def _format_evidence_for_prompt(evidence: dict) -> str:
-    """Compact, human-readable JSON for Claude. Pretty-print so the model
-    can scan structure; keys are stable order so any future caching of
-    fragments works."""
     return json.dumps(evidence, indent=2, sort_keys=True)
 
 
-def _generate_note_text(evidence: dict, *, model: str, client) -> str:
-    """Single API call. Returns the note text; raises on API error."""
+# ---------- Claude call ----------
+
+
+def _call_claude(
+    *,
+    system_prompt: str,
+    user_text: str,
+    model: str,
+    client,
+    max_tokens: int,
+) -> str:
+    """Single API call. Returns the response text; raises on API error."""
     response = client.messages.create(
         model=model,
-        max_tokens=600,
+        max_tokens=max_tokens,
         system=[
             {
                 "type": "text",
-                "text": SYSTEM_PROMPT,
+                "text": system_prompt,
                 "cache_control": {"type": "ephemeral"},
             }
         ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Write a commentary on this species' detections at our sites.\n\n"
-                    f"{_format_evidence_for_prompt(evidence)}"
-                ),
-            }
-        ],
+        messages=[{"role": "user", "content": user_text}],
     )
     text_blocks = [b.text for b in response.content if b.type == "text"]
     return "\n\n".join(t.strip() for t in text_blocks if t.strip())
@@ -133,8 +273,7 @@ def _generate_note_text(evidence: dict, *, model: str, client) -> str:
 
 def _make_client():
     """Lazy import so importing this module doesn't require anthropic to be
-    installed when the worker is disabled. Returns None when the key is
-    missing or the SDK isn't available."""
+    installed when the worker is disabled."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return None
     try:
@@ -145,9 +284,10 @@ def _make_client():
     return anthropic.Anthropic()
 
 
-def _tick(db: Database, cfg: AppConfig, client) -> str | None:
-    """Process one stale species. Returns the scientific_name that was
-    written, or None if nothing was due."""
+# ---------- tick functions: one per task type, each returns truthy on work ----------
+
+
+def _species_tick(db: Database, cfg: AppConfig, client) -> str | None:
     sci = db.pick_stale_species_for_note(
         max_age_days=cfg.notes_stale_days,
         min_detections=cfg.notes_min_detections,
@@ -160,9 +300,18 @@ def _tick(db: Database, cfg: AppConfig, client) -> str | None:
     if evidence is None:
         return None
 
-    note_text = _generate_note_text(evidence, model=cfg.notes_model, client=client)
+    note_text = _call_claude(
+        system_prompt=SPECIES_SYSTEM_PROMPT,
+        user_text=(
+            "Write a commentary on this species' detections at our sites.\n\n"
+            f"{_format_evidence_for_prompt(evidence)}"
+        ),
+        model=cfg.notes_model,
+        client=client,
+        max_tokens=600,
+    )
     if not note_text:
-        log.warning("notes.empty_response", scientific=sci)
+        log.warning("notes.empty_response", kind="species", scientific=sci)
         return None
 
     db.set_generated_species_note(
@@ -170,7 +319,7 @@ def _tick(db: Database, cfg: AppConfig, client) -> str | None:
         common_name=evidence["common_name"],
         note=note_text,
         generated_by=cfg.notes_model,
-        evidence_signature=_evidence_signature(evidence),
+        evidence_signature=_species_signature(evidence),
         detection_count_at_gen=evidence["detection_count"],
     )
     log.info(
@@ -183,7 +332,149 @@ def _tick(db: Database, cfg: AppConfig, client) -> str | None:
     return sci
 
 
-def _worker_loop(db: Database, cfg: AppConfig) -> None:
+def _site_tick(
+    db: Database, cfg: AppConfig, sources: Iterable[SourceConfig], client
+) -> str | None:
+    src_list = list(sources)
+    source_name = db.pick_stale_site_for_note(
+        candidate_sources=[s.name for s in src_list],
+        max_age_days=cfg.notes_stale_days,
+        min_detections=cfg.notes_min_detections,
+        regen_count_factor=cfg.notes_regen_count_factor,
+    )
+    if source_name is None:
+        return None
+
+    evidence = db.gather_site_evidence(source_name)
+    if evidence is None:
+        return None
+
+    # Inject prevailing weather at this site (last week). Open-Meteo failure
+    # is non-fatal — the prompt is told to handle a missing weather field.
+    src_cfg = next((s for s in src_list if s.name == source_name), None)
+    if src_cfg and src_cfg.lat is not None and src_cfg.lon is not None:
+        weather = recent_weather_summary(
+            src_cfg.lat, src_cfg.lon, src_cfg.timezone, lookback_days=7
+        )
+        if weather:
+            evidence["weather_recent"] = weather
+
+    note_text = _call_claude(
+        system_prompt=SITE_SYSTEM_PROMPT,
+        user_text=(
+            "Write a commentary on this site's soundscape.\n\n"
+            f"{_format_evidence_for_prompt(evidence)}"
+        ),
+        model=cfg.notes_model,
+        client=client,
+        max_tokens=800,
+    )
+    if not note_text:
+        log.warning("notes.empty_response", kind="site", source=source_name)
+        return None
+
+    db.set_generated_site_note(
+        source_name,
+        note=note_text,
+        generated_by=cfg.notes_model,
+        evidence_signature=_site_signature(evidence),
+        detection_count_at_gen=evidence["detection_count"],
+    )
+    log.info(
+        "site_note.generated",
+        source=source_name,
+        chars=len(note_text),
+        detections=evidence["detection_count"],
+        species=evidence["distinct_species"],
+    )
+    return source_name
+
+
+def _enrich_brief_evidence_with_weather(
+    evidence: dict, sources: Iterable[SourceConfig]
+) -> dict:
+    """Mutate (and return) the brief-evidence dict by adding a ``weather``
+    sub-dict to each per-site entry. Best-effort: missing API responses
+    leave the field absent. Date comes from ``evidence['date_utc']``."""
+    from datetime import date as _date
+
+    by_name = {s.name: s for s in sources}
+    target_date = _date.fromisoformat(evidence["date_utc"])
+    for entry in evidence["per_site"]:
+        src = by_name.get(entry["source_name"])
+        if not src or src.lat is None or src.lon is None:
+            continue
+        w = daily_weather_summary(src.lat, src.lon, target_date, src.timezone)
+        if w:
+            entry["weather"] = w
+    return evidence
+
+
+def _daily_brief_tick(
+    db: Database, cfg: AppConfig, sources: Iterable[SourceConfig], client
+):
+    """Returns the date (as ISO string) for which a brief was generated, or
+    None if no missing-brief had data."""
+    src_list = list(sources)
+    missing = db.missing_daily_briefs(lookback_days=cfg.notes_brief_lookback_days)
+    for d in missing:
+        evidence = db.gather_daily_evidence(d)
+        if evidence is None:
+            # No data that day (pipeline was down) — record an empty stub
+            # so we don't keep retrying. Use a tiny placeholder text.
+            db.set_daily_brief(
+                d,
+                brief_text=f"No detections recorded on {d.isoformat()} — the "
+                "monitor was offline or all sources were silent.",
+                generated_by="stub",
+                total_detections=0,
+                distinct_species=0,
+                evidence_signature="empty",
+            )
+            log.info("daily_brief.stub", date=d.isoformat())
+            continue
+
+        _enrich_brief_evidence_with_weather(evidence, src_list)
+
+        brief_text = _call_claude(
+            system_prompt=DAILY_BRIEF_SYSTEM_PROMPT,
+            user_text=(
+                "Write the daily soundscape brief for this date.\n\n"
+                f"{_format_evidence_for_prompt(evidence)}"
+            ),
+            model=cfg.notes_model,
+            client=client,
+            max_tokens=500,
+        )
+        if not brief_text:
+            log.warning("notes.empty_response", kind="brief", date=d.isoformat())
+            continue
+
+        db.set_daily_brief(
+            d,
+            brief_text=brief_text,
+            generated_by=cfg.notes_model,
+            total_detections=evidence["total_detections"],
+            distinct_species=evidence["distinct_species"],
+            evidence_signature=_brief_signature(evidence),
+        )
+        log.info(
+            "daily_brief.generated",
+            date=d.isoformat(),
+            chars=len(brief_text),
+            detections=evidence["total_detections"],
+            species=evidence["distinct_species"],
+        )
+        return d.isoformat()
+    return None
+
+
+# ---------- worker loop: priority router ----------
+
+
+def _worker_loop(
+    db: Database, cfg: AppConfig, sources: list[SourceConfig]
+) -> None:
     client = _make_client()
     if client is None:
         log.info("notes.dormant", reason="no ANTHROPIC_API_KEY in env")
@@ -194,23 +485,30 @@ def _worker_loop(db: Database, cfg: AppConfig) -> None:
         model=cfg.notes_model,
         tick_s=cfg.notes_tick_seconds,
         stale_days=cfg.notes_stale_days,
+        sources=[s.name for s in sources],
     )
 
-    # Small jitter on first run so the worker doesn't fire the instant the
-    # pipeline boots — gives the supervisor and ffmpegs time to settle.
+    # Jitter so the worker doesn't fire the instant the pipeline boots.
     time.sleep(min(60, cfg.notes_tick_seconds))
 
     while True:
         try:
-            _tick(db, cfg, client)
+            # Priority order: brief (time-sensitive) → site (rare but
+            # high-value) → species (always something to do). First to
+            # return truthy wins this tick.
+            did = _daily_brief_tick(db, cfg, sources, client)
+            if not did:
+                did = _site_tick(db, cfg, sources, client)
+            if not did:
+                _species_tick(db, cfg, client)
         except Exception as e:
-            # Anthropic SDK exceptions are subclasses of APIError; log and
-            # back off. The next tick will retry.
             log.warning("notes.tick_failed", error=str(e)[:300])
         time.sleep(cfg.notes_tick_seconds)
 
 
-def start_notes_worker(db: Database, cfg: AppConfig) -> threading.Thread | None:
+def start_notes_worker(
+    db: Database, cfg: AppConfig, sources: list[SourceConfig]
+) -> threading.Thread | None:
     """Spawn the notes worker as a daemon thread. Returns the thread, or
     None when the feature is disabled by config. The thread itself decides
     whether to do any work (based on ANTHROPIC_API_KEY)."""
@@ -218,7 +516,54 @@ def start_notes_worker(db: Database, cfg: AppConfig) -> threading.Thread | None:
         log.info("notes.disabled", reason="cfg.notes_enabled=False")
         return None
     t = threading.Thread(
-        target=_worker_loop, args=(db, cfg), name="notes-worker", daemon=True
+        target=_worker_loop,
+        args=(db, cfg, list(sources)),
+        name="notes-worker",
+        daemon=True,
     )
     t.start()
     return t
+
+
+# ---------- manual / shell entry points ----------
+
+
+def generate_brief_for_date(
+    db: Database,
+    cfg: AppConfig,
+    date_utc,
+    sources: Iterable[SourceConfig] = (),
+) -> str | None:
+    """One-shot: generate (or overwrite) a brief for a specific UTC date.
+    Used by the verification step and as an admin escape hatch. Skips the
+    missing_daily_briefs gate so it can be run against today. Pass
+    ``sources`` to attach per-site weather; omit for a weather-less brief."""
+    client = _make_client()
+    if client is None:
+        raise RuntimeError("ANTHROPIC_API_KEY not set in env")
+    evidence = db.gather_daily_evidence(date_utc)
+    if evidence is None:
+        return None
+    if sources:
+        _enrich_brief_evidence_with_weather(evidence, list(sources))
+    brief_text = _call_claude(
+        system_prompt=DAILY_BRIEF_SYSTEM_PROMPT,
+        user_text=(
+            "Write the daily soundscape brief for this date.\n\n"
+            f"{_format_evidence_for_prompt(evidence)}"
+        ),
+        model=cfg.notes_model,
+        client=client,
+        max_tokens=500,
+    )
+    if not brief_text:
+        return None
+    db.set_daily_brief(
+        date_utc,
+        brief_text=brief_text,
+        generated_by=cfg.notes_model,
+        total_detections=evidence["total_detections"],
+        distinct_species=evidence["distinct_species"],
+        evidence_signature=_brief_signature(evidence),
+    )
+    return brief_text

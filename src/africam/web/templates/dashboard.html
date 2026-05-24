@@ -9,6 +9,19 @@
 {% endblock %}
 
 {% block content %}
+{% if latest_brief %}
+<section class="mb-6 bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4">
+  <header class="flex items-baseline justify-between flex-wrap gap-2 mb-2">
+    <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">
+      {% if latest_brief.date_utc == (today_utc | default(None)) %}Today's{% else %}Yesterday's{% endif %} soundscape
+      <span class="text-zinc-500 normal-case font-normal ml-2 tabular-nums text-xs">{{ latest_brief.date_utc.strftime('%A, %d %b %Y') }} UTC</span>
+    </h2>
+    <a href="/briefs" class="text-xs text-emerald-300 hover:text-emerald-200">archive →</a>
+  </header>
+  <p class="text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ latest_brief.brief_text }}</p>
+</section>
+{% endif %}
+
 <section class="mb-6">
   <div class="flex flex-wrap items-center gap-3 mb-4">
     <label for="active-source" class="text-sm uppercase tracking-wider text-zinc-400">Active source</label>
@@ -348,7 +361,8 @@
     const tile = TILE_BY_NAME[active];
     const wrap = document.createElement('div');
     wrap.innerHTML = `<strong>${escapeHtml(site.name)}</strong>
-      <div style="color:#71717a;margin-top:2px;">${site.lat.toFixed(3)}, ${site.lon.toFixed(3)}</div>`;
+      <div style="color:#71717a;margin-top:2px;">${site.lat.toFixed(3)}, ${site.lon.toFixed(3)}</div>
+      <div style="margin-top:6px;"><a href="/site/${encodeURIComponent(site.name)}" style="color:#6ee7b7;font-size:12px;">open site page →</a></div>`;
     if (tile && tile.multisite) {
       const btn = document.createElement('button');
       btn.textContent = `set as current for ${active}`;

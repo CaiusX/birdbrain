@@ -19,10 +19,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, case, desc, func, or_, select
 
+from africam import weather as weather_module
 from africam.config import AppConfig, SourceConfig, load_sources
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
-from africam.storage import Database, DetectionRow, SpeciesNoteRow, WorkerHeartbeatRow
+from africam.storage import (
+    DailyBriefRow,
+    Database,
+    DetectionRow,
+    SiteNoteRow,
+    SpeciesNoteRow,
+    WorkerHeartbeatRow,
+)
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -109,23 +117,30 @@ def _solar_bands(d: date, lat: float, lon: float, tz: ZoneInfo) -> list[dict]:
     + end-of-day). Returns ``[]`` if any solar event can't be computed."""
     sr = _solar_local_hour(d, lat, lon, tz, -0.833, morning=True)   # sunrise
     ss = _solar_local_hour(d, lat, lon, tz, -0.833, morning=False)  # sunset
-    cd_morning = _solar_local_hour(d, lat, lon, tz, -6.0, morning=True)   # civil dawn
-    cd_evening = _solar_local_hour(d, lat, lon, tz, -6.0, morning=False)  # civil dusk
-    if None in (sr, ss, cd_morning, cd_evening):
+    # Nautical twilight (sun at -12°) for the outer dawn/dusk edge — civil
+    # (-6°) is only ~25 min wide in the tropics, which the glow band eats
+    # almost entirely. Nautical gives the rose tint a visible footprint.
+    nt_morning = _solar_local_hour(d, lat, lon, tz, -12.0, morning=True)
+    nt_evening = _solar_local_hour(d, lat, lon, tz, -12.0, morning=False)
+    if None in (sr, ss, nt_morning, nt_evening):
         return []
-    # ~15 min strips bracket sunrise/sunset so the "moment" gets its own band.
-    strip = 0.25
+    # Sunrise/sunset bands sit on the *night side* of the sun event: the
+    # orange horizon glow only happens while the sun is at/below the horizon.
+    # Once the sun is up it's day, not "sunrise". Dawn/dusk fill the rest of
+    # nautical twilight (sun -12° to glow band) with a cooler rose tint.
+    glow = 0.33  # ~20 min — the narrow band where the horizon goes peak orange
     bands = [
         # night wraps: two rects
-        {"name": "night", "start": 0.0, "end": cd_morning},
-        {"name": "dawn",     "start": cd_morning,  "end": sr - strip},
-        {"name": "sunrise",  "start": sr - strip,  "end": sr + strip},
-        {"name": "day",      "start": sr + strip,  "end": ss - strip},
-        {"name": "sunset",   "start": ss - strip,  "end": ss + strip},
-        {"name": "dusk",     "start": ss + strip,  "end": cd_evening},
-        {"name": "night", "start": cd_evening, "end": 24.0},
+        {"name": "night",   "start": 0.0, "end": nt_morning},
+        {"name": "dawn",    "start": nt_morning,    "end": sr - glow},
+        {"name": "sunrise", "start": sr - glow,     "end": sr},
+        {"name": "day",     "start": sr,            "end": ss},
+        {"name": "sunset",  "start": ss,            "end": ss + glow},
+        {"name": "dusk",    "start": ss + glow,     "end": nt_evening},
+        {"name": "night",   "start": nt_evening, "end": 24.0},
     ]
-    # Drop zero/negative-width bands (e.g. if dawn strip overlaps sunrise).
+    # Drop zero/negative-width bands. Near the equator the glow band can be
+    # wider than the twilight period, which would push dawn/dusk negative.
     return [b for b in bands if b["end"] > b["start"]]
 
 # Captures the 11-char YouTube video id from /watch?v=, youtu.be/ or /embed/ URLs.
@@ -361,6 +376,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             for t in tiles
         ]
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        latest_brief = db.get_latest_daily_brief()
         return TEMPLATES.TemplateResponse(
             request,
             "dashboard.html",
@@ -375,6 +391,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "sites_json": sites_for_map,
                 "site_states": _site_states(tiles, sources_by_name),
                 "source_tz": source_tz,
+                "latest_brief": latest_brief,
                 **_note_tag_context(),
             },
         )
@@ -832,6 +849,110 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 },
                 **_note_tag_context(),
             },
+        )
+
+    @app.get("/site/{name:path}", response_class=HTMLResponse)
+    def site_detail(request: Request, name: str) -> HTMLResponse:
+        """Per-site detail page. Mirrors /species/{scientific}: AI commentary
+        on top, then top species, hourly rhythm, and recent detections."""
+        _, sources_by_name, _ = _all_sources()
+        src_cfg = sources_by_name.get(name)
+        site_note = db.get_site_note(name)
+        with db.session() as s:
+            total = s.execute(
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.source_name == name)
+            ).scalar() or 0
+
+            if total == 0 and site_note is None and src_cfg is None:
+                raise HTTPException(404, f"No site or detections for {name!r}")
+
+            top_species = list(s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    func.count(DetectionRow.id).label("n"),
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                    func.max(DetectionRow.started_at).label("last_seen"),
+                )
+                .where(DetectionRow.source_name == name)
+                .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
+                .order_by(desc("n"))
+                .limit(20)
+            ))
+
+            recent = list(s.scalars(
+                select(DetectionRow)
+                .where(DetectionRow.source_name == name)
+                .order_by(desc(DetectionRow.started_at))
+                .limit(25)
+            ))
+
+            per_hour = dict(s.execute(
+                select(
+                    func.strftime("%H", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.source_name == name)
+                .group_by(func.strftime("%H", DetectionRow.started_at))
+            ).all())
+
+            first_seen, last_seen, distinct_species = s.execute(
+                select(
+                    func.min(DetectionRow.started_at),
+                    func.max(DetectionRow.started_at),
+                    func.count(func.distinct(DetectionRow.scientific_name)),
+                ).where(DetectionRow.source_name == name)
+            ).one()
+
+        # Render the hourly histogram in the source's local timezone so the
+        # bar chart matches what the operator hears wall-clock at the site.
+        tz_name = src_cfg.timezone if src_cfg else "UTC"
+        try:
+            local_tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            local_tz = UTC
+        # SQLite gave us UTC hour strings; convert each utc hour to the
+        # corresponding local hour. For most timezones this is a fixed offset
+        # so a single shift works.
+        offset = int(datetime.now(local_tz).utcoffset().total_seconds() // 3600)
+        hours = [0] * 24
+        for hr_str, c in per_hour.items():
+            if hr_str is None:
+                continue
+            local_hr = (int(hr_str) + offset) % 24
+            hours[local_hr] += int(c)
+        peak_hour = max(hours) or 1
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "site_detail.html",
+            {
+                "name": name,
+                "src_cfg": src_cfg,
+                "note": site_note,
+                "total": total,
+                "distinct_species": distinct_species or 0,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "top_species": top_species,
+                "recent": recent,
+                "hours": hours,
+                "peak_hour": peak_hour,
+                "tz_name": tz_name,
+                "source_tz": {n: c.timezone for n, c in sources_by_name.items()},
+                **_note_tag_context(),
+            },
+        )
+
+    @app.get("/briefs", response_class=HTMLResponse)
+    def briefs_index(request: Request) -> HTMLResponse:
+        """Archive page: every generated daily brief, newest first."""
+        briefs = db.list_daily_briefs(limit=180)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "briefs.html",
+            {"briefs": briefs},
         )
 
     def _admin_view() -> dict:
@@ -1981,104 +2102,34 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # Open-Meteo hourly archive cache: (lat, lon, past_days, tz) → (expiry, json).
     # Their data updates hourly at most; 1h TTL is generous given how stale
     # the diurnal view's lookback window is. Free API, no key required.
-    _om_cache: dict[tuple, tuple[float, dict]] = {}
-    _OM_TTL_SECONDS = 3600
-
-    def _open_meteo_hourly(
-        lat: float, lon: float, past_days: int, tz_name: str
-    ) -> dict | None:
-        key = (round(lat, 3), round(lon, 3), past_days, tz_name)
-        now = time.monotonic()
-        cached = _om_cache.get(key)
-        if cached and cached[0] > now:
-            return cached[1]
-        params = urllib.parse.urlencode(
-            {
-                "latitude": f"{lat:.4f}",
-                "longitude": f"{lon:.4f}",
-                "past_days": past_days,
-                "forecast_days": 1,
-                "hourly": (
-                    "temperature_2m,relative_humidity_2m,"
-                    "precipitation,wind_speed_10m,cloud_cover,weather_code"
-                ),
-                "timezone": tz_name,
-            }
-        )
-        url = f"https://api.open-meteo.com/v1/forecast?{params}"
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "africam-bird/0.1"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-                data = json.load(resp)
-        except Exception:
-            return None
-        _om_cache[key] = (now + _OM_TTL_SECONDS, data)
-        return data
-
-    def _weather_at_hour(data: dict, hour: int) -> dict:
-        """Aggregate hourly weather values for one hour-of-day across the
-        Open-Meteo response window. Returns ``{}`` if no samples landed on
-        the requested hour."""
-        hourly = (data or {}).get("hourly") or {}
-        times = hourly.get("time") or []
-        if not times:
-            return {}
-        idxs = []
-        for i, t in enumerate(times):
-            # times look like "2026-05-13T07:00"; the hour lives at offset 11:13.
-            if isinstance(t, str) and len(t) >= 13 and t[10] == "T":
-                try:
-                    if int(t[11:13]) == hour:
-                        idxs.append(i)
-                except ValueError:
-                    continue
-        if not idxs:
-            return {}
-
-        def _gather(name: str) -> list[float]:
-            arr = hourly.get(name) or []
-            return [arr[i] for i in idxs if i < len(arr) and arr[i] is not None]
-
-        temps = _gather("temperature_2m")
-        codes = [
-            int(c) for c in _gather("weather_code") if c is not None
-        ]
-        wmo_modal = None
-        if codes:
-            counts: dict[int, int] = {}
-            for c in codes:
-                counts[c] = counts.get(c, 0) + 1
-            wmo_modal = max(counts, key=counts.get)
-        icon, label = _wmo_summary(wmo_modal)
-        return {
-            "n_samples": len(idxs),
-            "temp_mean": (sum(temps) / len(temps)) if temps else None,
-            "wmo_code": wmo_modal,
-            "icon": icon,
-            "label": label,
-        }
+    # Open-Meteo lookups moved to africam.weather (shared with the notes
+    # worker). Aliased here so call sites below don't change.
+    _open_meteo_hourly = weather_module.fetch_open_meteo_hourly
+    _weather_at_hour = weather_module.weather_at_hour
 
     # Time-of-day band fills shared by every chart that paints solar bands.
     # Night = deep navy (almost black); twilight ramps through warm pinks
     # and oranges around sunrise/sunset; day = sky blue. Stars are added on
     # top of the night band in the dial only.
+    # Dial collapses to three visual bands: night, twilight (dawn/dusk), day.
+    # The sunrise/sunset glow strips are folded into day so the dial doesn't
+    # have to render the orange wedges that kept reading as detection bars.
+    # Bar chart in diurnal.html keeps the full warm palette.
     _DIAL_BAND_FILL = {
         "night":   "#020617",  # slate-950
-        "dawn":    "#f43f5e",  # rose-500   — warm pre-sunrise glow
-        "sunrise": "#fb923c",  # orange-400 — peak sunrise
+        "dawn":    "#7f1d1d",  # red-900 — deep muted rose
+        "sunrise": "#38bdf8",  # collapsed into day
         "day":     "#38bdf8",  # sky-400
-        "sunset":  "#f97316",  # orange-500 — peak sunset
-        "dusk":    "#e11d48",  # rose-600   — warm post-sunset glow
+        "sunset":  "#38bdf8",  # collapsed into day
+        "dusk":    "#7f1d1d",
     }
     _DIAL_BAND_OPACITY = {
         "night":   0.85,
-        "dawn":    0.50,
-        "sunrise": 0.65,
-        "day":     0.30,
-        "sunset":  0.65,
-        "dusk":    0.50,
+        "dawn":    0.30,
+        "sunrise": 0.18,
+        "day":     0.18,
+        "sunset":  0.18,
+        "dusk":    0.30,
     }
     _DIAL_DEFAULT_FILL = "#10b981"  # emerald-500 — wedge bars / no-band fallback
 
@@ -2304,27 +2355,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         parts.append("</svg>")
         return "".join(parts)
 
-    def _wmo_summary(code: int | None) -> tuple[str, str]:
-        """WMO weather code → (icon key, human label). The icon key is one
-        of clear/partly/overcast/fog/rain/thunder; the template renders an
-        inline SVG per key. Returns ('', '') when the code is unknown."""
-        if code is None:
-            return ("", "")
-        if code == 0:
-            return ("clear", "clear")
-        if code in (1, 2):
-            return ("partly", "partly cloudy")
-        if code == 3:
-            return ("overcast", "overcast")
-        if code in (45, 48):
-            return ("fog", "fog")
-        if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
-            return ("rain", "rain")
-        if code in (95, 96, 99):
-            return ("thunder", "thunderstorm")
-        if code in (71, 73, 75, 77, 85, 86):
-            return ("overcast", "wintry")
-        return ("overcast", "")
+    _wmo_summary = weather_module.wmo_summary
 
     def _wp_fetch(title: str) -> dict | None:
         """Fetch the Wikipedia REST summary for a page title and return the

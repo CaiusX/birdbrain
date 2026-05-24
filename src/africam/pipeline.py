@@ -353,8 +353,9 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
 
     # Optional background commentary generator. Idempotent — stays dormant
     # if the API key isn't set or anthropic isn't installed; never raises
-    # back into the supervisor loop.
-    start_notes_worker(db, app)
+    # back into the supervisor loop. Sources passed through so the site-note
+    # tick knows which source names are valid candidates.
+    start_notes_worker(db, app, static_sources)
 
     try:
         while True:

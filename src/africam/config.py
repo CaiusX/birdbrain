@@ -92,6 +92,11 @@ class AppConfig(BaseSettings):
     # before the age cutoff hits — i.e. "data roughly doubled, old note is
     # stale even at 2 days old."
     notes_regen_count_factor: float = 2.0
+    # Lookback window for the daily-brief worker. Each tick scans this
+    # many past UTC days (excluding today) for missing briefs and fills
+    # the gaps oldest-first. Keep modest — re-fills after multi-day
+    # outages but doesn't ask Claude to write briefs about ancient history.
+    notes_brief_lookback_days: int = 3
 
 
 def load_sources(path: Path) -> list[SourceConfig]:
