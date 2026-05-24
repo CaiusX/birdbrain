@@ -31,6 +31,10 @@ dependencies = [
     # binary. OCR is gated by config + a runtime check, so the binary is
     # optional — the resolver falls back to manual mode if it's missing.
     "pytesseract>=0.3.10",
+    # Background species-note generator. Worker stays dormant if
+    # ANTHROPIC_API_KEY isn't set, so the dep loads but doesn't run for
+    # users who haven't opted in.
+    "anthropic>=0.71",
 ]
 
 [project.scripts]

@@ -87,6 +87,17 @@ class SpeciesNoteRow(Base):
     # Goose, Hadada Ibis) that otherwise drown out quieter detections.
     min_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Provenance for AI-generated notes. NULL = curated/manual note (or no
+    # note yet). When present, the background notes worker is allowed to
+    # regenerate; when NULL but note is non-empty, the worker leaves it
+    # alone so manual edits stick.
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Hash of the evidence inputs at the time of last generation. The worker
+    # uses this to detect when the underlying detection profile has shifted
+    # enough to be worth regenerating before the age-based trigger fires.
+    evidence_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detection_count_at_gen: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class WorkerHeartbeatRow(Base):

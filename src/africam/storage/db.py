@@ -52,6 +52,10 @@ class Database:
             ("detections", "suggested_species", "TEXT"),
             ("species_notes", "conservation_status", "TEXT"),
             ("species_notes", "min_confidence", "REAL"),
+            ("species_notes", "generated_at", "TIMESTAMP"),
+            ("species_notes", "generated_by", "TEXT"),
+            ("species_notes", "evidence_signature", "TEXT"),
+            ("species_notes", "detection_count_at_gen", "INTEGER"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
         ]
         with self.engine.begin() as conn:
@@ -317,6 +321,215 @@ class Database:
     def list_species_notes(self) -> list[SpeciesNoteRow]:
         with self._Session() as s:
             return list(s.scalars(select(SpeciesNoteRow)))
+
+    # --- AI-generated species notes (background worker) ---
+
+    def gather_species_evidence(self, scientific_name: str) -> dict | None:
+        """Aggregate this species' detection footprint for the notes worker.
+
+        Returns None when there's no data to summarize. The shape is the
+        contract between the DB and the Claude prompt — change with care
+        (and bump the evidence_signature inputs accordingly)."""
+        from sqlalchemy import func
+
+        with self._Session() as s:
+            common = s.scalar(
+                select(DetectionRow.common_name)
+                .where(DetectionRow.scientific_name == scientific_name)
+                .order_by(DetectionRow.started_at.desc())
+                .limit(1)
+            )
+            if common is None:
+                return None
+
+            count, mean_conf, max_conf, first_seen, last_seen = s.execute(
+                select(
+                    func.count(DetectionRow.id),
+                    func.avg(DetectionRow.confidence),
+                    func.max(DetectionRow.confidence),
+                    func.min(DetectionRow.started_at),
+                    func.max(DetectionRow.started_at),
+                ).where(DetectionRow.scientific_name == scientific_name)
+            ).one()
+
+            per_source = s.execute(
+                select(DetectionRow.source_name, func.count(DetectionRow.id))
+                .where(DetectionRow.scientific_name == scientific_name)
+                .group_by(DetectionRow.source_name)
+                .order_by(func.count(DetectionRow.id).desc())
+            ).all()
+
+            # SQLite stores started_at without tz info; strftime works on the
+            # local-clock string. Since we always write UTC, this gives UTC hour.
+            per_hour = s.execute(
+                select(
+                    func.strftime("%H", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.scientific_name == scientific_name)
+                .group_by(func.strftime("%H", DetectionRow.started_at))
+            ).all()
+
+            label_counts = dict(s.execute(
+                select(DetectionRow.label, func.count(DetectionRow.id))
+                .where(DetectionRow.scientific_name == scientific_name)
+                .where(DetectionRow.label.is_not(None))
+                .group_by(DetectionRow.label)
+            ).all())
+
+            top_clips = s.execute(
+                select(
+                    DetectionRow.confidence,
+                    DetectionRow.source_name,
+                    DetectionRow.started_at,
+                )
+                .where(DetectionRow.scientific_name == scientific_name)
+                .where(DetectionRow.clip_path.is_not(None))
+                .order_by(DetectionRow.confidence.desc())
+                .limit(3)
+            ).all()
+
+            note_row = s.get(SpeciesNoteRow, scientific_name)
+
+        hourly = [0] * 24
+        for hr_str, c in per_hour:
+            if hr_str is not None:
+                hourly[int(hr_str)] = c
+
+        return {
+            "scientific_name": scientific_name,
+            "common_name": common,
+            "detection_count": int(count or 0),
+            "mean_confidence": round(float(mean_conf or 0), 3),
+            "max_confidence": round(float(max_conf or 0), 3),
+            "first_seen_utc": first_seen.isoformat() if first_seen else None,
+            "last_seen_utc": last_seen.isoformat() if last_seen else None,
+            "per_source": [{"source": n, "count": int(c)} for n, c in per_source],
+            "hourly_utc": hourly,
+            "audition_labels": {k: int(v) for k, v in label_counts.items()},
+            "top_clips_utc": [
+                {
+                    "confidence": round(float(conf), 3),
+                    "source": src,
+                    "at_utc": at.isoformat(),
+                }
+                for conf, src, at in top_clips
+            ],
+            "conservation_status": note_row.conservation_status if note_row else None,
+        }
+
+    def pick_stale_species_for_note(
+        self,
+        *,
+        max_age_days: int,
+        min_detections: int,
+        regen_count_factor: float = 2.0,
+    ) -> str | None:
+        """Return the scientific_name most overdue for a (re)generated note.
+
+        Priority order:
+          1. Species with detections but no AI note yet (oldest first)
+          2. Species whose detection count has grown by ``regen_count_factor``
+             since the last generation (most-grown first)
+          3. Species whose note is older than ``max_age_days`` (oldest first)
+
+        Skips rows whose note is curated (note non-empty AND generated_at NULL)
+        so manual edits aren't overwritten.
+        """
+        from sqlalchemy import func
+
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        with self._Session() as s:
+            counts_subq = (
+                select(
+                    DetectionRow.scientific_name.label("sci"),
+                    DetectionRow.common_name.label("common"),
+                    func.count(DetectionRow.id).label("cnt"),
+                )
+                .group_by(DetectionRow.scientific_name)
+                .having(func.count(DetectionRow.id) >= min_detections)
+                .subquery()
+            )
+
+            # 1. No AI note yet (and no curated note either) — these have
+            #    never been written.
+            missing = s.execute(
+                select(counts_subq.c.sci)
+                .outerjoin(
+                    SpeciesNoteRow,
+                    SpeciesNoteRow.scientific_name == counts_subq.c.sci,
+                )
+                .where(
+                    (SpeciesNoteRow.scientific_name.is_(None))
+                    | ((SpeciesNoteRow.generated_at.is_(None)) & (SpeciesNoteRow.note == ""))
+                )
+                .order_by(counts_subq.c.cnt.desc())
+                .limit(1)
+            ).scalar()
+            if missing:
+                return missing
+
+            # 2. Significant growth since last generation.
+            grown = s.execute(
+                select(counts_subq.c.sci)
+                .join(
+                    SpeciesNoteRow,
+                    SpeciesNoteRow.scientific_name == counts_subq.c.sci,
+                )
+                .where(SpeciesNoteRow.generated_at.is_not(None))
+                .where(SpeciesNoteRow.detection_count_at_gen.is_not(None))
+                .where(
+                    counts_subq.c.cnt
+                    >= SpeciesNoteRow.detection_count_at_gen * regen_count_factor
+                )
+                .order_by(
+                    (counts_subq.c.cnt - SpeciesNoteRow.detection_count_at_gen).desc()
+                )
+                .limit(1)
+            ).scalar()
+            if grown:
+                return grown
+
+            # 3. Aged out.
+            aged = s.execute(
+                select(counts_subq.c.sci)
+                .join(
+                    SpeciesNoteRow,
+                    SpeciesNoteRow.scientific_name == counts_subq.c.sci,
+                )
+                .where(SpeciesNoteRow.generated_at.is_not(None))
+                .where(SpeciesNoteRow.generated_at < cutoff)
+                .order_by(SpeciesNoteRow.generated_at.asc())
+                .limit(1)
+            ).scalar()
+            return aged
+
+    def set_generated_species_note(
+        self,
+        scientific_name: str,
+        *,
+        common_name: str,
+        note: str,
+        generated_by: str,
+        evidence_signature: str,
+        detection_count_at_gen: int,
+    ) -> None:
+        """Write an AI-generated note. Preserves any manually-set tag and
+        conservation_status on the existing row."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                row = SpeciesNoteRow(scientific_name=scientific_name)
+                s.add(row)
+            if common_name:
+                row.common_name = common_name
+            row.note = note
+            row.updated_at = now
+            row.generated_at = now
+            row.generated_by = generated_by
+            row.evidence_signature = evidence_signature
+            row.detection_count_at_gen = detection_count_at_gen
 
     # --- Runtime source enable (undo soft-delete) ---
 

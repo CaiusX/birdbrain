@@ -10,6 +10,7 @@ from africam.clips import save_chunk
 from africam.config import AppConfig, OcrConfig, SourceConfig
 from africam.detector import BirdNetDetector
 from africam.logging import get_logger
+from africam.notes import start_notes_worker
 from africam.site_ocr import SiteOcrWatcher
 from africam.site_resolver import SiteResolver
 from africam.sites import Site, load_sites
@@ -349,6 +350,11 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
 
     reconcile()
     log.info("pipeline.workers_started", count=len(workers))
+
+    # Optional background commentary generator. Idempotent — stays dormant
+    # if the API key isn't set or anthropic isn't installed; never raises
+    # back into the supervisor loop.
+    start_notes_worker(db, app)
 
     try:
         while True:

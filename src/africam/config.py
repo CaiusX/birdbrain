@@ -79,6 +79,20 @@ class AppConfig(BaseSettings):
     # back to a plain "search XC" link that needs no auth.
     xeno_canto_key: str | None = None
 
+    # Background species-note generator. Picks one stale species every
+    # notes_tick_seconds and asks Claude to write a 1–2 paragraph commentary
+    # grounded in our detection footprint. Dormant unless ANTHROPIC_API_KEY
+    # is present in the process env.
+    notes_enabled: bool = True
+    notes_model: str = "claude-haiku-4-5"
+    notes_tick_seconds: int = 300
+    notes_stale_days: int = 7
+    notes_min_detections: int = 3
+    # Multiplier on detection_count_at_gen that retriggers regeneration even
+    # before the age cutoff hits — i.e. "data roughly doubled, old note is
+    # stale even at 2 days old."
+    notes_regen_count_factor: float = 2.0
+
 
 def load_sources(path: Path) -> list[SourceConfig]:
     if not path.exists():
