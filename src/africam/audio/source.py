@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -70,6 +71,26 @@ class AudioSource(ABC):
             bufsize=0,
         )
         assert proc.stdout is not None
+
+        # Watcher thread: when stop_event fires, terminate ffmpeg so the read
+        # in _read_exact returns EOF. Without this, a worker blocked inside
+        # _read_exact on a stalled HLS stream never notices stop_event (the
+        # is_set() check at the top of the loop is unreachable while blocked),
+        # and the thread + subprocess leak until process exit.
+        done = threading.Event()
+
+        def _stop_watcher() -> None:
+            while not done.wait(1.0):
+                if stop_event is not None and stop_event.is_set():
+                    if proc.poll() is None:
+                        proc.terminate()
+                    return
+
+        if stop_event is not None:
+            threading.Thread(
+                target=_stop_watcher, name=f"ffstop-{self.name}", daemon=True
+            ).start()
+
         try:
             while True:
                 if stop_event is not None and stop_event.is_set():
@@ -88,6 +109,7 @@ class AudioSource(ABC):
                     source_name=self.name,
                 )
         finally:
+            done.set()
             if proc.poll() is None:
                 proc.terminate()
                 try:

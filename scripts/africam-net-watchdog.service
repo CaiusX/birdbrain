@@ -1,0 +1,7 @@
+[Unit]
+Description=Africam network watchdog (cycle wifi / reboot on prolonged DNS failure)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/africam-net-watchdog
