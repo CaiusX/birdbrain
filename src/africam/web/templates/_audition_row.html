@@ -1,30 +1,16 @@
 {# expects: r (DetectionRow), source_tz (dict[str,str]),
    optionally: note_tag_by_sci, status_by_sci, palette_for_tag, default_palette #}
+{% from "_macros.html" import iucn_badge %}
 {% set tz = source_tz.get(r.source_name, 'UTC') %}
 {% set lbl = r.label %}
 {% set sp_tag = (note_tag_by_sci or {}).get(r.scientific_name) %}
 {% set sp_palette = (palette_for_tag or {}).get(sp_tag, default_palette or 'fire') %}
 {% set sp_status = (status_by_sci or {}).get(r.scientific_name) %}
-{% set _iucn_class = {
-  "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
-  "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),
-  "VU": ("bg-amber-700/30 text-amber-300 border-amber-600/40", "Vulnerable"),
-  "EN": ("bg-orange-700/30 text-orange-300 border-orange-600/40", "Endangered"),
-  "CR": ("bg-rose-700/30 text-rose-300 border-rose-600/40", "Critically Endangered"),
-  "EW": ("bg-rose-900/40 text-rose-400 border-rose-700/50", "Extinct in the Wild"),
-  "EX": ("bg-zinc-900 text-zinc-500 border-zinc-700", "Extinct"),
-  "DD": ("bg-zinc-700/30 text-zinc-400 border-zinc-600/40", "Data Deficient"),
-  "NE": ("bg-zinc-800 text-zinc-500 border-zinc-700", "Not Evaluated"),
-} %}
 <li id="audit-{{ r.id }}" class="px-5 py-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-center hover:bg-zinc-800/30">
   <div class="md:col-span-5 min-w-0">
     <div class="text-sm font-medium text-zinc-100 truncate flex items-center gap-1.5 flex-wrap">
       <span>{{ r.common_name }}</span>
-      {% if sp_status and sp_status in _iucn_class %}
-        {% set _cls, _label = _iucn_class[sp_status] %}
-        <span class="px-1 py-0 rounded text-[10px] font-medium tabular-nums border {{ _cls }}"
-              title="IUCN · {{ _label }}">{{ sp_status }}</span>
-      {% endif %}
+      {{ iucn_badge(sp_status) }}
       <span class="text-xs italic text-zinc-500 font-normal ml-1">{{ r.scientific_name }}</span>
     </div>
     <div class="text-xs text-zinc-500 truncate">

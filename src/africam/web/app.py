@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
@@ -13,8 +14,25 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+
+@functools.lru_cache(maxsize=64)
+def _zone_info(tz_name: str) -> ZoneInfo:
+    """Resolve an IANA timezone name to a ZoneInfo, falling back to UTC for
+    unknown names. Cached because most call sites loop over many rows that
+    share a small set of timezones (typically just Africa/Johannesburg)."""
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, case, desc, func, or_, select
@@ -785,11 +803,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         for r in all_rows:
             ts = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
             cfg_src = sources_by_name.get(r.source_name)
-            tz_name = cfg_src.timezone if cfg_src else "UTC"
-            try:
-                tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                tz = UTC
+            tz = _zone_info(cfg_src.timezone if cfg_src else "UTC")
             hours[ts.astimezone(tz).hour] += 1
         peak_hour = max(hours) or 1
 
@@ -908,10 +922,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # Render the hourly histogram in the source's local timezone so the
         # bar chart matches what the operator hears wall-clock at the site.
         tz_name = src_cfg.timezone if src_cfg else "UTC"
-        try:
-            local_tz = ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
-            local_tz = UTC
+        local_tz = _zone_info(tz_name)
         # SQLite gave us UTC hour strings; convert each utc hour to the
         # corresponding local hour. For most timezones this is a fixed offset
         # so a single shift works.
@@ -1095,11 +1106,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             # computed in the source's local timezone (so dawn-chorus peaks
             # land on the morning hours regardless of where the camera is).
             cfg_for_src = sources_by_name.get(src_name)
-            tz_name = cfg_for_src.timezone if cfg_for_src else "UTC"
-            try:
-                src_tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                src_tz = UTC
+            src_tz = _zone_info(cfg_for_src.timezone if cfg_for_src else "UTC")
             stats: dict[str, dict] = {}
             for r in src_rows:
                 d = stats.setdefault(
@@ -1129,7 +1136,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             per_source_top.append(
                 {
                     "source": src_name,
-                    "tz": tz_name,
+                    "tz": cfg_for_src.timezone if cfg_for_src else "UTC",
                     "species": ordered,
                 }
             )
@@ -1150,18 +1157,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             },
         )
 
-    @app.get("/audition", response_class=HTMLResponse)
-    def audition(
-        request: Request,
-        source: str | None = Query(default=None),
-        species: str | None = Query(default=None, description="case-insensitive substring of common name"),
-        min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
-        max_conf: float = Query(default=1.0, ge=0.0, le=1.0),
-        label_filter: str = Query(default="unreviewed"),  # unreviewed | good | bad | unsure | all
-        note_tag: str = Query(default="any"),  # any | reliable | suspect | rare | untagged
-        order: str = Query(default="conf_desc"),  # conf_desc | conf_asc | recent
-        limit: int = Query(default=50, ge=1, le=500),
-    ) -> HTMLResponse:
+    def _detections_context(
+        source: str | None,
+        species: str | None,
+        min_conf: float,
+        max_conf: float,
+        label_filter: str,
+        note_tag: str,
+        order: str,
+        limit: int,
+    ) -> dict:
+        """Build the template context for the per-detection view of /review.
+        Pulled out of the old /audition handler so /review can dispatch."""
         _, sources_by_name, _ = _all_sources()
 
         with db.session() as s:
@@ -1240,51 +1247,47 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
-        return TEMPLATES.TemplateResponse(
-            request,
-            "audition.html",
-            {
-                "rows": rows,
-                "all_sources": all_sources,
-                "all_species": all_species,
-                "note_tag_by_sci": note_tag_by_sci,
-                "status_by_sci": status_by_sci,
-                "palette_for_tag": {
-                    k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
-                },
-                "default_palette": SPEC_PALETTE_FOR_TAG[None],
-                "source_tz": source_tz,
-                "filters": {
-                    "source": source or "",
-                    "species": species or "",
-                    "min_conf": min_conf,
-                    "max_conf": max_conf,
-                    "label_filter": label_filter,
-                    "note_tag": note_tag,
-                    "order": order,
-                    "limit": limit,
-                },
-                "label_counts": {
-                    "good": label_counts.get("good", 0),
-                    "bad": label_counts.get("bad", 0),
-                    "unsure": label_counts.get("unsure", 0),
-                    "unreviewed": label_counts.get(None, 0),
-                },
+        return {
+            "rows": rows,
+            "all_sources": all_sources,
+            "all_species": all_species,
+            "note_tag_by_sci": note_tag_by_sci,
+            "status_by_sci": status_by_sci,
+            "palette_for_tag": {
+                k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
             },
-        )
+            "default_palette": SPEC_PALETTE_FOR_TAG[None],
+            "source_tz": source_tz,
+            "filters": {
+                "source": source or "",
+                "species": species or "",
+                "min_conf": min_conf,
+                "max_conf": max_conf,
+                "label_filter": label_filter,
+                "note_tag": note_tag,
+                "order": order,
+                "limit": limit,
+            },
+            "label_counts": {
+                "good": label_counts.get("good", 0),
+                "bad": label_counts.get("bad", 0),
+                "unsure": label_counts.get("unsure", 0),
+                "unreviewed": label_counts.get(None, 0),
+            },
+        }
 
-    @app.get("/soundscape", response_class=HTMLResponse)
-    def soundscape(
-        request: Request,
-        source: str | None = Query(default=None),
-        min_species: int = Query(default=2, ge=2, le=10),
-        order: str = Query(default="recent"),  # recent | n_species | max_conf
-        limit: int = Query(default=50, ge=1, le=200),
-        bucket: str = Query(default="genuine"),  # genuine | confusions
-    ) -> HTMLResponse:
-        """Browse chunks where the live pipeline detected multiple species at
-        once. Every DetectionRow sharing a ``clip_path`` came from the same
-        3 s window, so a clip_path with >=2 rows means BirdNET heard several
+    def _chunks_context(
+        source: str | None,
+        min_species: int,
+        order: str,
+        limit: int,
+        bucket: str,
+    ) -> dict:
+        """Build the template context for the multi-species-chunk view of
+        /review. Pulled out of the old /soundscape handler.
+
+        Every DetectionRow sharing a ``clip_path`` came from the same 3 s
+        window, so a clip_path with >=2 rows means BirdNET heard several
         birds — or hedged between similar species — in the same instant.
 
         Split into two buckets:
@@ -1428,33 +1431,88 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             total_groups = genuine_count + confusion_count
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
-        return TEMPLATES.TemplateResponse(
-            request,
-            "soundscape.html",
-            {
-                "groups": groups,
-                "total_groups": total_groups,
-                "genuine_count": genuine_count,
-                "confusion_count": confusion_count,
-                "bucket": bucket,
-                "all_sources": all_sources_list,
-                "all_species": all_species,
-                "note_tag_by_sci": note_tag_by_sci,
-                "status_by_sci": status_by_sci,
-                "palette_for_tag": {
-                    k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
-                },
-                "default_palette": SPEC_PALETTE_FOR_TAG[None],
-                "source_tz": source_tz,
-                "filters": {
-                    "source": source or "",
-                    "min_species": min_species,
-                    "order": order,
-                    "limit": limit,
-                    "bucket": bucket,
-                },
+        return {
+            "groups": groups,
+            "total_groups": total_groups,
+            "genuine_count": genuine_count,
+            "confusion_count": confusion_count,
+            "bucket": bucket,
+            "all_sources": all_sources_list,
+            "all_species": all_species,
+            "note_tag_by_sci": note_tag_by_sci,
+            "status_by_sci": status_by_sci,
+            "palette_for_tag": {
+                k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
             },
-        )
+            "default_palette": SPEC_PALETTE_FOR_TAG[None],
+            "source_tz": source_tz,
+            "filters": {
+                "source": source or "",
+                "min_species": min_species,
+                "order": order,
+                "limit": limit,
+                "bucket": bucket,
+            },
+        }
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review(
+        request: Request,
+        tab: str = Query(default="detections"),
+        # Detection-view filters
+        source: str | None = Query(default=None),
+        species: str | None = Query(default=None),
+        min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
+        max_conf: float = Query(default=1.0, ge=0.0, le=1.0),
+        label_filter: str = Query(default="unreviewed"),
+        note_tag: str = Query(default="any"),
+        # Chunk-view filters
+        min_species: int = Query(default=2, ge=2, le=10),
+        bucket: str = Query(default="genuine"),
+        # Both tabs share these but defaults differ — see below.
+        order: str | None = Query(default=None),
+        limit: int | None = Query(default=None),
+    ) -> HTMLResponse:
+        """Unified review surface — merges the old /audition (per-detection)
+        and /soundscape (multi-species chunks) into one page with tabs."""
+        if tab not in ("detections", "chunks"):
+            tab = "detections"
+        if tab == "chunks":
+            ctx = _chunks_context(
+                source=source,
+                min_species=min_species,
+                order=order or "recent",
+                limit=limit or 50,
+                bucket=bucket,
+            )
+        else:
+            ctx = _detections_context(
+                source=source,
+                species=species,
+                min_conf=min_conf,
+                max_conf=max_conf,
+                label_filter=label_filter,
+                note_tag=note_tag,
+                order=order or "conf_desc",
+                limit=limit or 50,
+            )
+        ctx["tab"] = tab
+        ctx.update(_note_tag_context())
+        return TEMPLATES.TemplateResponse(request, "review.html", ctx)
+
+    @app.get("/audition")
+    def audition_redirect(request: Request) -> RedirectResponse:
+        """Legacy /audition URLs get punted to /review?tab=detections,
+        preserving the query string so bookmarked filters keep working."""
+        qs = request.url.query
+        target = "/review?tab=detections" + (f"&{qs}" if qs else "")
+        return RedirectResponse(target, status_code=302)
+
+    @app.get("/soundscape")
+    def soundscape_redirect(request: Request) -> RedirectResponse:
+        qs = request.url.query
+        target = "/review?tab=chunks" + (f"&{qs}" if qs else "")
+        return RedirectResponse(target, status_code=302)
 
     @app.get("/diurnal", response_class=HTMLResponse)
     def diurnal(
@@ -1487,21 +1545,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         peaks line up regardless of which camera the row came from."""
         _, sources_by_name, _ = _all_sources()
 
-        # Cache per-source ZoneInfo so we don't re-parse for every row.
-        tz_cache: dict[str, ZoneInfo] = {}
-
         def _tz_for(name: str) -> ZoneInfo:
-            tz = tz_cache.get(name)
-            if tz is not None:
-                return tz
             cfg = sources_by_name.get(name)
-            tz_name = cfg.timezone if cfg else "UTC"
-            try:
-                tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                tz = UTC  # type: ignore[assignment]
-            tz_cache[name] = tz
-            return tz
+            return _zone_info(cfg.timezone if cfg else "UTC")
 
         # Effective window. If both date pickers filled, they win and we
         # back-compute ``days`` from the span (used downstream for the
@@ -1698,20 +1744,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             until_dt = now
         weather_days = max(1, min(92, (until_dt - since_dt).days or 1))
 
-        tz_cache: dict[str, ZoneInfo] = {}
-
         def _tz_for(name: str) -> ZoneInfo:
-            tz = tz_cache.get(name)
-            if tz is not None:
-                return tz
             cfg = sources_by_name.get(name)
-            tz_name = cfg.timezone if cfg else "UTC"
-            try:
-                tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                tz = UTC  # type: ignore[assignment]
-            tz_cache[name] = tz
-            return tz
+            return _zone_info(cfg.timezone if cfg else "UTC")
 
         with db.session() as s:
             note = s.get(SpeciesNoteRow, scientific)

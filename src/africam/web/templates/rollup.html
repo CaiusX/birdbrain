@@ -37,7 +37,7 @@
         {% for r in rollup_rows %}
           <tr class="hover:bg-zinc-800/40">
             <td class="px-5 py-3 font-medium">
-              <a href="/audition?source={{ r.source }}" class="hover:text-emerald-300">{{ r.source }}</a>
+              <a href="/site/{{ r.source }}" class="hover:text-emerald-300">{{ r.source }}</a>
             </td>
             <td class="px-5 py-3 text-right tabular-nums">{{ r.count }}</td>
             <td class="px-5 py-3 text-right tabular-nums">{{ r.species }}</td>

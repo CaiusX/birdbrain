@@ -1,0 +1,9 @@
+{# Shared source-filter <select>. Caller wraps in its own <label>/grid
+   container so each page controls its layout (column spans, label text).
+   Expects `all_sources` (list[str]) and `filters.source` in context. #}
+<select name="source" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+  <option value="">— any —</option>
+  {% for s in all_sources %}
+    <option value="{{ s }}" {% if filters.source == s %}selected{% endif %}>{{ s }}</option>
+  {% endfor %}
+</select>

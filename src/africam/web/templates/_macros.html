@@ -1,0 +1,26 @@
+{# Shared Jinja macros. Imported with: {% from "_macros.html" import iucn_badge %} #}
+
+{% set _IUCN_CLASS = {
+  "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
+  "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),
+  "VU": ("bg-amber-700/30 text-amber-300 border-amber-600/40", "Vulnerable"),
+  "EN": ("bg-orange-700/30 text-orange-300 border-orange-600/40", "Endangered"),
+  "CR": ("bg-rose-700/30 text-rose-300 border-rose-600/40", "Critically Endangered"),
+  "EW": ("bg-rose-900/40 text-rose-400 border-rose-700/50", "Extinct in the Wild"),
+  "EX": ("bg-zinc-900 text-zinc-500 border-zinc-700", "Extinct"),
+  "DD": ("bg-zinc-700/30 text-zinc-400 border-zinc-600/40", "Data Deficient"),
+  "NE": ("bg-zinc-800 text-zinc-500 border-zinc-700", "Not Evaluated"),
+} %}
+
+{# IUCN Red List badge. size="sm" (10px, for inline row use) or "md" (11px,
+   for species-detail headers). Renders nothing when status is empty/unknown. #}
+{% macro iucn_badge(status, size="sm") -%}
+{%- if status and status in _IUCN_CLASS -%}
+{%- set _cls, _label = _IUCN_CLASS[status] -%}
+{%- if size == "md" -%}
+<span class="px-1.5 py-0 rounded text-[11px] font-medium tabular-nums border {{ _cls }}" title="IUCN · {{ _label }}">{{ status }}</span>
+{%- else -%}
+<span class="px-1 py-0 rounded text-[10px] font-medium tabular-nums border {{ _cls }}" title="IUCN · {{ _label }}">{{ status }}</span>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro %}
