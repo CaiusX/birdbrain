@@ -994,7 +994,28 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         rows.sort(key=lambda r: r["name"].lower())
         running = sum(1 for r in rows if r["status"] == "running")
-        return {"rows": rows, "running": running, "total": len(rows), "now": now}
+        # Defaults for the add-source form: pick the most common timezone
+        # already in use so the user doesn't have to retype it. Fall back to
+        # UTC if no source has a sensible value yet.
+        from collections import Counter
+        tz_counter = Counter(
+            r["timezone"] for r in rows if r["timezone"] and r["timezone"] != "UTC"
+        )
+        default_tz = tz_counter.most_common(1)[0][0] if tz_counter else "UTC"
+        # Existing sites with coords, for the map picker.
+        existing_sites = [
+            {"name": r["name"], "lat": r["lat"], "lon": r["lon"]}
+            for r in rows
+            if r["lat"] is not None and r["lon"] is not None
+        ]
+        return {
+            "rows": rows,
+            "running": running,
+            "total": len(rows),
+            "now": now,
+            "default_tz": default_tz,
+            "existing_sites": existing_sites,
+        }
 
     def _admin_row(
         cfg_src: SourceConfig,
