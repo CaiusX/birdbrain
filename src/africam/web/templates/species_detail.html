@@ -149,10 +149,10 @@
       </h3>
     </div>
     <div class="px-5 py-4">
-      <div class="flex items-end gap-1 h-32" title="oldest → today · square-root scale">
+      <div class="flex gap-1 h-32" title="oldest → today · square-root scale">
         {% for d in daily %}
           {% set h = ((d.count / peak_day) ** 0.5 * 100) | round(0) | int %}
-          <div class="flex-1 flex flex-col items-center gap-1">
+          <div class="flex-1 flex flex-col items-center justify-end gap-1">
             <div class="text-[9px] tabular-nums text-zinc-400">{{ d.count if d.count else '' }}</div>
             <div class="w-full bg-emerald-500/70 rounded-sm"
                  style="height: {{ h if h > 0 else 1 }}%; min-height: 1px;"
@@ -175,11 +175,11 @@
       </h3>
     </div>
     <div class="px-5 py-4">
-      <div class="flex items-end gap-1 h-32" title="square-root scale">
+      <div class="flex gap-1 h-32" title="square-root scale">
         {% for c in hours %}
           {% set h = ((c / peak_hour) ** 0.5 * 100) | round(0) | int %}
           {% set is_label_hour = loop.index0 in [0, 6, 12, 18] %}
-          <div class="flex-1 flex flex-col items-center gap-1" title="{{ loop.index0 }}:00 · {{ c }} detection{{ '' if c == 1 else 's' }}">
+          <div class="flex-1 flex flex-col items-center justify-end gap-1" title="{{ loop.index0 }}:00 · {{ c }} detection{{ '' if c == 1 else 's' }}">
             <div class="w-full bg-emerald-500/70 rounded-sm"
                  style="height: {{ h if h > 0 else 1 }}%; min-height: 1px;"></div>
           </div>
@@ -235,10 +235,10 @@
       </h3>
     </div>
     <div class="px-5 py-4">
-      <div class="flex items-end gap-1 h-32" title="0.0 — 1.0 in 0.1 buckets · square-root scale">
+      <div class="flex gap-1 h-32" title="0.0 — 1.0 in 0.1 buckets · square-root scale">
         {% for c in conf_bins %}
           {% set h = ((c / peak_conf_bin) ** 0.5 * 100) | round(0) | int %}
-          <div class="flex-1 flex flex-col items-center gap-1" title="conf {{ "%.1f"|format(loop.index0 * 0.1) }}–{{ "%.1f"|format(loop.index0 * 0.1 + 0.1) }} · {{ c }}">
+          <div class="flex-1 flex flex-col items-center justify-end gap-1" title="conf {{ "%.1f"|format(loop.index0 * 0.1) }}–{{ "%.1f"|format(loop.index0 * 0.1 + 0.1) }} · {{ c }}">
             <div class="text-[9px] tabular-nums text-zinc-400">{{ c if c else '' }}</div>
             <div class="w-full bg-emerald-500/70 rounded-sm"
                  style="height: {{ h if h > 0 else 1 }}%; min-height: 1px;"></div>
