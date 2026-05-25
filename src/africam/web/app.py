@@ -998,23 +998,61 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # already in use so the user doesn't have to retype it. Fall back to
         # UTC if no source has a sensible value yet.
         from collections import Counter
+        from zoneinfo import available_timezones
         tz_counter = Counter(
             r["timezone"] for r in rows if r["timezone"] and r["timezone"] != "UTC"
         )
         default_tz = tz_counter.most_common(1)[0][0] if tz_counter else "UTC"
+
+        # Timezone dropdown options. Every Africa/* zone (the project's
+        # primary geography) plus a handful of common non-African zones,
+        # grouped so the select renders as optgroups.
+        africa_zones = sorted(
+            tz for tz in available_timezones() if tz.startswith("Africa/")
+        )
+        common_zones = [
+            "UTC",
+            "Europe/London",
+            "Europe/Berlin",
+            "Europe/Paris",
+            "America/New_York",
+            "America/Los_Angeles",
+            "America/Sao_Paulo",
+            "Asia/Tokyo",
+            "Asia/Singapore",
+            "Australia/Sydney",
+        ]
+        tz_options = [
+            {"group": "Common", "zones": common_zones},
+            {"group": "Africa", "zones": africa_zones},
+        ]
+
         # Existing sites with coords, for the map picker.
         existing_sites = [
             {"name": r["name"], "lat": r["lat"], "lon": r["lon"]}
             for r in rows
             if r["lat"] is not None and r["lon"] is not None
         ]
+        # Suggested default location for a new source: centroid of existing
+        # sites if any, otherwise a sensible southern-Africa fallback. The
+        # form drops a pin here on page load so submit-without-clicking-the-
+        # map works, but the user can move it freely.
+        if existing_sites:
+            default_lat = sum(s["lat"] for s in existing_sites) / len(existing_sites)
+            default_lon = sum(s["lon"] for s in existing_sites) / len(existing_sites)
+        else:
+            default_lat, default_lon = -24.0, 31.0
+
         return {
             "rows": rows,
             "running": running,
             "total": len(rows),
             "now": now,
             "default_tz": default_tz,
+            "tz_options": tz_options,
             "existing_sites": existing_sites,
+            "default_lat": round(default_lat, 6),
+            "default_lon": round(default_lon, 6),
         }
 
     def _admin_row(

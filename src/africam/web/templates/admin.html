@@ -74,10 +74,16 @@
 
       <label class="block">
         <span class="text-[10px] uppercase tracking-wider text-zinc-500">Timezone</span>
-        <input name="timezone" type="text"
-               value="{{ default_tz }}"
-               placeholder="IANA, e.g. Africa/Johannesburg"
-               class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+        <select name="timezone"
+                class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+          {% for grp in tz_options %}
+            <optgroup label="{{ grp.group }}">
+              {% for tz in grp.zones %}
+                <option value="{{ tz }}" {% if tz == default_tz %}selected{% endif %}>{{ tz }}</option>
+              {% endfor %}
+            </optgroup>
+          {% endfor %}
+        </select>
       </label>
 
       <label class="block">
@@ -96,18 +102,18 @@
         <label class="block">
           <span class="text-[10px] uppercase tracking-wider text-zinc-500">Latitude</span>
           <input id="lat-input" name="lat" type="number" step="any" min="-90" max="90"
-                 placeholder="e.g. -24.276"
+                 value="{{ default_lat }}"
                  class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
         </label>
         <label class="block">
           <span class="text-[10px] uppercase tracking-wider text-zinc-500">Longitude</span>
           <input id="lon-input" name="lon" type="number" step="any" min="-180" max="180"
-                 placeholder="e.g. 31.307"
+                 value="{{ default_lon }}"
                  class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
         </label>
       </div>
       <p class="text-[11px] text-zinc-500 -mt-1">
-        type coordinates or click the map · the two stay in sync
+        suggested: centroid of existing sites · click the map, drag the pin, or edit numbers
       </p>
 
       <div class="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
@@ -228,6 +234,10 @@
   map.on('click', (e) => dropPin(e.latlng));
   latInput.addEventListener('input', syncFromInputs);
   lonInput.addEventListener('input', syncFromInputs);
+
+  // Drop the suggestion pin (server-computed centroid of existing sites)
+  // so the user has a working location even if they don't touch the map.
+  syncFromInputs();
 
   window.__addSourceMap = {
     removeMarker: () => {
