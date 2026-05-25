@@ -10,10 +10,37 @@
 
 {% block content %}
 
-<section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Add a source</h2>
-    <span class="text-xs text-zinc-500">YouTube live stream or RTSP camera · click the map to place the pin</span>
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Sources
+      <span class="text-zinc-200 ml-2">{{ running }}/{{ total }}</span>
+      <span class="text-zinc-500 text-xs ml-1">running</span>
+    </h2>
+    <div class="flex items-center gap-2">
+      <button id="open-add-source"
+              class="text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium">
+        + add a source
+      </button>
+      <button hx-get="/partials/admin" hx-target="#admin-table" hx-swap="outerHTML"
+              class="text-xs text-zinc-400 hover:text-zinc-100 px-2 py-0.5 rounded border border-zinc-800 hover:border-zinc-600">
+        ↻ refresh
+      </button>
+    </div>
+  </div>
+
+  {% include "_admin_table.html" %}
+</section>
+
+<dialog id="add-source-dialog"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-full max-w-3xl max-h-[92vh] overflow-y-auto backdrop:bg-black/70">
+  <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <div>
+      <h3 class="text-sm font-semibold text-zinc-100 uppercase tracking-wider">Add a source</h3>
+      <p class="text-xs text-zinc-500 mt-0.5">YouTube live stream or RTSP camera · click the map, drag the pin, or type coordinates</p>
+    </div>
+    <button type="button" id="close-add-source"
+            class="text-zinc-500 hover:text-zinc-100 text-lg leading-none px-2 py-1">×</button>
   </div>
 
   <form id="add-source-form"
@@ -25,8 +52,8 @@
             err.classList.add('hidden');
             this.reset();
             window.__addSourceMap?.removeMarker();
-            // Refresh the admin table so the new source shows up.
             htmx.ajax('GET', '/partials/admin', {target: '#admin-table', swap: 'outerHTML'});
+            document.getElementById('add-source-dialog').close();
           } else {
             let msg;
             try {
@@ -115,79 +142,37 @@
       <p class="text-[11px] text-zinc-500 -mt-1">
         suggested: centroid of existing sites · click the map, drag the pin, or edit numbers
       </p>
-
-      <div class="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
-        <button type="reset"
-                onclick="window.__addSourceMap?.removeMarker();"
-                class="px-3 py-1.5 rounded text-xs border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</button>
-        <button type="submit"
-                class="px-3 py-1.5 rounded text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium">add source</button>
-      </div>
-      <p id="add-source-error" class="hidden text-xs text-rose-400"></p>
     </div>
 
     <!-- Right column: map picker -->
     <div class="border-t lg:border-t-0 border-zinc-800">
-      <div id="add-source-map" class="w-full" style="height: 380px;"></div>
+      <div id="add-source-map" class="w-full" style="height: 360px;"></div>
       <p class="px-5 py-2 text-[11px] text-zinc-500 border-t border-zinc-800">
         click anywhere on the map to drop a pin · drag the pin to fine-tune
       </p>
     </div>
+
+    <!-- Footer spans both columns -->
+    <div class="lg:col-span-2 flex items-center justify-end gap-2 px-5 py-3 border-t border-zinc-800">
+      <p id="add-source-error" class="hidden text-xs text-rose-400 mr-auto"></p>
+      <button type="button" id="cancel-add-source"
+              class="px-3 py-1.5 rounded text-xs border border-zinc-800 text-zinc-400 hover:text-zinc-100">cancel</button>
+      <button type="submit"
+              class="px-3 py-1.5 rounded text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium">add source</button>
+    </div>
   </form>
-</section>
-
-<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
-  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Sources
-      <span class="text-zinc-200 ml-2">{{ running }}/{{ total }}</span>
-      <span class="text-zinc-500 text-xs ml-1">running</span>
-    </h2>
-    <button hx-get="/partials/admin" hx-target="#admin-table" hx-swap="outerHTML"
-            class="text-xs text-zinc-400 hover:text-zinc-100 px-2 py-0.5 rounded border border-zinc-800 hover:border-zinc-600">
-      ↻ refresh
-    </button>
-  </div>
-
-  {% include "_admin_table.html" %}
-</section>
+</dialog>
 
 <script>
 (function () {
   const EXISTING = {{ existing_sites | tojson }};
-  const map = L.map('add-source-map', { scrollWheelZoom: true });
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap',
-    maxZoom: 18,
-  }).addTo(map);
+  const dialog = document.getElementById('add-source-dialog');
+  const openBtn = document.getElementById('open-add-source');
+  const closeBtn = document.getElementById('close-add-source');
+  const cancelBtn = document.getElementById('cancel-add-source');
 
-  // Dim background pins for existing sites so the user has spatial context
-  // when placing a new one.
-  const existingIcon = L.divIcon({
-    className: 'site-pin',
-    html: `<div style="width:10px;height:10px;border-radius:50%;background:#71717a;` +
-          `border:2px solid #18181b;"></div>`,
-    iconSize: [10, 10],
-    iconAnchor: [5, 5],
-  });
-  const existingMarkers = EXISTING.map(s => {
-    return L.marker([s.lat, s.lon], { icon: existingIcon, interactive: false })
-      .addTo(map)
-      .bindTooltip(s.name, { permanent: true, direction: 'right', offset: [8, 0],
-                             className: 'site-label' });
-  });
-
-  if (EXISTING.length > 0) {
-    const group = L.featureGroup(existingMarkers);
-    map.fitBounds(group.getBounds().pad(0.6));
-  } else {
-    map.setView([-24, 31], 5);
-  }
-
-  // Pin that the user drops to set the new source's location. Larger and
-  // brighter than existing-site pins so it pops out even when dropped
-  // near the cluster of existing sites; z-offset puts it above their
-  // permanent tooltips.
+  let map = null;
+  let pickMarker = null;
   const pickIcon = L.divIcon({
     className: 'site-pin pick-pin',
     html: `<div style="width:22px;height:22px;border-radius:50%;background:#10b981;` +
@@ -195,70 +180,99 @@
     iconSize: [22, 22],
     iconAnchor: [11, 11],
   });
-  let pickMarker = null;
+  const existingIcon = L.divIcon({
+    className: 'site-pin',
+    html: `<div style="width:10px;height:10px;border-radius:50%;background:#71717a;` +
+          `border:2px solid #18181b;"></div>`,
+    iconSize: [10, 10],
+    iconAnchor: [5, 5],
+  });
+
   const latInput = document.getElementById('lat-input');
   const lonInput = document.getElementById('lon-input');
 
   function writeInputs(latlng) {
-    // Round to 6 places for the input value, matching what the user would
-    // typically paste in. We don't update the inputs while they're focused
-    // — that would steal the cursor mid-edit.
     if (document.activeElement !== latInput) latInput.value = latlng.lat.toFixed(6);
     if (document.activeElement !== lonInput) lonInput.value = latlng.lng.toFixed(6);
   }
 
   function createPickMarker(latlng) {
     const m = L.marker(latlng, {
-      icon: pickIcon,
-      draggable: true,
-      zIndexOffset: 1000,
+      icon: pickIcon, draggable: true, zIndexOffset: 1000,
     }).addTo(map);
     m.bindTooltip('new source', {
-      permanent: true,
-      direction: 'top',
-      offset: [0, -12],
-      className: 'site-label',
+      permanent: true, direction: 'top', offset: [0, -12], className: 'site-label',
     });
     m.on('drag', (e) => writeInputs(e.target.getLatLng()));
     return m;
   }
 
   function dropPin(latlng) {
-    if (pickMarker) {
-      pickMarker.setLatLng(latlng);
-    } else {
-      pickMarker = createPickMarker(latlng);
-    }
+    if (pickMarker) pickMarker.setLatLng(latlng);
+    else pickMarker = createPickMarker(latlng);
     writeInputs(latlng);
   }
 
   function syncFromInputs() {
+    if (!map) return;
     const lat = parseFloat(latInput.value);
     const lon = parseFloat(lonInput.value);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
     if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
     const ll = L.latLng(lat, lon);
-    if (pickMarker) {
-      pickMarker.setLatLng(ll);
-    } else {
-      pickMarker = createPickMarker(ll);
-    }
-    // Pan only if the new pin is outside the current view, so light edits
-    // don't yank the map under the user.
+    if (pickMarker) pickMarker.setLatLng(ll);
+    else pickMarker = createPickMarker(ll);
     if (!map.getBounds().contains(ll)) map.panTo(ll);
   }
 
-  map.on('click', (e) => dropPin(e.latlng));
-  latInput.addEventListener('input', syncFromInputs);
-  lonInput.addEventListener('input', syncFromInputs);
+  // Lazy map init — Leaflet needs the container visible to compute size.
+  // We build it on first dialog open and reuse afterwards.
+  function ensureMap() {
+    if (map) {
+      // Force a size recalculation in case viewport changed since last open.
+      setTimeout(() => map.invalidateSize(), 0);
+      return;
+    }
+    map = L.map('add-source-map', { scrollWheelZoom: true });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap', maxZoom: 18,
+    }).addTo(map);
 
-  // Drop the suggestion pin (server-computed centroid of existing sites)
-  // so the user has a working location even if they don't touch the map.
-  syncFromInputs();
+    const existingMarkers = EXISTING.map(s =>
+      L.marker([s.lat, s.lon], { icon: existingIcon, interactive: false })
+        .addTo(map)
+        .bindTooltip(s.name, {
+          permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
+        })
+    );
+    if (EXISTING.length > 0) {
+      map.fitBounds(L.featureGroup(existingMarkers).getBounds().pad(0.6));
+    } else {
+      map.setView([-24, 31], 5);
+    }
+
+    map.on('click', (e) => dropPin(e.latlng));
+    latInput.addEventListener('input', syncFromInputs);
+    lonInput.addEventListener('input', syncFromInputs);
+
+    // Drop the suggestion pin from the pre-filled centroid.
+    syncFromInputs();
+  }
+
+  openBtn.addEventListener('click', () => {
+    dialog.showModal();
+    ensureMap();
+  });
+  function closeDialog() {
+    document.getElementById('add-source-error').classList.add('hidden');
+    dialog.close();
+  }
+  closeBtn.addEventListener('click', closeDialog);
+  cancelBtn.addEventListener('click', closeDialog);
 
   window.__addSourceMap = {
     removeMarker: () => {
-      if (pickMarker) {
+      if (pickMarker && map) {
         map.removeLayer(pickMarker);
         pickMarker = null;
       }
