@@ -72,14 +72,14 @@
 
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 px-5 py-4">
   <div class="flex items-baseline justify-between mb-3">
-    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">hourly activity ({{ tz_name }})</h3>
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">hourly activity ({{ tz_name }}) <span class="text-zinc-500 normal-case text-xs ml-1">· √ scale</span></h3>
     <span class="text-[10px] text-zinc-500 tabular-nums">peak: {{ peak_hour }} detections</span>
   </div>
-  <div class="flex items-end gap-1 h-32">
+  <div class="flex items-end gap-1 h-32" title="square-root scale">
     {% for c in hours %}
       <div class="flex-1 flex flex-col items-center gap-1">
         <div class="w-full bg-emerald-500/80 rounded-t"
-             style="height: {{ (c / peak_hour * 100)|round(1) }}%; min-height: 1px;"
+             style="height: {{ ((c / peak_hour) ** 0.5 * 100)|round(1) }}%; min-height: 1px;"
              title="{{ loop.index0 }}:00 — {{ c }} detections"></div>
         <span class="text-[9px] text-zinc-600 tabular-nums">{{ "%02d"|format(loop.index0) }}</span>
       </div>
