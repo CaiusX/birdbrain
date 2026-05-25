@@ -378,10 +378,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             )
 
-        sites_for_map = [
-            {"name": s.name, "lat": s.lat, "lon": s.lon}
-            for s in sorted(sites.values(), key=lambda s: s.name)
-        ]
+        # Map pins: sites.toml entries (for multi-site OCR resolution) plus
+        # any single-site source that carries its own lat/lon (most do —
+        # runtime sources added via /admin always do). Sites.toml wins on
+        # name clash so the OCR aliases stay authoritative.
+        seen_map_names: set[str] = set()
+        sites_for_map: list[dict] = []
+        for s in sorted(sites.values(), key=lambda x: x.name):
+            sites_for_map.append({"name": s.name, "lat": s.lat, "lon": s.lon})
+            seen_map_names.add(s.name)
+        for src in sorted(sources_by_name.values(), key=lambda x: x.name):
+            if src.name in seen_map_names:
+                continue
+            if src.lat is None or src.lon is None:
+                continue
+            sites_for_map.append({"name": src.name, "lat": src.lat, "lon": src.lon})
+            seen_map_names.add(src.name)
         tiles_for_js = [
             {
                 "name": t.name,
