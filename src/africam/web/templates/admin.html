@@ -24,9 +24,6 @@
           if (event.detail.successful) {
             err.classList.add('hidden');
             this.reset();
-            document.getElementById('lat-input').value = '';
-            document.getElementById('lon-input').value = '';
-            document.getElementById('coord-readout').textContent = 'no location yet';
             window.__addSourceMap?.removeMarker();
             // Refresh the admin table so the new source shows up.
             htmx.ajax('GET', '/partials/admin', {target: '#admin-table', swap: 'outerHTML'});
@@ -95,19 +92,30 @@
         multi-site (rotates between cameras — needs OCR to detect the active one)
       </label>
 
-      <!-- Hidden fields populated by the map picker. -->
-      <input type="hidden" id="lat-input" name="lat">
-      <input type="hidden" id="lon-input" name="lon">
+      <div class="grid grid-cols-2 gap-3">
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">Latitude</span>
+          <input id="lat-input" name="lat" type="number" step="any" min="-90" max="90"
+                 placeholder="e.g. -24.276"
+                 class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
+        </label>
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">Longitude</span>
+          <input id="lon-input" name="lon" type="number" step="any" min="-180" max="180"
+                 placeholder="e.g. 31.307"
+                 class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
+        </label>
+      </div>
+      <p class="text-[11px] text-zinc-500 -mt-1">
+        type coordinates or click the map · the two stay in sync
+      </p>
 
-      <div class="flex items-center justify-between gap-2 pt-2 border-t border-zinc-800">
-        <span id="coord-readout" class="text-xs text-zinc-500 tabular-nums">no location yet</span>
-        <div class="flex items-center gap-2">
-          <button type="reset"
-                  onclick="window.__addSourceMap?.removeMarker(); document.getElementById('coord-readout').textContent='no location yet';"
-                  class="px-3 py-1.5 rounded text-xs border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</button>
-          <button type="submit"
-                  class="px-3 py-1.5 rounded text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium">add source</button>
-        </div>
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+        <button type="reset"
+                onclick="window.__addSourceMap?.removeMarker();"
+                class="px-3 py-1.5 rounded text-xs border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</button>
+        <button type="submit"
+                class="px-3 py-1.5 rounded text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium">add source</button>
       </div>
       <p id="add-source-error" class="hidden text-xs text-rose-400"></p>
     </div>
@@ -181,12 +189,13 @@
   let pickMarker = null;
   const latInput = document.getElementById('lat-input');
   const lonInput = document.getElementById('lon-input');
-  const readout = document.getElementById('coord-readout');
 
-  function setLocation(latlng) {
-    latInput.value = latlng.lat.toFixed(6);
-    lonInput.value = latlng.lng.toFixed(6);
-    readout.textContent = `${latlng.lat.toFixed(4)}, ${latlng.lng.toFixed(4)}`;
+  function writeInputs(latlng) {
+    // Round to 6 places for the input value, matching what the user would
+    // typically paste in. We don't update the inputs while they're focused
+    // — that would steal the cursor mid-edit.
+    if (document.activeElement !== latInput) latInput.value = latlng.lat.toFixed(6);
+    if (document.activeElement !== lonInput) lonInput.value = latlng.lng.toFixed(6);
   }
 
   function dropPin(latlng) {
@@ -194,12 +203,31 @@
       pickMarker.setLatLng(latlng);
     } else {
       pickMarker = L.marker(latlng, { icon: pickIcon, draggable: true }).addTo(map);
-      pickMarker.on('drag', (e) => setLocation(e.target.getLatLng()));
+      pickMarker.on('drag', (e) => writeInputs(e.target.getLatLng()));
     }
-    setLocation(latlng);
+    writeInputs(latlng);
+  }
+
+  function syncFromInputs() {
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+    const ll = L.latLng(lat, lon);
+    if (pickMarker) {
+      pickMarker.setLatLng(ll);
+    } else {
+      pickMarker = L.marker(ll, { icon: pickIcon, draggable: true }).addTo(map);
+      pickMarker.on('drag', (e) => writeInputs(e.target.getLatLng()));
+    }
+    // Pan only if the new pin is outside the current view, so light edits
+    // don't yank the map under the user.
+    if (!map.getBounds().contains(ll)) map.panTo(ll);
   }
 
   map.on('click', (e) => dropPin(e.latlng));
+  latInput.addEventListener('input', syncFromInputs);
+  lonInput.addEventListener('input', syncFromInputs);
 
   window.__addSourceMap = {
     removeMarker: () => {
