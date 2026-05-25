@@ -184,13 +184,16 @@
     map.setView([-24, 31], 5);
   }
 
-  // Pin that the user drops to set the new source's location.
+  // Pin that the user drops to set the new source's location. Larger and
+  // brighter than existing-site pins so it pops out even when dropped
+  // near the cluster of existing sites; z-offset puts it above their
+  // permanent tooltips.
   const pickIcon = L.divIcon({
-    className: 'site-pin',
-    html: `<div style="width:16px;height:16px;border-radius:50%;background:#10b981;` +
-          `border:2px solid #18181b;box-shadow:0 0 0 2px #10b98155;"></div>`,
-    iconSize: [16, 16],
-    iconAnchor: [8, 8],
+    className: 'site-pin pick-pin',
+    html: `<div style="width:22px;height:22px;border-radius:50%;background:#10b981;` +
+          `border:3px solid #ffffff;box-shadow:0 0 0 3px #10b98180, 0 2px 8px rgba(0,0,0,0.5);"></div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
   });
   let pickMarker = null;
   const latInput = document.getElementById('lat-input');
@@ -204,12 +207,27 @@
     if (document.activeElement !== lonInput) lonInput.value = latlng.lng.toFixed(6);
   }
 
+  function createPickMarker(latlng) {
+    const m = L.marker(latlng, {
+      icon: pickIcon,
+      draggable: true,
+      zIndexOffset: 1000,
+    }).addTo(map);
+    m.bindTooltip('new source', {
+      permanent: true,
+      direction: 'top',
+      offset: [0, -12],
+      className: 'site-label',
+    });
+    m.on('drag', (e) => writeInputs(e.target.getLatLng()));
+    return m;
+  }
+
   function dropPin(latlng) {
     if (pickMarker) {
       pickMarker.setLatLng(latlng);
     } else {
-      pickMarker = L.marker(latlng, { icon: pickIcon, draggable: true }).addTo(map);
-      pickMarker.on('drag', (e) => writeInputs(e.target.getLatLng()));
+      pickMarker = createPickMarker(latlng);
     }
     writeInputs(latlng);
   }
@@ -223,8 +241,7 @@
     if (pickMarker) {
       pickMarker.setLatLng(ll);
     } else {
-      pickMarker = L.marker(ll, { icon: pickIcon, draggable: true }).addTo(map);
-      pickMarker.on('drag', (e) => writeInputs(e.target.getLatLng()));
+      pickMarker = createPickMarker(ll);
     }
     // Pan only if the new pin is outside the current view, so light edits
     // don't yank the map under the user.
