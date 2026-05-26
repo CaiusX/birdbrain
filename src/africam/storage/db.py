@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from africam.detector.birdnet import Detection
@@ -58,6 +58,11 @@ class Database:
             ("species_notes", "generated_by", "TEXT"),
             ("species_notes", "evidence_signature", "TEXT"),
             ("species_notes", "detection_count_at_gen", "INTEGER"),
+            ("species_notes", "image_url", "TEXT"),
+            ("species_notes", "image_page_url", "TEXT"),
+            ("species_notes", "range_map_url", "TEXT"),
+            ("species_notes", "range_map_page_url", "TEXT"),
+            ("species_notes", "media_fetched_at", "TIMESTAMP"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
         ]
         with self.engine.begin() as conn:
@@ -281,6 +286,71 @@ class Database:
                 )
                 s.add(row)
             row.conservation_status = status
+
+    def set_species_media(
+        self,
+        scientific_name: str,
+        *,
+        common_name: str = "",
+        image_url: str | None = None,
+        image_page_url: str | None = None,
+        range_map_url: str | None = None,
+        range_map_page_url: str | None = None,
+    ) -> None:
+        """Cache Wikipedia photo + range-map URLs on the species row and stamp
+        media_fetched_at. Creates a minimal note row if needed (mirrors
+        set_species_status). Always stamps the timestamp — even when nothing was
+        found — so the sweeper won't keep retrying a species that has no map."""
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                row = SpeciesNoteRow(
+                    scientific_name=scientific_name,
+                    common_name=common_name or "",
+                    note="",
+                    updated_at=datetime.now(UTC),
+                )
+                s.add(row)
+            elif common_name and not row.common_name:
+                row.common_name = common_name
+            row.image_url = image_url
+            row.image_page_url = image_page_url
+            row.range_map_url = range_map_url
+            row.range_map_page_url = range_map_page_url
+            row.media_fetched_at = datetime.now(UTC)
+
+    def species_needing_media(
+        self, *, limit: int = 25, max_age_days: int = 30
+    ) -> list[tuple[str, str]]:
+        """Species seen in detections whose cached media is missing or stale —
+        (scientific_name, common_name) pairs for the background sweeper to fetch.
+        Covers new species automatically (no note row → media_fetched_at NULL)."""
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        with self._Session() as s:
+            seen = s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    func.max(DetectionRow.common_name),
+                ).group_by(DetectionRow.scientific_name)
+            ).all()
+            fetched = dict(
+                s.execute(
+                    select(
+                        SpeciesNoteRow.scientific_name,
+                        SpeciesNoteRow.media_fetched_at,
+                    )
+                ).all()
+            )
+        out: list[tuple[str, str]] = []
+        for sci, common in seen:
+            ts = fetched.get(sci)
+            if ts is not None and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts is None or ts < cutoff:
+                out.append((sci, common or ""))
+            if len(out) >= limit:
+                break
+        return out
 
     def delete_species_note(self, scientific_name: str) -> bool:
         with self._Session() as s, s.begin():

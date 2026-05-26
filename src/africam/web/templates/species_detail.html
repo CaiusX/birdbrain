@@ -6,7 +6,14 @@
 {% set sp_status = (status_by_sci or {}).get(scientific) %}
 {% from "_macros.html" import iucn_badge %}
 
-{% macro spectrogram_button(r) -%}
+{% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+{% endblock %}
+
+{% macro spectrogram_button(r, big=false) -%}
   {% set tz = (source_tz | default({})).get(r.source_name, 'UTC') %}
   <button type="button"
           data-spectrogram-trigger
@@ -17,12 +24,12 @@
           data-label="{{ r.label or '' }}"
           data-suggested="{{ r.suggested_species or '' }}"
           data-palette="{{ sp_palette }}"
-          class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
+          class="relative block w-full {{ 'h-28' if big else 'h-7' }} rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
           style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
           title="click to play">
-    <img src="/spectrograms/{{ r.id }}.png?p={{ sp_palette }}" alt=""
+    <img src="/spectrograms/{{ r.id }}.png?{{ 'size=large' if big else 'p=' ~ sp_palette }}" alt=""
          class="absolute inset-0 w-full h-full object-cover pointer-events-none" loading="lazy">
-    <span class="absolute inset-0 flex items-center justify-center text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
+    <span class="absolute {{ 'bottom-1 right-2' if big else 'inset-0 flex items-center justify-center' }} text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
       {{ "%.2f"|format(r.confidence) }}
     </span>
   </button>
@@ -46,6 +53,14 @@
         {% endif %}
       </h2>
       <div class="italic text-zinc-400 text-sm">{{ scientific }}</div>
+      {% if active_source %}
+        <div class="mt-2">
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-emerald-500/10 border border-emerald-500/40 text-emerald-300">
+            filtered to <span class="font-medium">{{ active_source }}</span>
+            <a href="/species/{{ scientific | urlencode }}" class="text-emerald-200/70 hover:text-white" title="show all sites">×</a>
+          </span>
+        </div>
+      {% endif %}
       {% if note and note.note %}
         <p class="mt-3 text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ note.note }}</p>
       {% endif %}
@@ -54,6 +69,69 @@
        target="_blank" rel="noopener"
        class="text-xs text-emerald-300 hover:text-emerald-200">Wikipedia ↗</a>
   </div>
+
+  {# Header media strip: photo + natural range map (both lazily fetched from
+     Wikipedia via /api/species_image) + a representative spectrogram. #}
+  {% set feature_clip = good_clips[0] if good_clips else (top_clips[0] if top_clips else none) %}
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-px bg-zinc-800/50 border-t border-zinc-800">
+    <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">photo</div>
+      <a id="species-photo-link" href="#" target="_blank" rel="noopener" class="inline-block" style="display:none">
+        <img id="species-photo" alt="" loading="lazy"
+             class="max-w-full max-h-44 rounded border border-zinc-800">
+      </a>
+      <div id="species-photo-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no photo</div>
+    </div>
+    <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">distribution <span class="normal-case text-zinc-600">· natural range</span></div>
+      <a id="species-range-link" href="#" target="_blank" rel="noopener" class="inline-block" style="display:none">
+        <img id="species-range" alt="" loading="lazy"
+             class="max-w-full max-h-44 rounded border border-zinc-800 bg-zinc-950">
+      </a>
+      <div id="species-range-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no range map</div>
+    </div>
+    <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">
+        distinctive spectrogram
+        {% if feature_clip %}<span class="normal-case text-zinc-600">· {{ 'labelled good' if good_clips else 'highest confidence' }}</span>{% endif %}
+      </div>
+      {% if feature_clip %}
+        {{ spectrogram_button(feature_clip, big=true) }}
+      {% else %}
+        <div class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no audio captured yet</div>
+      {% endif %}
+    </div>
+  </div>
+  <script>
+  (function () {
+    const qs = new URLSearchParams({ scientific: {{ scientific | tojson }} });
+    const common = {{ common_name | tojson }};
+    if (common) qs.set('common', common);
+    function show(linkId, imgId, emptyId, src, href) {
+      if (!src) return;  // leave the "no …" placeholder in place
+      const link = document.getElementById(linkId);
+      const img = document.getElementById(imgId);
+      const empty = document.getElementById(emptyId);
+      img.src = src;
+      link.href = href || '#';
+      // Toggle via inline style: Tailwind's .flex/.inline-block utilities
+      // override the [hidden] attribute, so the attribute alone won't hide
+      // the placeholder or reveal the link.
+      link.style.display = '';
+      if (empty) empty.style.display = 'none';
+    }
+    fetch('/api/species_image?' + qs.toString())
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        show('species-photo-link', 'species-photo', 'species-photo-empty',
+             data.thumbnail, data.page_url);
+        show('species-range-link', 'species-range', 'species-range-empty',
+             data.range_map, data.range_map_page || data.page_url);
+      })
+      .catch(() => { /* silent — placeholders remain */ });
+  })();
+  </script>
 
   <div class="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 flex-wrap text-xs">
     <label class="flex items-center gap-2 text-zinc-400">
@@ -139,6 +217,84 @@
     </div>
   </div>
 </section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3 flex-wrap">
+    <h3 class="text-sm uppercase tracking-wider text-zinc-400">
+      Where it's heard
+      <span class="text-zinc-500 normal-case text-xs ml-1">bubble size = detections per site · click to filter</span>
+    </h3>
+    <div class="flex items-center gap-3 text-xs">
+      <span class="text-zinc-400">
+        {% if active_source %}<span class="text-emerald-300">{{ active_source }}</span>{% else %}all sites{% endif %}
+      </span>
+      {% if all_sources %}
+        <form method="get" action="/species/{{ scientific | urlencode }}" onchange="this.submit()">
+          {% set filters = {'source': active_source} %}
+          {% include "_source_filter.html" %}
+        </form>
+      {% endif %}
+    </div>
+  </div>
+  {% if sites_for_map %}
+    <div id="species-map" class="w-full" style="height: 340px;"></div>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">No mapped locations for this species.</p>
+  {% endif %}
+</section>
+
+{% if sites_for_map %}
+<script>
+(function () {
+  const SITES = {{ sites_for_map | tojson }};
+  const ACTIVE = {{ active_source | tojson }};
+  const SCI = {{ scientific | tojson }};
+  const COLOR_ACTIVE = '#10b981';
+  const COLOR_DIM = '#71717a';
+
+  function speciesUrl(source) {
+    const base = '/species/' + encodeURIComponent(SCI);
+    return source ? base + '?source=' + encodeURIComponent(source) : base;
+  }
+
+  const map = L.map('species-map', { scrollWheelZoom: true });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap',
+    maxZoom: 18,
+  }).addTo(map);
+
+  const maxCount = Math.max(1, ...SITES.map(s => s.count));
+  const markers = [];
+  SITES.forEach(s => {
+    const isActive = ACTIVE && s.name === ACTIVE;
+    // Area ∝ frequency: radius scales with sqrt(count). 0-count sites stay a
+    // small faded dot so the full distribution is still visible.
+    const radius = s.count > 0 ? 6 + 20 * Math.sqrt(s.count / maxCount) : 4;
+    const color = isActive ? COLOR_ACTIVE : (ACTIVE ? COLOR_DIM : COLOR_ACTIVE);
+    const fillOpacity = s.count > 0 ? (isActive || !ACTIVE ? 0.55 : 0.25) : 0.12;
+    const m = L.circleMarker([s.lat, s.lon], {
+      radius,
+      color,
+      weight: isActive ? 3 : 1,
+      fillColor: color,
+      fillOpacity,
+    }).addTo(map);
+    m.bindTooltip(`${s.name} · ${s.count}`, {
+      permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
+    });
+    // Clicking the active site clears the filter; any other site applies it.
+    m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
+    markers.push(m);
+  });
+
+  if (markers.length > 0) {
+    map.fitBounds(L.featureGroup(markers).getBounds().pad(0.25));
+  } else {
+    map.setView([-24, 31], 6);
+  }
+})();
+</script>
+{% endif %}
 
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl">

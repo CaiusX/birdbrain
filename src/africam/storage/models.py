@@ -98,6 +98,16 @@ class SpeciesNoteRow(Base):
     # enough to be worth regenerating before the age-based trigger fires.
     evidence_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detection_count_at_gen: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Cached Wikipedia media URLs: a representative photo and the natural-range
+    # map. Populated lazily on first page view and proactively by the web
+    # process's background media sweeper. media_fetched_at stamps the last
+    # successful lookup attempt so we don't re-hit Wikipedia for species that
+    # simply have no range map, and can refresh periodically. NULL = never tried.
+    image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    image_page_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    range_map_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    range_map_page_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    media_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class WorkerHeartbeatRow(Base):

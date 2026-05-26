@@ -2,6 +2,9 @@
 {% block title %}Africam · review · {{ tab }}{% endblock %}
 
 {% block content %}
+{# Carry the review source filter through to species pages and the included
+   detection rows so a species click lands pre-scoped to the same site. #}
+{% set page_source = filters.source %}
 {# Shared header + tab strip. Both bodies live inline below — the
    spectrogram modal is included once at the bottom of the file. #}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">

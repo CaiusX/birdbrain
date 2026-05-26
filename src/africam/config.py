@@ -84,6 +84,11 @@ class AppConfig(BaseSettings):
     # grounded in our detection footprint. Dormant unless ANTHROPIC_API_KEY
     # is present in the process env.
     notes_enabled: bool = True
+    # Background sweeper (web process) that pre-fetches Wikipedia photo + range
+    # maps for every detected species and caches them on the species row, so
+    # the header media loads instantly and survives restarts. Needs only
+    # network access to Wikipedia (no API key).
+    media_cache_enabled: bool = True
     notes_model: str = "claude-haiku-4-5"
     notes_tick_seconds: int = 300
     notes_stale_days: int = 7

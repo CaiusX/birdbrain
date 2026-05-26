@@ -3,7 +3,7 @@
    Expects: rows (list of {"r": DetectionRow, "n": int, "latest": datetime}),
    source_tz; optionally note_tag_by_sci, palette_for_tag, default_palette,
    status_by_sci. #}
-{% from "_macros.html" import iucn_badge %}
+{% from "_macros.html" import iucn_badge, species_link %}
 {% if rows %}
   <table class="w-full text-sm">
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
@@ -41,7 +41,7 @@
           </td>
           <td class="px-5 py-2">
             <div class="font-medium flex items-center gap-1.5 flex-wrap">
-              <span>{{ r.common_name }}</span>
+              {{ species_link(r.common_name, r.scientific_name, source=page_source, cls="hover:text-emerald-300") }}
               {{ iucn_badge((status_by_sci or {}).get(r.scientific_name)) }}
             </div>
             <div class="italic text-zinc-500 text-xs hidden lg:block">{{ r.scientific_name }}</div>

@@ -1,5 +1,12 @@
 {# Shared Jinja macros. Imported with: {% from "_macros.html" import iucn_badge %} #}
 
+{# Link a species name to its detail page. `source` (optional) carries the
+   origin page's active site filter through to the detail page so it opens
+   pre-scoped to that site; omit it to land on the all-sites view. #}
+{% macro species_link(common, scientific, source=None, cls="") -%}
+<a href="/species/{{ scientific | urlencode }}{% if source %}?source={{ source | urlencode }}{% endif %}"{% if cls %} class="{{ cls }}"{% endif %}>{{ common }}</a>
+{%- endmacro %}
+
 {% set _IUCN_CLASS = {
   "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
   "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),

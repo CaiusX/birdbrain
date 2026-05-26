@@ -1,6 +1,6 @@
 {# expects: r (DetectionRow), source_tz (dict[str,str]),
    optionally: note_tag_by_sci, status_by_sci, palette_for_tag, default_palette #}
-{% from "_macros.html" import iucn_badge %}
+{% from "_macros.html" import iucn_badge, species_link %}
 {% set tz = source_tz.get(r.source_name, 'UTC') %}
 {% set lbl = r.label %}
 {% set sp_tag = (note_tag_by_sci or {}).get(r.scientific_name) %}
@@ -9,7 +9,7 @@
 <li id="audit-{{ r.id }}" class="px-5 py-2 grid grid-cols-1 md:grid-cols-12 gap-3 items-center hover:bg-zinc-800/30">
   <div class="md:col-span-5 min-w-0">
     <div class="text-sm font-medium text-zinc-100 truncate flex items-center gap-1.5 flex-wrap">
-      <span>{{ r.common_name }}</span>
+      {{ species_link(r.common_name, r.scientific_name, source=page_source, cls="hover:text-emerald-300") }}
       {{ iucn_badge(sp_status) }}
       <span class="text-xs italic text-zinc-500 font-normal ml-1">{{ r.scientific_name }}</span>
     </div>

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import species_link %}
 {% block title %}Africam · species{% endblock %}
 
 {% block content %}
@@ -39,8 +40,7 @@
           {% set tz = source_tz.get(s.sources[0], 'UTC') if s.sources else 'UTC' %}
           <tr class="hover:bg-zinc-800/40">
             <td class="px-5 py-2 font-medium">
-              <a href="/species/{{ s.scientific_name | urlencode }}"
-                 class="hover:text-emerald-300">{{ s.common_name }}</a>
+              {{ species_link(s.common_name, s.scientific_name, cls="hover:text-emerald-300") }}
             </td>
             <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ s.scientific_name }}</td>
             <td class="px-5 py-2 text-right tabular-nums">{{ s.n }}</td>

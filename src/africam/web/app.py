@@ -25,6 +25,7 @@ def _zone_info(tz_name: str) -> ZoneInfo:
     except ZoneInfoNotFoundError:
         return ZoneInfo("UTC")
 
+import structlog
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import (
     FileResponse,
@@ -212,6 +213,8 @@ def _build_tiles(sources: list[SourceConfig]) -> list[LiveTile]:
 _reanalyze_lock = threading.Lock()
 _reanalyze_state: dict = {"detector": None}
 
+log = structlog.get_logger("africam.web")
+
 
 def _get_reanalyze_detector():
     if _reanalyze_state["detector"] is None:
@@ -267,6 +270,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         for t in tiles:
             t.is_runtime = t.name in runtime_names  # type: ignore[attr-defined]
         return ordered, merged, tiles
+
+    def _map_sites(sources_by_name: dict[str, SourceConfig]) -> list[dict]:
+        """Map pins: sites.toml entries (for multi-site OCR resolution) plus any
+        single-site source that carries its own lat/lon (most do — runtime
+        sources added via /admin always do). Sites.toml wins on name clash so
+        the OCR aliases stay authoritative."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for site in sorted(sites.values(), key=lambda x: x.name):
+            out.append({"name": site.name, "lat": site.lat, "lon": site.lon})
+            seen.add(site.name)
+        for src in sorted(sources_by_name.values(), key=lambda x: x.name):
+            if src.name in seen or src.lat is None or src.lon is None:
+                continue
+            out.append({"name": src.name, "lat": src.lat, "lon": src.lon})
+            seen.add(src.name)
+        return out
 
     def _site_states(tiles: list[LiveTile], sources_by_name: dict[str, SourceConfig]) -> dict[str, dict]:
         out: dict[str, dict] = {}
@@ -378,22 +398,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             )
 
-        # Map pins: sites.toml entries (for multi-site OCR resolution) plus
-        # any single-site source that carries its own lat/lon (most do —
-        # runtime sources added via /admin always do). Sites.toml wins on
-        # name clash so the OCR aliases stay authoritative.
-        seen_map_names: set[str] = set()
-        sites_for_map: list[dict] = []
-        for s in sorted(sites.values(), key=lambda x: x.name):
-            sites_for_map.append({"name": s.name, "lat": s.lat, "lon": s.lon})
-            seen_map_names.add(s.name)
-        for src in sorted(sources_by_name.values(), key=lambda x: x.name):
-            if src.name in seen_map_names:
-                continue
-            if src.lat is None or src.lon is None:
-                continue
-            sites_for_map.append({"name": src.name, "lat": src.lat, "lon": src.lon})
-            seen_map_names.add(src.name)
+        sites_for_map = _map_sites(sources_by_name)
         tiles_for_js = [
             {
                 "name": t.name,
@@ -486,6 +491,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             {
                 "rows": rows,
                 "selected_source": source,
+                # Carry the feed's site filter to species pages only when it's
+                # unambiguous (exactly one source selected); otherwise links go
+                # to the all-sites species view.
+                "page_source": sources_filter[0] if len(sources_filter) == 1 else None,
                 "source_tz": source_tz,
                 **_note_tag_context(),
             },
@@ -755,7 +764,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         )
 
     @app.get("/species/{scientific:path}", response_class=HTMLResponse)
-    def species_detail(request: Request, scientific: str) -> HTMLResponse:
+    def species_detail(
+        request: Request,
+        scientific: str,
+        source: str | None = Query(default=None),
+    ) -> HTMLResponse:
         from collections import Counter
         _, sources_by_name, _ = _all_sources()
         with db.session() as s:
@@ -775,6 +788,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if all_rows
             else (note.common_name if note else scientific)
         )
+
+        # Per-site detection counts for the bubble map — across ALL sources,
+        # independent of the active filter so the map always shows the full
+        # geographic distribution.
+        site_counts = Counter(r.source_name for r in all_rows)
+
+        # Optional site filter: scope every stat/chart/clip below to one source.
+        active_source = source or None
+        if active_source:
+            all_rows = [r for r in all_rows if r.source_name == active_source]
 
         # Per-source breakdown.
         by_source: dict[str, list[DetectionRow]] = {}
@@ -849,6 +872,17 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             spread_clips = []
         good_clips = [r for r in all_rows if r.label == "good" and r.clip_path][:8]
 
+        # Map of every site this species could be heard at, sized by how often
+        # it actually was. Sites with a count of 0 still render (faded) so the
+        # full distribution is visible.
+        sites_for_map = [
+            {**site, "count": site_counts.get(site["name"], 0)}
+            for site in _map_sites(sources_by_name)
+        ]
+        # Sites where it was heard, most frequent first — drives the <select>
+        # fallback (and covers any source lacking map coordinates).
+        all_sources = [name for name, _ in site_counts.most_common()]
+
         return TEMPLATES.TemplateResponse(
             request,
             "species_detail.html",
@@ -856,6 +890,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "scientific": scientific,
                 "common_name": common_name,
                 "note": note,
+                "active_source": active_source,
+                "sites_for_map": sites_for_map,
+                "all_sources": all_sources,
                 "total": len(all_rows),
                 "max_conf": max((r.confidence for r in all_rows), default=0),
                 "source_summary": source_summary,
@@ -2204,6 +2241,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # Wikimedia's REST API.
     _wp_cache: dict[str, tuple[float, dict]] = {}
     _WP_TTL_SECONDS = 24 * 3600
+    # Durable DB-backed media cache: how long a persisted lookup stays fresh
+    # before the sweeper/endpoint will re-fetch from Wikipedia.
+    _MEDIA_DB_TTL_DAYS = 30
 
     # Open-Meteo hourly archive cache: (lat, lon, past_days, tz) → (expiry, json).
     # Their data updates hourly at most; 1h TTL is generous given how stale
@@ -2493,16 +2533,34 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "extract": (data.get("extract") or "")[:280],
         }
 
-    @app.get("/api/species_image")
-    def species_image(
-        scientific: str = Query(..., min_length=2, max_length=200),
-        common: str = Query(default="", max_length=200),
-    ) -> JSONResponse:
+    def _resolve_species_media(scientific: str, common: str = "") -> dict:
+        """Photo + range-map + IUCN status for a species, behind two cache
+        layers: a process-local 24h cache and a durable per-species row in the
+        DB (``media_fetched_at``). Only a live Wikipedia hit reaches the
+        network; the background sweeper warms the DB layer for every species."""
         key = scientific.strip().lower()
         now = time.monotonic()
         cached = _wp_cache.get(key)
         if cached and cached[0] > now:
-            return JSONResponse(cached[1])
+            return cached[1]
+        # Durable DB layer — skip Wikipedia entirely when we looked recently
+        # (even if the lookup found no map: media_fetched_at is stamped either
+        # way so we don't re-hit Wikipedia for species that simply have none).
+        row = db.get_species_note(scientific)
+        if row is not None and row.media_fetched_at is not None:
+            ts = row.media_fetched_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts > datetime.now(UTC) - timedelta(days=_MEDIA_DB_TTL_DAYS):
+                payload = {
+                    "thumbnail": row.image_url,
+                    "page_url": row.image_page_url,
+                    "range_map": row.range_map_url,
+                    "range_map_page": row.range_map_page_url,
+                    "conservation_status": row.conservation_status,
+                }
+                _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
+                return payload
         payload = (
             _wp_fetch(scientific)
             or _wp_fetch(common)
@@ -2524,19 +2582,34 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if status:
                 payload["conservation_status"] = status
             break
-        # Persist conservation status so row templates can show a badge
-        # without hitting Wikipedia per page render.
-        if payload.get("conservation_status"):
-            db.set_species_status(scientific, payload["conservation_status"])
-        # Only cache when we actually got *something* useful — otherwise a
-        # transient Wikipedia hiccup poisons the cache for 24h.
-        if (
+        # Persist only when we actually reached Wikipedia and got something —
+        # otherwise a transient hiccup would poison both caches (and stamp
+        # media_fetched_at, suppressing retries for 30 days).
+        useful = (
             payload.get("thumbnail")
             or payload.get("range_map")
             or payload.get("conservation_status")
-        ):
+        )
+        if useful:
+            if payload.get("conservation_status"):
+                db.set_species_status(scientific, payload["conservation_status"])
+            db.set_species_media(
+                scientific,
+                common_name=common,
+                image_url=payload.get("thumbnail"),
+                image_page_url=payload.get("page_url"),
+                range_map_url=payload.get("range_map"),
+                range_map_page_url=payload.get("range_map_page"),
+            )
             _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
-        return JSONResponse(payload)
+        return payload
+
+    @app.get("/api/species_image")
+    def species_image(
+        scientific: str = Query(..., min_length=2, max_length=200),
+        common: str = Query(default="", max_length=200),
+    ) -> JSONResponse:
+        return JSONResponse(_resolve_species_media(scientific, common))
 
     # Tokens (split on non-letter chars) that mark an image as a species range
     # map. We tokenize so 'range' doesn't match 'orange' and 'map' doesn't
@@ -2545,6 +2618,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     _RANGE_EXCLUDES = ("status_iucn", "commons-logo", "ooui_icon", "oojs_ui")
 
     _RANGE_SPLIT = re.compile(r"[^a-z0-9]+")
+    # BirdLife/IUCN range maps are commonly named "<Species>IUCNver2018.png" or
+    # "<Species>IUCN2019-2.png" — no 'range'/'map' token, so token-matching
+    # alone misses them. Catch "iucn" followed by "ver" or a 4-digit year. The
+    # small status icon ("Status iucn3.1 LC") has only "iucn3.1" after iucn, so
+    # it won't match (and is also skipped explicitly in _pick_range_map).
+    _RANGE_IUCN_RE = re.compile(r"iucn[ _]?(?:ver|\d{4})", re.IGNORECASE)
     # IUCN status icon filenames: "Status_iucn3.1_LC.svg", "Status_iucn_VU.svg",
     # legacy "Status_LC.svg". Code is the last all-caps token before .svg.
     _IUCN_STATUS_RE = re.compile(
@@ -2564,7 +2643,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         list_url = (
             "https://en.wikipedia.org/w/api.php"
             f"?action=query&prop=images&titles={title_enc}"
-            "&format=json&imlimit=80"
+            "&redirects=1&format=json&imlimit=80"
         )
         req = urllib.request.Request(
             list_url, headers={"User-Agent": "africam-bird/0.1"}
@@ -2597,19 +2676,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             tl = t.lower()
             if any(x in tl for x in _RANGE_EXCLUDES):
                 continue
+            if _IUCN_STATUS_RE.search(t):
+                continue  # the small conservation-status icon, not a range map
             tokens = {tk for tk in _RANGE_SPLIT.split(tl) if tk}
-            if tokens & _RANGE_TOKENS:
+            if (tokens & _RANGE_TOKENS) or _RANGE_IUCN_RE.search(tl):
                 candidates.append(t)
         if not candidates:
             return None
-        # Prefer 'distribution' over 'range' over plain 'map'.
+        # Prefer 'distribution' over 'range' over an IUCN range map over plain 'map'.
         def _rank(t: str) -> int:
             tl = t.lower()
             if "distribution" in tl:
                 return 0
             if "range" in tl:
                 return 1
-            return 2
+            if _RANGE_IUCN_RE.search(tl):
+                return 2
+            return 3
         candidates.sort(key=_rank)
         fname = candidates[0]
         fname_enc = urllib.parse.quote(fname.replace(" ", "_"))
@@ -2955,6 +3038,40 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Clip file missing")
         media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac"}
         return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "audio/wav"))
+
+    def _media_sweep_loop() -> None:
+        """Warm the durable media cache: fetch Wikipedia photo + range map for
+        every detected species that's missing or stale, then re-sweep on an
+        interval so newly-detected species get picked up too. Rate-limited to
+        stay polite to Wikimedia; all the heavy lifting (and the don't-refetch
+        stamping) lives in _resolve_species_media / set_species_media."""
+        time.sleep(20)  # let the app settle before reaching out to Wikipedia
+        batch = 25
+        while True:
+            drained = True
+            try:
+                todo = db.species_needing_media(
+                    limit=batch, max_age_days=_MEDIA_DB_TTL_DAYS
+                )
+                if todo:
+                    log.info("media_sweep.batch", count=len(todo))
+                for sci, common in todo:
+                    try:
+                        _resolve_species_media(sci, common)
+                    except Exception as e:  # one bad species shouldn't stall the sweep
+                        log.warning("media_sweep.species_failed", sci=sci, error=str(e)[:200])
+                    time.sleep(1.5)  # be gentle on Wikimedia's API
+                # A full batch means more backlog likely remains — keep draining
+                # promptly; otherwise idle and just re-check for new species.
+                drained = len(todo) < batch
+            except Exception as e:
+                log.warning("media_sweep.tick_failed", error=str(e)[:200])
+            time.sleep(1800 if drained else 30)
+
+    if cfg.media_cache_enabled:
+        threading.Thread(
+            target=_media_sweep_loop, name="media-sweeper", daemon=True
+        ).start()
 
     return app
 

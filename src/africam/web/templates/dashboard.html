@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import species_link %}
 {% block title %}Africam · dashboard{% endblock %}
 
 {% block head_extra %}
@@ -72,7 +73,7 @@
         {% for r in top_recent %}
           <li class="py-2 flex items-baseline justify-between">
             <div>
-              <span class="font-medium">{{ r.common_name }}</span>
+              {{ species_link(r.common_name, r.scientific_name, cls="font-medium hover:text-emerald-300") }}
               <span class="text-zinc-500 italic text-sm ml-2">{{ r.scientific_name }}</span>
             </div>
             <div class="text-sm tabular-nums">

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import species_link %}
 {% block title %}Africam · rollup{% endblock %}
 
 {% block content %}
@@ -84,7 +85,7 @@
         <tbody class="divide-y divide-zinc-800">
           {% for sp in s.species %}
             <tr class="hover:bg-zinc-800/40">
-              <td class="px-5 py-2 font-medium">{{ sp.common }}</td>
+              <td class="px-5 py-2 font-medium">{{ species_link(sp.common, sp.scientific, cls="hover:text-emerald-300") }}</td>
               <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ sp.scientific }}</td>
               <td class="px-5 py-2 text-right tabular-nums">{{ sp.count }}</td>
               <td class="px-5 py-2 text-right tabular-nums">
@@ -122,7 +123,7 @@
             <tbody>
               {% for sp in s.species %}
                 <tr>
-                  <td class="pr-3 py-0.5 whitespace-nowrap text-zinc-300">{{ sp.common }}</td>
+                  <td class="pr-3 py-0.5 whitespace-nowrap text-zinc-300">{{ species_link(sp.common, sp.scientific, cls="hover:text-emerald-300") }}</td>
                   {% for c in sp.hours %}
                     {% set alpha = (c / sp.peak_hour) if c > 0 else 0 %}
                     <td class="w-5 h-4 px-0.5 py-0.5 text-center text-zinc-200"
