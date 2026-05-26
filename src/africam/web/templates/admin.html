@@ -10,6 +10,18 @@
 
 {% block content %}
 
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">System health
+      <span class="text-zinc-500 text-xs ml-1 normal-case">Raspberry Pi</span>
+    </h2>
+  </div>
+  <div id="system-health" class="p-3"
+       hx-get="/partials/health" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "_system_health.html" %}
+  </div>
+</section>
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">

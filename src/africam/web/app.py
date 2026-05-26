@@ -4,6 +4,7 @@ import functools
 import json
 import math
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -40,6 +41,7 @@ from sqlalchemy import and_, case, desc, func, or_, select
 
 from africam import weather as weather_module
 from africam.config import AppConfig, SourceConfig, load_sources
+from africam.host import host_metrics
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
 from africam.storage import (
@@ -1104,6 +1106,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "default_lon": round(default_lon, 6),
         }
 
+    def _hb_status(
+        heartbeat: WorkerHeartbeatRow | None, now: datetime
+    ) -> tuple[str, int | None, str | None, str | None]:
+        """Derive a worker's health from its heartbeat row.
+        Returns (status, seconds_since_heartbeat, raw_state, last_error)."""
+        if heartbeat is None:
+            return "never", None, None, None
+        hb_at = heartbeat.last_heartbeat_at
+        if hb_at.tzinfo is None:
+            hb_at = hb_at.replace(tzinfo=UTC)
+        since_s = max(0, int((now - hb_at).total_seconds()))
+        state = heartbeat.state
+        error = heartbeat.last_error
+        if state == "running" and since_s < 60:
+            status = "running"
+        elif state == "backoff":
+            status = "backoff"
+        elif state == "stopped":
+            status = "stopped"
+        else:
+            status = "stale"
+        return status, since_s, state, error
+
     def _admin_row(
         cfg_src: SourceConfig,
         runtime_row,
@@ -1114,30 +1139,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     ) -> dict:
         is_runtime = runtime_row is not None
         if deleted:
-            status = "disabled"
-            since_s = None
-            error = None
-            state = None
-        elif heartbeat is None:
-            status = "never"
-            since_s = None
-            error = None
-            state = None
+            status, since_s, state, error = "disabled", None, None, None
         else:
-            hb_at = heartbeat.last_heartbeat_at
-            if hb_at.tzinfo is None:
-                hb_at = hb_at.replace(tzinfo=UTC)
-            since_s = max(0, int((now - hb_at).total_seconds()))
-            state = heartbeat.state
-            error = heartbeat.last_error
-            if state == "running" and since_s < 60:
-                status = "running"
-            elif state == "backoff":
-                status = "backoff"
-            elif state == "stopped":
-                status = "stopped"
-            else:
-                status = "stale"
+            status, since_s, state, error = _hb_status(heartbeat, now)
         return {
             "name": cfg_src.name,
             "kind": cfg_src.kind,
@@ -1156,14 +1160,79 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "error": error,
         }
 
+    def _health_view() -> dict:
+        """Raspberry Pi host health for the admin page: CPU load, memory, SoC
+        temperature, throttling/under-voltage, uptime and storage headroom —
+        plus worker liveness and detection freshness as data-flow signals."""
+        now = datetime.now(UTC)
+        ordered, _, _ = _all_sources()
+        heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        workers_running = 0
+        problems: list[dict] = []
+        for cfg_src in ordered:
+            status, since_s, _, error = _hb_status(heartbeats.get(cfg_src.name), now)
+            if status == "running":
+                workers_running += 1
+            else:
+                problems.append(
+                    {"name": cfg_src.name, "status": status, "since_s": since_s, "error": error}
+                )
+
+        with db.session() as s:
+            last_det = s.execute(select(func.max(DetectionRow.started_at))).scalar()
+            det_24h = s.execute(
+                select(func.count(DetectionRow.id)).where(
+                    DetectionRow.started_at >= now - timedelta(hours=24)
+                )
+            ).scalar() or 0
+
+        last_det_age_s = None
+        if last_det is not None:
+            if last_det.tzinfo is None:
+                last_det = last_det.replace(tzinfo=UTC)
+            last_det_age_s = max(0, int((now - last_det).total_seconds()))
+
+        # Storage headroom for the filesystem holding the clips + DB (O(1) — no
+        # tree walk) plus the SQLite file size.
+        try:
+            target = clips_root if clips_root.exists() else clips_root.parent
+            du = shutil.disk_usage(target)
+            disk = {"total": du.total, "used": du.used, "free": du.free}
+        except OSError:
+            disk = None
+        db_path = Path(cfg.db_url.removeprefix("sqlite:///"))
+        db_bytes = db_path.stat().st_size if db_path.exists() else None
+
+        return {
+            "health": {
+                "now": now,
+                "host": host_metrics(),
+                "disk": disk,
+                "db_bytes": db_bytes,
+                "workers_running": workers_running,
+                "workers_total": len(ordered),
+                "worker_problems": problems,
+                "last_det_age_s": last_det_age_s,
+                "det_24h": det_24h,
+            }
+        }
+
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request) -> HTMLResponse:
-        return TEMPLATES.TemplateResponse(request, "admin.html", _admin_view())
+        return TEMPLATES.TemplateResponse(
+            request, "admin.html", {**_admin_view(), **_health_view()}
+        )
 
     @app.get("/partials/admin", response_class=HTMLResponse)
     def admin_partial(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
             request, "_admin_table.html", _admin_view()
+        )
+
+    @app.get("/partials/health", response_class=HTMLResponse)
+    def health_partial(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request, "_system_health.html", _health_view()
         )
 
     @app.get("/rollup", response_class=HTMLResponse)
