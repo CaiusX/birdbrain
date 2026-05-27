@@ -290,6 +290,117 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             seen.add(src.name)
         return out
 
+    def _front_activity(
+        sources_by_name: dict[str, SourceConfig],
+    ) -> tuple[list[dict], dict]:
+        """Front-page activity: per mapped site, the count of unique species
+        heard in the last 24h (drives the map bubbles) and the most-recently-
+        heard distinct species (with age, for the by-site panel + popups).
+        Also returns headline stats. Sites with no recent detections come back
+        with species_24h=0 so they still render (faded) on the map."""
+        now = datetime.now(UTC)
+        since = now - timedelta(hours=24)
+        recent_n = 6
+        with db.session() as s:
+            grouped = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    DetectionRow.scientific_name,
+                    func.max(DetectionRow.common_name),
+                    func.max(DetectionRow.started_at),
+                )
+                .where(DetectionRow.started_at >= since)
+                .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+            ).all()
+            ts_rows = s.execute(
+                select(DetectionRow.source_name, DetectionRow.started_at)
+                .where(DetectionRow.started_at >= since)
+            ).all()
+            last_det = s.execute(select(func.max(DetectionRow.started_at))).scalar()
+
+        # tz per source (cached) — drives source-local hour bucketing + bands.
+        tz_cache: dict[str, ZoneInfo] = {}
+
+        def _site_tz(name: str) -> ZoneInfo:
+            if name not in tz_cache:
+                cfg = sources_by_name.get(name)
+                tz_cache[name] = _zone_info(cfg.timezone if cfg else "UTC")
+            return tz_cache[name]
+
+        # Per-source 24h hour-of-day histogram (in the source's local time).
+        per_hours: dict[str, list[int]] = {}
+        for src, ts in ts_rows:
+            aware = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+            per_hours.setdefault(src, [0] * 24)[aware.astimezone(_site_tz(src)).hour] += 1
+        det_24h = len(ts_rows)
+
+        per_source: dict[str, list[dict]] = {}
+        species_seen: set[str] = set()
+        for src, sci, common, last_seen in grouped:
+            species_seen.add(sci)
+            seen_at = last_seen if last_seen.tzinfo else last_seen.replace(tzinfo=UTC)
+            per_source.setdefault(src, []).append(
+                {"sci": sci, "common": common, "last_seen": seen_at}
+            )
+
+        activity: list[dict] = []
+        for site in _map_sites(sources_by_name):
+            name = site["name"]
+            sp = sorted(
+                per_source.get(name, []),
+                key=lambda x: x["last_seen"],
+                reverse=True,
+            )
+            hours_arr = per_hours.get(name, [0] * 24)
+            tz = _site_tz(name)
+            local_now = now.astimezone(tz)
+            bands = (
+                _solar_bands(local_now.date(), site["lat"], site["lon"], tz)
+                if site["lat"] is not None and site["lon"] is not None
+                else []
+            )
+            activity.append({
+                "name": name,
+                "lat": site["lat"],
+                "lon": site["lon"],
+                "species_24h": len(sp),
+                # 24h activity clock for this site — a simplified dial sized
+                # by species count on the map, expanded in the click popup.
+                "dial_svg": _radial_dial_svg(
+                    hours_arr, highlight=local_now.hour, bands=bands, compact=True
+                ),
+                "recent": [
+                    {
+                        "sci": x["sci"],
+                        "common": x["common"],
+                        "age_s": max(0, int((now - x["last_seen"]).total_seconds())),
+                    }
+                    for x in sp[:recent_n]
+                ],
+            })
+
+        last_age = None
+        if last_det is not None:
+            if last_det.tzinfo is None:
+                last_det = last_det.replace(tzinfo=UTC)
+            last_age = max(0, int((now - last_det).total_seconds()))
+
+        heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        ordered = list(sources_by_name.values())
+        cams_live = sum(
+            1
+            for c in ordered
+            if _hb_status(heartbeats.get(c.name), now)[0] == "running"
+        )
+        stats = {
+            "species_24h": len(species_seen),
+            "det_24h": det_24h,
+            "cams_live": cams_live,
+            "cams_total": len(ordered),
+            "last_age_s": last_age,
+        }
+        return activity, stats
+
     def _site_states(tiles: list[LiveTile], sources_by_name: dict[str, SourceConfig]) -> dict[str, dict]:
         out: dict[str, dict] = {}
         for tile in tiles:
@@ -377,30 +488,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             )
             rows = _group_detections(raw, group_minutes * 60)[:50]
-            row_sources = list(
-                s.scalars(
-                    select(DetectionRow.source_name)
-                    .group_by(DetectionRow.source_name)
-                    .order_by(DetectionRow.source_name)
-                )
-            )
-            since = datetime.now(UTC) - timedelta(hours=1)
-            top_recent = list(
-                s.execute(
-                    select(
-                        DetectionRow.common_name,
-                        DetectionRow.scientific_name,
-                        func.count().label("n"),
-                        func.max(DetectionRow.confidence).label("max_conf"),
-                    )
-                    .where(DetectionRow.started_at >= since)
-                    .group_by(DetectionRow.common_name, DetectionRow.scientific_name)
-                    .order_by(desc("n"))
-                    .limit(10)
-                )
-            )
 
-        sites_for_map = _map_sites(sources_by_name)
+        sites_activity, front_stats = _front_activity(sources_by_name)
         tiles_for_js = [
             {
                 "name": t.name,
@@ -419,13 +508,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "dashboard.html",
             {
                 "rows": rows,
-                "sources": row_sources,
-                "top_recent": top_recent,
-                "selected_source": None,
                 "tiles": tiles,
                 "tiles_json": tiles_for_js,
                 "sites": sorted(sites.values(), key=lambda s: s.name),
-                "sites_json": sites_for_map,
+                "sites_activity": sites_activity,
+                "front_stats": front_stats,
                 "site_states": _site_states(tiles, sources_by_name),
                 "source_tz": source_tz,
                 "latest_brief": latest_brief,
@@ -2430,6 +2517,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         hours: list[int],
         highlight: int | None = None,
         bands: list[dict] | None = None,
+        compact: bool = False,
     ) -> str:
         """Render a 24-hour radial bar dial as inline SVG.
 
@@ -2438,7 +2526,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         fractional-hour edges. Foreground = one emerald wedge per hour with
         length ∝ detection count; the ``highlight`` hour gets an amber
         stroke. All geometry is computed here so the template stays
-        declarative."""
+        declarative.
+
+        ``compact`` drops the night-sky constellation and the hour labels and
+        tightens the viewBox — for small map markers where that detail just
+        reads as noise."""
         W, H = 220, 220
         cx, cy = W / 2.0, H / 2.0
         r_in, r_out = 26.0, 90.0
@@ -2453,8 +2545,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         def _dial_angle(h: float) -> float:
             return -math.pi / 2 + (h - 12.0) * slice_rad
 
+        # Compact crops the label margin so the dial fills the marker box.
+        view_box = "16 16 188 188" if compact else f"0 0 {W} {H}"
         parts: list[str] = [
-            f'<svg viewBox="0 0 {W} {H}" '
+            f'<svg viewBox="{view_box}" '
             f'width="{W}" height="{H}" '
             f'class="block mx-auto" '
             f'style="max-width:220px;height:auto">',
@@ -2492,7 +2586,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     f'<path d="{d}" fill="{fill}" '
                     f'fill-opacity="{opacity:.2f}"/>'
                 )
-                if b.get("name") == "night":
+                if b.get("name") == "night" and not compact:
                     # Pick the constellation that's high in the sky during
                     # this part of the night for southern Africa in May:
                     # Scorpius dominates the morning hours, Crux dominates
@@ -2547,25 +2641,27 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 f"L {x2i:.2f} {y2i:.2f} "
                 f"A {r_in:.2f} {r_in:.2f} 0 0 0 {x1i:.2f} {y1i:.2f} Z"
             )
-            title = f"{h:02d}:00 · {hours[h]} detections"
+            title_el = (
+                "" if compact else f"<title>{h:02d}:00 · {hours[h]} detections</title>"
+            )
             parts.append(
                 f'<path d="{d}" fill="{fill}" '
-                f'fill-opacity="{opacity:.2f}"{stroke_attr}>'
-                f"<title>{title}</title></path>"
+                f'fill-opacity="{opacity:.2f}"{stroke_attr}>{title_el}</path>'
             )
 
-        for h, label in ((0, "00"), (6, "06"), (12, "12"), (18, "18")):
-            # Labels sit at the hour boundary (not wedge center) so the
-            # cardinal hours land exactly at top/right/bottom/left.
-            a = _dial_angle(h)
-            x = cx + math.cos(a) * (r_out + 12)
-            y = cy + math.sin(a) * (r_out + 12)
-            parts.append(
-                f'<text x="{x:.2f}" y="{y:.2f}" '
-                f'text-anchor="middle" dominant-baseline="middle" '
-                f'fill="#71717a" font-size="10" '
-                f'font-family="ui-sans-serif, system-ui">{label}</text>'
-            )
+        if not compact:
+            for h, label in ((0, "00"), (6, "06"), (12, "12"), (18, "18")):
+                # Labels sit at the hour boundary (not wedge center) so the
+                # cardinal hours land exactly at top/right/bottom/left.
+                a = _dial_angle(h)
+                x = cx + math.cos(a) * (r_out + 12)
+                y = cy + math.sin(a) * (r_out + 12)
+                parts.append(
+                    f'<text x="{x:.2f}" y="{y:.2f}" '
+                    f'text-anchor="middle" dominant-baseline="middle" '
+                    f'fill="#71717a" font-size="10" '
+                    f'font-family="ui-sans-serif, system-ui">{label}</text>'
+                )
 
         parts.append("</svg>")
         return "".join(parts)

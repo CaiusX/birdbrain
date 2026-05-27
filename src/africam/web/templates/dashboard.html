@@ -7,9 +7,49 @@
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<style>
+  /* Each map marker is a 24h activity clock (the dial SVG), scaled to the
+     marker box; the SVG's own width/max-width are overridden so it fills. */
+  .leaflet-marker-icon.site-dial { background: transparent; border: none; }
+  .map-dial svg { width: 100% !important; height: 100% !important; max-width: none !important; }
+  .map-dial { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); cursor: pointer; }
+</style>
 {% endblock %}
 
+{%- macro ago(s) -%}
+  {%- if s is none -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h
+  {%- else -%}{{ (s // 86400)|int }}d
+  {%- endif -%}
+{%- endmacro -%}
+
 {% block content %}
+{% set st = front_stats %}
+
+{# ---- 1. headline stats ---- #}
+<section class="grid grid-cols-2 md:grid-cols-4 gap-px bg-zinc-800/50 rounded-xl overflow-hidden border border-zinc-800 mb-6">
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">species · 24h</div>
+    <div class="text-2xl font-semibold tabular-nums text-emerald-300">{{ st.species_24h }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">detections · 24h</div>
+    <div class="text-2xl font-semibold tabular-nums">{{ "{:,}".format(st.det_24h) }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">cams live</div>
+    {% set wc = 'text-emerald-300' if st.cams_live == st.cams_total and st.cams_total > 0 else ('text-rose-300' if st.cams_live == 0 else 'text-amber-300') %}
+    <div class="text-2xl font-semibold tabular-nums {{ wc }}">{{ st.cams_live }}/{{ st.cams_total }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">last detection</div>
+    {% set dc = 'text-zinc-600' if st.last_age_s is none else ('text-emerald-300' if st.last_age_s < 900 else ('text-amber-300' if st.last_age_s < 3600 else 'text-rose-300')) %}
+    <div class="text-2xl font-semibold tabular-nums {{ dc }}">{{ ago(st.last_age_s) }}{% if st.last_age_s is not none %}<span class="text-sm text-zinc-500"> ago</span>{% endif %}</div>
+  </div>
+</section>
+
 {% if latest_brief %}
 <section class="mb-6 bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4">
   <header class="flex items-baseline justify-between flex-wrap gap-2 mb-2">
@@ -23,85 +63,49 @@
 </section>
 {% endif %}
 
-<section class="mb-6">
-  <div class="flex flex-wrap items-center gap-3 mb-4">
-    <label for="active-source" class="text-sm uppercase tracking-wider text-zinc-400">Active source</label>
-    <select id="active-source"
-            class="bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-sm">
-      {% for t in tiles %}
-        <option value="{{ t.name }}">{{ t.name }} · {{ t.kind }}{% if t.multisite %} · multisite{% endif %}</option>
+{# ---- 2. activity map hero + by-site panel ---- #}
+<section class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+  <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+    <div class="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
+      <span class="text-sm uppercase tracking-wider text-zinc-400">Activity · last 24h</span>
+      <span class="text-xs text-zinc-500">clock = hourly activity · size = unique species · click to expand</span>
+    </div>
+    <div id="map" class="w-full" style="height: 460px;"></div>
+  </div>
+
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
+    <div class="px-4 py-2 border-b border-zinc-800">
+      <span class="text-sm uppercase tracking-wider text-zinc-400">By site</span>
+      <span class="text-xs text-zinc-500 ml-1">most recent species · 24h</span>
+    </div>
+    <div class="divide-y divide-zinc-800 overflow-y-auto" style="max-height: 426px;">
+      {% for site in sites_activity %}
+        <div class="px-4 py-3">
+          <div class="flex items-baseline justify-between gap-2">
+            <a href="/site/{{ site.name | urlencode }}" class="text-sm font-medium text-zinc-100 hover:text-emerald-300 truncate">{{ site.name }}</a>
+            <span class="text-xs tabular-nums {{ 'text-emerald-300' if site.species_24h else 'text-zinc-600' }} shrink-0">
+              {{ site.species_24h }} <span class="text-zinc-500">sp</span>
+            </span>
+          </div>
+          {% if site.recent %}
+            <div class="mt-1.5 flex flex-wrap gap-1">
+              {% for sp in site.recent %}
+                <span class="inline-flex items-baseline gap-1 px-1.5 py-0.5 rounded bg-zinc-800/60 border border-zinc-700/60 text-xs">
+                  {{ species_link(sp.common, sp.sci, cls="text-zinc-200 hover:text-emerald-300") }}
+                  <span class="text-[10px] text-zinc-500 tabular-nums">{{ ago(sp.age_s) }}</span>
+                </span>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="mt-1 text-xs text-zinc-600">no detections in 24h</div>
+          {% endif %}
+        </div>
       {% endfor %}
-      <option value="__all__">— all sources (no video) —</option>
-    </select>
-    <a id="active-open" href="#" target="_blank" rel="noopener"
-       class="text-xs text-zinc-400 hover:text-zinc-200">↗ open original</a>
-  </div>
-
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-    <div id="video-panel" class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div class="aspect-video bg-black">
-        <iframe id="active-video"
-                class="w-full h-full"
-                src="about:blank"
-                frameborder="0"
-                allow="autoplay; encrypted-media; picture-in-picture"
-                allowfullscreen
-                referrerpolicy="strict-origin-when-cross-origin"></iframe>
-      </div>
-      <div id="active-site-panel"
-           class="border-t border-zinc-800"
-           hx-trigger="every 30s"
-           hx-swap="innerHTML">
-      </div>
-    </div>
-
-    <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div class="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
-        <span class="text-sm uppercase tracking-wider text-zinc-400">Sites</span>
-        <span class="text-xs text-zinc-500">click a pin to set the active source's site</span>
-      </div>
-      <div id="map" class="w-full" style="height: 360px;"></div>
     </div>
   </div>
 </section>
 
-<section class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-  <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400 mb-3">Top species · last hour</h2>
-    {% if top_recent %}
-      <ul class="divide-y divide-zinc-800">
-        {% for r in top_recent %}
-          <li class="py-2 flex items-baseline justify-between">
-            <div>
-              {{ species_link(r.common_name, r.scientific_name, cls="font-medium hover:text-emerald-300") }}
-              <span class="text-zinc-500 italic text-sm ml-2">{{ r.scientific_name }}</span>
-            </div>
-            <div class="text-sm tabular-nums">
-              <span class="text-zinc-400 mr-3">max {{ "%.2f"|format(r.max_conf) }}</span>
-              <span class="font-semibold">{{ r.n }}</span>
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="text-zinc-500 text-sm">No detections in the last hour.</p>
-    {% endif %}
-  </div>
-
-  <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-5">
-    <div class="flex items-baseline justify-between mb-3">
-      <h2 class="text-sm uppercase tracking-wider text-zinc-400">Sources</h2>
-      <span class="text-xs text-zinc-500">add takes ~15s to start</span>
-    </div>
-    <div id="sources-panel"
-         hx-get="/partials/sources"
-         hx-trigger="load, every 30s"
-         hx-swap="innerHTML">
-    </div>
-    <a href="/admin" class="mt-3 inline-block text-xs text-zinc-400 hover:text-zinc-100">+ manage sources →</a>
-  </div>
-</section>
-
+{# ---- 3. live detections feed ---- #}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex flex-col gap-2">
     <div class="flex items-center justify-between flex-wrap gap-2">
@@ -158,11 +162,47 @@
   </div>
 </section>
 
+{# ---- 4. watch live (collapsible) ---- #}
+<details class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6 group">
+  <summary class="px-5 py-3 cursor-pointer select-none flex items-center gap-3 text-sm uppercase tracking-wider text-zinc-400 hover:text-zinc-200">
+    <span class="text-zinc-500 group-open:rotate-90 transition-transform">▸</span>
+    Watch live
+    <span class="normal-case text-xs text-zinc-500">embed a source's stream</span>
+  </summary>
+  <div class="px-5 pb-5">
+    <div class="flex flex-wrap items-center gap-3 mb-3">
+      <label for="active-source" class="text-xs uppercase tracking-wider text-zinc-500">source</label>
+      <select id="active-source"
+              class="bg-zinc-950 border border-zinc-700 rounded px-3 py-1.5 text-sm">
+        {% for t in tiles %}
+          <option value="{{ t.name }}">{{ t.name }} · {{ t.kind }}{% if t.multisite %} · multisite{% endif %}</option>
+        {% endfor %}
+        <option value="__all__">— none —</option>
+      </select>
+      <a id="active-open" href="#" target="_blank" rel="noopener"
+         class="text-xs text-zinc-400 hover:text-zinc-200">↗ open original</a>
+    </div>
+    <div id="video-panel" class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden max-w-3xl">
+      <div class="aspect-video bg-black">
+        <iframe id="active-video"
+                class="w-full h-full"
+                src="about:blank"
+                frameborder="0"
+                allow="autoplay; encrypted-media; picture-in-picture"
+                allowfullscreen
+                referrerpolicy="strict-origin-when-cross-origin"></iframe>
+      </div>
+      <div id="active-site-panel" class="border-t border-zinc-800"
+           hx-trigger="every 30s" hx-swap="innerHTML"></div>
+    </div>
+  </div>
+</details>
+
 {% include "_spectrogram_modal.html" %}
 
 <script>
   const TILES = {{ tiles_json | tojson }};
-  const SITES = {{ sites_json | tojson }};
+  const SITES = {{ sites_activity | tojson }};
   const TILE_BY_NAME = Object.fromEntries(TILES.map(t => [t.name, t]));
 
   const ACTIVE_KEY  = 'africam.activeSource';
@@ -171,10 +211,13 @@
   const TOPSP_KEY   = 'africam.topSpecies';
   const SOURCES_KEY = 'africam.detectionSources';
 
-  // --- Detection-source multi-select chips ---
+  function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
 
-  // localStorage: null = "all sources" (default); otherwise an array of
-  // selected source names. Stored as JSON.
+  // --- Detection-source multi-select chips ---
   function loadSourceFilter() {
     const raw = localStorage.getItem(SOURCES_KEY);
     if (!raw) return null;
@@ -189,13 +232,11 @@
     const all = TILES.map((t) => t.name);
     const f = loadSourceFilter();
     if (f === null) return all;
-    // Drop anything not in the current TILES (a source could have been removed).
     return f.filter((n) => all.includes(n));
   }
 
   function renderSourceChips() {
     const wrap = document.getElementById('source-chips');
-    // Strip everything after the "sources" label.
     while (wrap.children.length > 1) wrap.removeChild(wrap.lastChild);
     const all = TILES.map((t) => t.name);
     const sel = new Set(selectedSources());
@@ -218,7 +259,6 @@
       });
       wrap.appendChild(chip);
     }
-    // "all" reset chip — only useful when the selection differs from default.
     if (sel.size !== all.length) {
       const reset = document.createElement('button');
       reset.type = 'button';
@@ -252,75 +292,74 @@
     const sel = selectedSources();
     const all = TILES.map((t) => t.name);
     let label;
-    if (sel.length === 0)         label = '(no sources)';
+    if (sel.length === 0)               label = '(no sources)';
     else if (sel.length === all.length) label = 'all sources';
-    else if (sel.length === 1)    label = sel[0];
-    else                          label = sel.length + ' sources';
+    else if (sel.length === 1)          label = sel[0];
+    else                                label = sel.length + ' sources';
     document.getElementById('rows-source-label').textContent = label;
     htmx.process(list);
     htmx.ajax('GET', list.getAttribute('hx-get'), {target: list, swap: 'innerHTML'});
   }
 
-  // --- Map setup ---
+  // --- Activity map: bubbles sized by unique species in last 24h ---
   const map = L.map('map', { scrollWheelZoom: true });
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap',
     maxZoom: 18,
   }).addTo(map);
 
-  const dotIcon = (color) => L.divIcon({
-    className: 'site-pin',
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};` +
-          `border:2px solid #18181b;box-shadow:0 0 0 1px ${color};"></div>`,
-    iconSize: [14, 14],
-    iconAnchor: [7, 7],
-  });
-  const COLOR_DEFAULT = '#71717a';
-  const COLOR_ACTIVE  = '#10b981';
+  // Marker diameter scales proportionally with unique-species count (with a
+  // small floor so empty/quiet sites stay clickable, and a cap so a runaway
+  // site doesn't dominate); the simplified dial inside shows when they were
+  // heard. So size = how many species, dial shape = at what hours.
+  function dialSize(n) { return Math.min(118, Math.max(34, Math.round(1.4 * n))); }
 
   const markers = {};
   SITES.forEach(s => {
-    const m = L.marker([s.lat, s.lon], { icon: dotIcon(COLOR_DEFAULT) }).addTo(map);
-    m.bindPopup(() => buildSitePopup(s));
-    m.bindTooltip(s.name, {
-      permanent: true,
-      direction: 'right',
-      offset: [10, 0],
-      className: 'site-label',
+    const size = dialSize(s.species_24h);
+    const icon = L.divIcon({
+      className: 'site-dial',
+      html: `<div class="map-dial" style="width:${size}px;height:${size}px"
+                  title="${escapeHtml(s.name)} · ${s.species_24h} species (24h)">${s.dial_svg}</div>`,
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2],
     });
+    const m = L.marker([s.lat, s.lon], { icon }).addTo(map);
+    m.bindTooltip(`${s.name} · ${s.species_24h}`, {
+      permanent: true, direction: 'right', offset: [size / 2 + 2, 0], className: 'site-label',
+    });
+    m.bindPopup(() => buildSitePopup(s), { minWidth: 230, maxWidth: 260 });
     markers[s.name] = m;
   });
 
   if (SITES.length > 0) {
-    const group = L.featureGroup(Object.values(markers));
-    map.fitBounds(group.getBounds().pad(0.25));
+    map.fitBounds(L.featureGroup(Object.values(markers)).getBounds().pad(0.3));
   } else {
     map.setView([-24, 31], 6);
   }
 
   function buildSitePopup(site) {
+    const wrap = document.createElement('div');
+    const recent = (site.recent || [])
+      .map(sp => `<a href="/species/${encodeURIComponent(sp.sci)}" style="color:#6ee7b7;">${escapeHtml(sp.common)}</a>`)
+      .join(', ');
+    wrap.innerHTML =
+      `<strong>${escapeHtml(site.name)}</strong>` +
+      `<div style="color:#a1a1aa;margin-top:2px;">${site.species_24h} unique species · 24h</div>` +
+      `<div class="map-dial" style="width:210px;height:210px;margin:6px auto 0;">${site.dial_svg}</div>` +
+      (recent ? `<div style="margin-top:6px;color:#d4d4d8;">${recent}</div>` : '') +
+      `<div style="margin-top:6px;"><a href="/site/${encodeURIComponent(site.name)}" style="color:#6ee7b7;font-size:12px;">open site page →</a></div>`;
+    // Multi-site sources can pin their current site from here.
     const active = currentActive();
     const tile = TILE_BY_NAME[active];
-    const wrap = document.createElement('div');
-    wrap.innerHTML = `<strong>${escapeHtml(site.name)}</strong>
-      <div style="color:#71717a;margin-top:2px;">${site.lat.toFixed(3)}, ${site.lon.toFixed(3)}</div>
-      <div style="margin-top:6px;"><a href="/site/${encodeURIComponent(site.name)}" style="color:#6ee7b7;font-size:12px;">open site page →</a></div>`;
     if (tile && tile.multisite) {
       const btn = document.createElement('button');
       btn.textContent = `set as current for ${active}`;
       btn.style.cssText =
         'margin-top:8px;padding:4px 10px;background:#10b981;color:#fff;' +
         'border:none;border-radius:4px;font-size:12px;cursor:pointer;';
-      btn.onclick = (e) => {
-        e.preventDefault();
-        overrideSite(active, site.name).then(() => map.closePopup());
-      };
+      btn.onclick = (e) => { e.preventDefault(); overrideSite(active, site.name).then(() => map.closePopup()); };
       wrap.appendChild(btn);
-    } else if (tile) {
-      const note = document.createElement('div');
-      note.style.cssText = 'margin-top:8px;color:#a1a1aa;font-size:11px;';
-      note.textContent = `${active} is not a multisite source.`;
-      wrap.appendChild(note);
     }
     return wrap;
   }
@@ -332,23 +371,15 @@
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
     });
-    if (!r.ok) {
-      console.error('override failed', r.status);
-      return;
-    }
-    refreshSitePanel();
-    highlightActiveSite();
+    if (r.ok) refreshSitePanel();
   }
 
-  // --- Active source switching ---
-
+  // --- Active source (collapsible "Watch live") ---
   function currentActive() {
     return document.getElementById('active-source').value;
   }
 
   function setActive(name) {
-    // Video / map / site-panel only. Detection-list filtering lives in the
-    // source chips below the rows header.
     const dropdown = document.getElementById('active-source');
     if (dropdown.value !== name) dropdown.value = name;
     localStorage.setItem(ACTIVE_KEY, name);
@@ -361,7 +392,6 @@
       video.src = 'about:blank';
       sitePanel.innerHTML = '';
       sitePanel.removeAttribute('hx-get');
-      openLink.href = '#';
       openLink.style.visibility = 'hidden';
     } else {
       const tile = TILE_BY_NAME[name];
@@ -370,7 +400,6 @@
         : 'about:blank';
       openLink.href = tile ? tile.url : '#';
       openLink.style.visibility = tile ? 'visible' : 'hidden';
-
       if (tile && tile.multisite) {
         sitePanel.setAttribute('hx-get', `/partials/site/${encodeURIComponent(name)}`);
         htmx.ajax('GET', `/partials/site/${encodeURIComponent(name)}`, {target: sitePanel, swap: 'innerHTML'});
@@ -379,33 +408,12 @@
         sitePanel.removeAttribute('hx-get');
       }
     }
-    highlightActiveSite();
   }
 
   function refreshSitePanel() {
     const sitePanel = document.getElementById('active-site-panel');
     const url = sitePanel.getAttribute('hx-get');
     if (url) htmx.ajax('GET', url, {target: sitePanel, swap: 'innerHTML'});
-  }
-
-  async function highlightActiveSite() {
-    const active = currentActive();
-    Object.values(markers).forEach(m => m.setIcon(dotIcon(COLOR_DEFAULT)));
-    if (active === '__all__' || !TILE_BY_NAME[active]?.multisite) return;
-    try {
-      const r = await fetch(`/api/sources/${encodeURIComponent(active)}/site`);
-      if (!r.ok) return;
-      const data = await r.json();
-      if (data.site && markers[data.site]) {
-        markers[data.site].setIcon(dotIcon(COLOR_ACTIVE));
-      }
-    } catch (e) { /* swallow */ }
-  }
-
-  function escapeHtml(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
   }
 
   document.getElementById('active-source').addEventListener('change', (e) => setActive(e.target.value));
@@ -438,8 +446,6 @@
     const dropdown = document.getElementById('active-source');
     const valid = saved && dropdown.querySelector(`option[value="${CSS.escape(saved)}"]`);
     setActive(valid ? saved : dropdown.value);
-    // Keep map highlight fresh in case OCR or another client updates the override.
-    setInterval(highlightActiveSite, 30_000);
   });
 </script>
 {% endblock %}
