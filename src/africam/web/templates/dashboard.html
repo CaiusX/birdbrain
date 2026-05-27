@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import species_link %}
+{% from "_macros.html" import species_link, brief_body %}
 {% block title %}Africam · dashboard{% endblock %}
 
 {% block head_extra %}
@@ -59,7 +59,7 @@
     </h2>
     <a href="/briefs" class="text-xs text-emerald-300 hover:text-emerald-200">archive →</a>
   </header>
-  <p class="text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ latest_brief.brief_text }}</p>
+  {{ brief_body(latest_brief.brief_text | parse_brief) }}
 </section>
 {% endif %}
 

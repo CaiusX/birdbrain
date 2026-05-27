@@ -1,5 +1,29 @@
 {# Shared Jinja macros. Imported with: {% from "_macros.html" import iucn_badge %} #}
 
+{# Render a parsed daily brief: one overall highlights paragraph + per-site
+   bullet lists. Pass the result of the `parse_brief` filter. Site names link
+   to their site page (the generator uses exact source names). #}
+{% macro brief_body(parsed) -%}
+  {% if parsed.overall %}
+    <p class="text-sm text-zinc-300 leading-relaxed max-w-3xl">{{ parsed.overall }}</p>
+  {% endif %}
+  {% if parsed.sites %}
+    <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3">
+      {% for s in parsed.sites %}
+        <div class="min-w-0">
+          <a href="/site/{{ s.site | urlencode }}"
+             class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300 hover:text-emerald-200">{{ s.site }}</a>
+          <ul class="mt-1 space-y-0.5">
+            {% for b in s.bullets %}
+              <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ b }}</span></li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{%- endmacro %}
+
 {# Link a species name to its detail page. `source` (optional) carries the
    origin page's active site filter through to the detail page so it opens
    pre-scoped to that site; omit it to land on the all-sites view. #}

@@ -82,8 +82,36 @@ def _tz_abbr(tz_name: str | None) -> str:
         return tz_name
 
 
+def _parse_brief(text: str | None) -> dict:
+    """Parse a daily brief into {overall, sites:[{site, bullets}]}. New briefs
+    are JSON (optionally fenced); legacy briefs are a plain paragraph, returned
+    as the overall text with no per-site sections."""
+    if not text:
+        return {"overall": "", "sites": []}
+    raw = text.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.S | re.I)
+    if fence:
+        raw = fence.group(1).strip()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {"overall": text.strip(), "sites": []}
+    if not isinstance(data, dict):
+        return {"overall": text.strip(), "sites": []}
+    sites: list[dict] = []
+    for s in data.get("sites") or []:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("site") or "").strip()
+        bullets = [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()]
+        if name and bullets:
+            sites.append({"site": name, "bullets": bullets})
+    return {"overall": str(data.get("overall") or "").strip(), "sites": sites}
+
+
 TEMPLATES.env.filters["localtime"] = _localtime
 TEMPLATES.env.filters["tz_abbr"] = _tz_abbr
+TEMPLATES.env.filters["parse_brief"] = _parse_brief
 
 
 def _solar_event_utc_hours(d: date, lat: float, lon: float,

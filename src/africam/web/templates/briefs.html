@@ -1,10 +1,11 @@
 {% extends "base.html" %}
+{% from "_macros.html" import brief_body %}
 {% block title %}Africam · daily briefs{% endblock %}
 
 {% block content %}
 <section class="mb-6">
   <h2 class="text-xl font-semibold text-zinc-100">Daily soundscape briefs</h2>
-  <p class="text-sm text-zinc-400 mt-1">One paragraph per UTC date — what yesterday's recording sounded like across all four sites. Written by Claude from the day's detection footprint after midnight UTC.</p>
+  <p class="text-sm text-zinc-400 mt-1">One per UTC date — overall highlights plus per-site notes, written by Claude from the day's detection footprint after midnight UTC.</p>
 </section>
 
 {% if not briefs %}
@@ -23,7 +24,7 @@
             {% if b.generated_by != 'stub' %}<span class="text-zinc-600">{{ b.generated_by }}</span>{% endif %}
           </div>
         </header>
-        <p class="text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ b.brief_text }}</p>
+        {{ brief_body(b.brief_text | parse_brief) }}
       </article>
     {% endfor %}
   </div>

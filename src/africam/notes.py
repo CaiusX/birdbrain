@@ -145,34 +145,39 @@ per-site entry summarizing that date's local conditions at that site
 (min/max/mean temp, total rain in mm, hours of rain, sunrise/sunset, modal
 condition). ``weather`` may be missing if Open-Meteo didn't respond.
 
-Your job is to write a SINGLE PARAGRAPH digest, ~120–200 words, that a
-reader could skim in 30 seconds to know what yesterday sounded like
-across the network. Cover:
+Your job is a skimmable digest: ONE short overall paragraph, then crisp
+per-site bullet points. Return it as STRICT JSON, nothing else:
 
-  • The day's headline — the most interesting thing across all sites
-    (often a "newly heard" species or a striking confidence standout).
-  • Contrasts between sites — who was loud, who was quiet, any unusual
-    pairings.
-  • One or two specific calls worth flagging — by common name, with the
-    site where they landed.
+{{
+  "overall": "<2-3 sentence highlights paragraph for the whole network>",
+  "sites": [
+    {{"site": "<exact source_name from the evidence>",
+      "bullets": ["<short note>", "<short note>"]}}
+  ]
+}}
 
-Use weather when it explains or contrasts the day: overnight rain
-suppressing dawn activity, a cold front, a hot still afternoon, fog at
-sunrise, a thunderstorm explaining a midday silence. Don't recite a
-weather report when conditions are unremarkable — only mention it when
-it's part of the story.
+The "overall" paragraph (≤55 words) is the day's headline across all
+sites — usually a "newly heard" species or a striking confidence
+standout, plus the broad shape of the day (who was loud, who was quiet).
 
-Style:
-  • ONE paragraph, plain prose, no markdown.
-  • Reader-facing voice: this surfaces on the dashboard. Confident,
-    interested, not breathless.
-  • Refer to sites by short name (Tembe, Twin Pan, …).
-  • Don't recite numbers — convey the shape ("a thin morning at Tembe",
-    "the busiest day this week at Twin Pan").
-  • If a site was silent (count of zero), it's worth noting briefly.
-  • Skip throat-clearing and sign-offs.
+Each "sites" entry gets 1–4 TELEGRAPHIC bullets — fragments, not
+sentences. Lead with the concrete fact. Good bullets:
+  • "New this week: Black Cuckoo"
+  • "Busiest dawn of the week (peak 05:00)"
+  • "Fish Eagle standout — conf 0.97"
+  • "Near silent — overnight rain"
+Cover, per site, whatever's worth flagging: newly-heard species, a top
+or high-confidence call (common name), peak timing, notable silence, and
+weather ONLY when it's part of the story (rain suppressing dawn, a front,
+fog at sunrise). Skip weather when conditions are unremarkable.
 
-Output the brief as a single paragraph of plain text, nothing else."""
+Rules:
+  • Output ONLY the JSON object — no markdown fences, no preamble.
+  • Use the EXACT source_name strings from the evidence for "site".
+  • Include a site only if it has something worth saying; order the most
+    interesting sites first.
+  • Species by common name. Convey shape, don't recite raw counts.
+  • No throat-clearing, no sign-offs, no full-sentence padding in bullets."""
 
 
 # ---------- evidence signatures (re-trigger when these change) ----------
@@ -439,12 +444,12 @@ def _daily_brief_tick(
         brief_text = _call_claude(
             system_prompt=DAILY_BRIEF_SYSTEM_PROMPT,
             user_text=(
-                "Write the daily soundscape brief for this date.\n\n"
+                "Return the JSON soundscape digest for this date.\n\n"
                 f"{_format_evidence_for_prompt(evidence)}"
             ),
             model=cfg.notes_model,
             client=client,
-            max_tokens=500,
+            max_tokens=800,
         )
         if not brief_text:
             log.warning("notes.empty_response", kind="brief", date=d.isoformat())
@@ -549,12 +554,12 @@ def generate_brief_for_date(
     brief_text = _call_claude(
         system_prompt=DAILY_BRIEF_SYSTEM_PROMPT,
         user_text=(
-            "Write the daily soundscape brief for this date.\n\n"
+            "Return the JSON soundscape digest for this date.\n\n"
             f"{_format_evidence_for_prompt(evidence)}"
         ),
         model=cfg.notes_model,
         client=client,
-        max_tokens=500,
+        max_tokens=800,
     )
     if not brief_text:
         return None
