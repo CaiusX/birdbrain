@@ -22,6 +22,7 @@ from rich.table import Table
 from sqlalchemy import desc, select
 
 from africam.config import AppConfig, load_sources
+from africam.cookies import refresh as refresh_cookies_impl
 from africam.logging import configure as configure_logging
 from africam.pipeline import run_all
 from africam.storage import Database, DetectionRow, RuntimeSourceRow
@@ -47,6 +48,38 @@ def run(
         console.print("[red]No sources configured.[/red]")
         raise typer.Exit(code=1)
     run_all(sources, cfg)
+
+
+@app.command(name="refresh-cookies")
+def refresh_cookies(
+    force: Annotated[
+        bool, typer.Option("--force", help="Refresh even if no cam is bot-gated.")
+    ] = False,
+    min_interval_hours: Annotated[
+        float, typer.Option("--min-interval-hours", help="Debounce window.")
+    ] = 6.0,
+    profile: Annotated[
+        Path | None,
+        typer.Option("--profile", help="Firefox profile dir (else auto-detect)."),
+    ] = None,
+) -> None:
+    """Re-export the YouTube cookies file from Firefox when cams are bot-gated.
+
+    Safe to run on a timer: by default it only acts when a YouTube worker is
+    stalled on a "confirm you're not a bot" / stale-cookies error, and at most
+    once per --min-interval-hours."""
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    db = Database(cfg.db_url)
+    result = refresh_cookies_impl(
+        cfg, db,
+        force=force,
+        min_interval_h=min_interval_hours,
+        profile=str(profile) if profile else None,
+    )
+    console.print(result)
+    if result.get("action") in ("failed", "error"):
+        raise typer.Exit(code=1)
 
 
 @app.command()

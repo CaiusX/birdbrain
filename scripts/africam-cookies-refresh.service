@@ -1,0 +1,8 @@
+[Unit]
+Description=Africam YouTube cookies auto-refresh (re-export from Firefox when cams are bot-gated)
+After=africam-pipeline.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dennis/Projects/africam-bird
+ExecStart=/home/dennis/.local/bin/uv run africam refresh-cookies
