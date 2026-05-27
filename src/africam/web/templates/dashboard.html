@@ -50,19 +50,6 @@
   </div>
 </section>
 
-{% if latest_brief %}
-<section class="mb-6 bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4">
-  <header class="flex items-baseline justify-between flex-wrap gap-2 mb-2">
-    <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">
-      {% if latest_brief.date_utc == (today_utc | default(None)) %}Today's{% else %}Yesterday's{% endif %} soundscape
-      <span class="text-zinc-500 normal-case font-normal ml-2 tabular-nums text-xs">{{ latest_brief.date_utc.strftime('%A, %d %b %Y') }} UTC</span>
-    </h2>
-    <a href="/briefs" class="text-xs text-emerald-300 hover:text-emerald-200">archive →</a>
-  </header>
-  {{ brief_body(latest_brief.brief_text | parse_brief) }}
-</section>
-{% endif %}
-
 {# ---- 2. activity map hero + by-site panel ---- #}
 <section class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
   <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
@@ -104,6 +91,19 @@
     </div>
   </div>
 </section>
+
+{% if latest_brief %}
+<section class="mb-6 bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4">
+  <header class="flex items-baseline justify-between flex-wrap gap-2 mb-2">
+    <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">
+      {% if latest_brief.date_utc == (today_utc | default(None)) %}Today's{% else %}Yesterday's{% endif %} soundscape
+      <span class="text-zinc-500 normal-case font-normal ml-2 tabular-nums text-xs">{{ latest_brief.date_utc.strftime('%A, %d %b %Y') }} UTC</span>
+    </h2>
+    <a href="/briefs" class="text-xs text-emerald-300 hover:text-emerald-200">archive →</a>
+  </header>
+  {{ brief_body(latest_brief.brief_text | parse_brief) }}
+</section>
+{% endif %}
 
 {# ---- 3. live detections feed ---- #}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
