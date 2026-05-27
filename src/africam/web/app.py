@@ -1318,6 +1318,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         db_path = Path(cfg.db_url.removeprefix("sqlite:///"))
         db_bytes = db_path.stat().st_size if db_path.exists() else None
 
+        # Serialized-detector saturation: all workers share one locked
+        # BirdNetDetector, so the ceiling is chunk_seconds / inference_time.
+        chunk_s = cfg.chunk_seconds or 3.0
+        inf_ms = cfg.inference_ms_estimate or 110.0
+        infer_pct = round(workers_running * inf_ms / (chunk_s * 1000) * 100)
+        infer_max = int(chunk_s * 1000 / inf_ms)
+
         return {
             "health": {
                 "now": now,
@@ -1329,6 +1336,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "worker_problems": problems,
                 "last_det_age_s": last_det_age_s,
                 "det_24h": det_24h,
+                "infer_pct": infer_pct,
+                "infer_max": infer_max,
+                "infer_ms": round(inf_ms),
             }
         }
 

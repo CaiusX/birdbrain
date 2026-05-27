@@ -39,7 +39,7 @@
   </div>
 {% endif %}
 
-<div class="grid grid-cols-2 md:grid-cols-4 gap-px bg-zinc-800/50">
+<div class="grid grid-cols-2 md:grid-cols-3 gap-px bg-zinc-800/50">
 
   {# CPU load #}
   {% if ht.load1 is not none and ht.cpus %}
@@ -50,6 +50,12 @@
   {% else %}
     {{ card('CPU load', 'n/a', 'text-zinc-600', '') }}
   {% endif %}
+
+  {# Inference saturation — one shared, lock-serialized BirdNET detector #}
+  {% set ip = h.infer_pct %}
+  {% set ic = 'text-emerald-300' if ip < 55 else ('text-amber-300' if ip < 80 else 'text-rose-300') %}
+  {{ card('Inference', ip ~ '%', ic,
+          h.workers_running ~ ' / ~' ~ h.infer_max ~ ' cams max · est ' ~ h.infer_ms ~ 'ms/chunk') }}
 
   {# Memory #}
   {% if ht.mem_total and ht.mem_available is not none %}

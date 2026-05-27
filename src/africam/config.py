@@ -73,6 +73,11 @@ class AppConfig(BaseSettings):
     clip_format: Literal["ogg", "wav", "flac"] = "ogg"
     sample_rate: int = 48_000
     chunk_seconds: float = 3.0
+    # Measured per-chunk BirdNET inference time (ms), used only to estimate the
+    # serialized-detector saturation shown on the health panel. All workers
+    # share one locked detector, so capacity ≈ chunk_seconds*1000 / this.
+    # Re-measure (BirdNetDetector.analyze on a 3s chunk) if the hardware changes.
+    inference_ms_estimate: float = 110.0
     log_level: str = "INFO"
     # Xeno-Canto API v3 requires a key (free, per-account). When set, the
     # audition modal shows reference recordings inline. When unset, it falls
