@@ -811,8 +811,14 @@ class Database:
             return grown[0][0]
 
         # 3. Aged out — oldest first.
+        # SQLite returns naive datetimes; we always WRITE UTC, so treat as such
+        # before comparing to the tz-aware ``cutoff``. Without this the worker
+        # tick blows up with "can't compare offset-naive and offset-aware".
+        def _as_utc(dt):
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
         aged = sorted(
-            (n for n, r in notes.items() if r.generated_at and r.generated_at < cutoff),
+            (n for n, r in notes.items() if r.generated_at and _as_utc(r.generated_at) < cutoff),
             key=lambda n: notes[n].generated_at,
         )
         if aged:
