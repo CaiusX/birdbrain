@@ -1129,12 +1129,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             hours[local_hr] += int(c)
         peak_hour = max(hours) or 1
 
+        # Live video embed: derived from the source's url + kind. video_id is
+        # None for non-YouTube sources, in which case the template hides the
+        # iframe and shows the open-original link instead.
+        video_id = (
+            _youtube_video_id(src_cfg.url)
+            if src_cfg and src_cfg.kind == "youtube" else None
+        )
+
         return TEMPLATES.TemplateResponse(
             request,
             "site_detail.html",
             {
                 "name": name,
                 "src_cfg": src_cfg,
+                "video_id": video_id,
+                "multisite": bool(src_cfg and src_cfg.multisite),
                 "note": site_note,
                 "total": total,
                 "distinct_species": distinct_species or 0,

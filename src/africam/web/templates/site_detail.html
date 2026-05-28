@@ -71,6 +71,37 @@
   </div>
 </section>
 
+{% if src_cfg and src_cfg.url %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 overflow-hidden">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-2">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">live video</h3>
+    <a href="{{ src_cfg.url }}" target="_blank" rel="noopener"
+       class="text-xs text-emerald-300 hover:text-emerald-200">open original ↗</a>
+  </div>
+  {% if video_id %}
+    <div class="aspect-video bg-black">
+      <iframe class="w-full h-full"
+              src="https://www.youtube.com/embed/{{ video_id }}?autoplay=0&mute=1&controls=1&rel=0"
+              frameborder="0"
+              allow="autoplay; encrypted-media; picture-in-picture"
+              allowfullscreen
+              referrerpolicy="strict-origin-when-cross-origin"></iframe>
+    </div>
+  {% else %}
+    <p class="px-5 py-6 text-sm text-zinc-500">
+      Not a YouTube source — open the original feed via the link above.
+    </p>
+  {% endif %}
+  {% if multisite %}
+    <div id="site-panel-{{ name }}"
+         hx-get="/partials/site/{{ name | urlencode }}"
+         hx-trigger="load, every 30s"
+         hx-swap="innerHTML"
+         class="border-t border-zinc-800"></div>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 px-5 py-4">
   <div class="flex items-baseline justify-between mb-3">
     <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">hourly activity ({{ tz_name }})</h3>
