@@ -2772,7 +2772,46 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             # HTML markup like <span lang="en">…</span>).
             "wp_title": data.get("title") or title,
             "extract": (data.get("extract") or "")[:280],
+            # Wikidata QID for this page; lets us fall back to wdt:P181 for
+            # species whose en.wiki article doesn't transclude a range map.
+            "wikidata_qid": data.get("wikibase_item"),
         }
+
+    def _wikidata_range_map(qid: str | None) -> dict | None:
+        """Last-resort range-map lookup: read wdt:P181 (range map image) from
+        Wikidata's per-entity REST endpoint, bypassing the SPARQL service
+        (which is rate-limited during outages). Returns the same shape as
+        ``_pick_range_map`` or None when no P181 claim is set."""
+        if not qid or not qid.startswith("Q") or not qid[1:].isdigit():
+            return None
+        url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "africam-bird/0.1"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        entity = (data.get("entities") or {}).get(qid) or {}
+        claims = (entity.get("claims") or {}).get("P181") or []
+        for c in claims:
+            val = (c.get("mainsnak") or {}).get("datavalue", {}).get("value")
+            if isinstance(val, str) and val.strip():
+                fname = val.strip()
+                enc = urllib.parse.quote(fname.replace(" ", "_"))
+                return {
+                    # Special:FilePath redirects to the actual Commons URL and
+                    # supports ?width=N for a sized thumbnail.
+                    "range_map": (
+                        f"https://commons.wikimedia.org/wiki/Special:FilePath/"
+                        f"{enc}?width=330"
+                    ),
+                    "range_map_page": (
+                        f"https://commons.wikimedia.org/wiki/File:{enc}"
+                    ),
+                }
+        return None
 
     def _resolve_species_media(scientific: str, common: str = "") -> dict:
         """Photo + range-map + IUCN status for a species, behind two cache
@@ -2823,6 +2862,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if status:
                 payload["conservation_status"] = status
             break
+        # Wikidata fallback: many species (Barn Owl, Common Bulbul, …) have a
+        # P181 range-map image on their Wikidata item even though it isn't
+        # transcluded in the en.wiki article. One extra HTTP per species, only
+        # when Wikipedia didn't provide one.
+        if not payload.get("range_map"):
+            wd = _wikidata_range_map(payload.get("wikidata_qid"))
+            if wd:
+                payload = {**payload, **wd}
         # Persist only when we actually reached Wikipedia and got something —
         # otherwise a transient hiccup would poison both caches (and stamp
         # media_fetched_at, suppressing retries for 30 days).
