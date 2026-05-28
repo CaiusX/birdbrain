@@ -17,6 +17,7 @@ from africam.storage.models import (
     SiteNoteRow,
     SourceStateRow,
     SpeciesNoteRow,
+    SpeciesSiteNoteRow,
     WorkerHeartbeatRow,
 )
 
@@ -854,6 +855,213 @@ class Database:
     def list_site_notes(self) -> list[SiteNoteRow]:
         with self._Session() as s:
             return list(s.scalars(select(SiteNoteRow)))
+
+    # --- Per-(species, site) notes: how this species sounds at this site ---
+
+    def get_species_site_note(
+        self, scientific_name: str, source_name: str
+    ) -> SpeciesSiteNoteRow | None:
+        with self._Session() as s:
+            return s.get(SpeciesSiteNoteRow, (scientific_name, source_name))
+
+    def set_generated_species_site_note(
+        self,
+        scientific_name: str,
+        source_name: str,
+        *,
+        common_name: str,
+        note: str,
+        generated_by: str,
+        evidence_signature: str,
+        detection_count_at_gen: int,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesSiteNoteRow, (scientific_name, source_name))
+            if row is None:
+                row = SpeciesSiteNoteRow(
+                    scientific_name=scientific_name, source_name=source_name
+                )
+                s.add(row)
+            row.common_name = common_name
+            row.note = note
+            row.updated_at = now
+            row.generated_at = now
+            row.generated_by = generated_by
+            row.evidence_signature = evidence_signature
+            row.detection_count_at_gen = detection_count_at_gen
+
+    def pick_stale_species_site_for_note(
+        self,
+        *,
+        candidate_sources: Iterable[str],
+        max_age_days: int,
+        min_detections: int,
+        regen_count_factor: float = 2.0,
+    ) -> tuple[str, str] | None:
+        """Return the (scientific_name, source_name) pair most overdue for a
+        per-pair note, or None. Same priority order as the other pickers:
+        missing → grown → aged. All comparisons against ``cutoff`` happen in
+        SQL so naive-vs-aware datetime issues can't reach Python."""
+        candidates = list(candidate_sources)
+        if not candidates:
+            return None
+
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
+        with self._Session() as s:
+            counts_subq = (
+                select(
+                    DetectionRow.scientific_name.label("sci"),
+                    DetectionRow.source_name.label("src"),
+                    func.count(DetectionRow.id).label("cnt"),
+                )
+                .where(DetectionRow.source_name.in_(candidates))
+                .group_by(DetectionRow.scientific_name, DetectionRow.source_name)
+                .having(func.count(DetectionRow.id) >= min_detections)
+                .subquery()
+            )
+
+            # 1. Pairs with enough detections but no AI note yet — biggest first.
+            missing = s.execute(
+                select(counts_subq.c.sci, counts_subq.c.src)
+                .outerjoin(
+                    SpeciesSiteNoteRow,
+                    (SpeciesSiteNoteRow.scientific_name == counts_subq.c.sci)
+                    & (SpeciesSiteNoteRow.source_name == counts_subq.c.src),
+                )
+                .where(SpeciesSiteNoteRow.scientific_name.is_(None))
+                .order_by(counts_subq.c.cnt.desc())
+                .limit(1)
+            ).first()
+            if missing:
+                return (missing[0], missing[1])
+
+            # 2. Roughly doubled in count since last generation.
+            grown = s.execute(
+                select(counts_subq.c.sci, counts_subq.c.src)
+                .join(
+                    SpeciesSiteNoteRow,
+                    (SpeciesSiteNoteRow.scientific_name == counts_subq.c.sci)
+                    & (SpeciesSiteNoteRow.source_name == counts_subq.c.src),
+                )
+                .where(SpeciesSiteNoteRow.detection_count_at_gen.is_not(None))
+                .where(
+                    counts_subq.c.cnt
+                    >= SpeciesSiteNoteRow.detection_count_at_gen * regen_count_factor
+                )
+                .order_by(
+                    (counts_subq.c.cnt - SpeciesSiteNoteRow.detection_count_at_gen).desc()
+                )
+                .limit(1)
+            ).first()
+            if grown:
+                return (grown[0], grown[1])
+
+            # 3. Aged out.
+            aged = s.execute(
+                select(counts_subq.c.sci, counts_subq.c.src)
+                .join(
+                    SpeciesSiteNoteRow,
+                    (SpeciesSiteNoteRow.scientific_name == counts_subq.c.sci)
+                    & (SpeciesSiteNoteRow.source_name == counts_subq.c.src),
+                )
+                .where(SpeciesSiteNoteRow.generated_at.is_not(None))
+                .where(SpeciesSiteNoteRow.generated_at < cutoff)
+                .order_by(SpeciesSiteNoteRow.generated_at.asc())
+                .limit(1)
+            ).first()
+            return (aged[0], aged[1]) if aged else None
+
+    def gather_species_site_evidence(
+        self, scientific_name: str, source_name: str
+    ) -> dict | None:
+        """Build the evidence dossier for a (species, site) pair: pair stats
+        plus the species' full per-site breakdown for contrast, plus a
+        recently-newly-heard signal. Returns None when nothing to summarize."""
+        with self._Session() as s:
+            common = s.scalar(
+                select(DetectionRow.common_name)
+                .where(DetectionRow.scientific_name == scientific_name)
+                .where(DetectionRow.source_name == source_name)
+                .order_by(DetectionRow.started_at.desc())
+                .limit(1)
+            )
+            if common is None:
+                return None
+
+            count, mean_conf, max_conf, first_seen, last_seen = s.execute(
+                select(
+                    func.count(DetectionRow.id),
+                    func.avg(DetectionRow.confidence),
+                    func.max(DetectionRow.confidence),
+                    func.min(DetectionRow.started_at),
+                    func.max(DetectionRow.started_at),
+                )
+                .where(DetectionRow.scientific_name == scientific_name)
+                .where(DetectionRow.source_name == source_name)
+            ).one()
+
+            # Per-hour pattern AT THIS SITE (UTC bucket; the prompt converts).
+            per_hour = s.execute(
+                select(
+                    func.strftime("%H", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.scientific_name == scientific_name)
+                .where(DetectionRow.source_name == source_name)
+                .group_by(func.strftime("%H", DetectionRow.started_at))
+            ).all()
+
+            # Per-site totals for this species (full network — for contrast).
+            per_source = s.execute(
+                select(DetectionRow.source_name, func.count(DetectionRow.id))
+                .where(DetectionRow.scientific_name == scientific_name)
+                .group_by(DetectionRow.source_name)
+            ).all()
+
+            label_counts = dict(s.execute(
+                select(DetectionRow.label, func.count(DetectionRow.id))
+                .where(DetectionRow.scientific_name == scientific_name)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.label.is_not(None))
+                .group_by(DetectionRow.label)
+            ).all())
+
+            # Newly-heard signal: did this site only start hearing it in the
+            # last 7 days? (No detections at this source in the prior 7 days.)
+            week_ago = datetime.now(UTC) - timedelta(days=7)
+            prior = s.scalar(
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.scientific_name == scientific_name)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at < week_ago)
+            )
+
+        hourly = [0] * 24
+        for hr_str, c in per_hour:
+            if hr_str is not None:
+                hourly[int(hr_str)] = int(c)
+
+        total_network = sum(int(c) for _, c in per_source)
+        return {
+            "scientific_name": scientific_name,
+            "common_name": common,
+            "source_name": source_name,
+            "detection_count": int(count or 0),
+            "share_of_network": (
+                round(int(count or 0) / total_network, 3) if total_network else 0
+            ),
+            "mean_confidence": round(float(mean_conf or 0), 3),
+            "max_confidence": round(float(max_conf or 0), 3),
+            "first_seen_utc": first_seen.isoformat() if first_seen else None,
+            "last_seen_utc": last_seen.isoformat() if last_seen else None,
+            "hourly_utc": hourly,
+            "per_source_network": [
+                {"source": n, "count": int(c)} for n, c in per_source
+            ],
+            "labels_at_site": {k: int(v) for k, v in label_counts.items()},
+            "newly_heard_at_site": int(prior or 0) == 0,
+        }
 
     # --- Daily soundscape brief (one row per UTC date, generated once) ---
 

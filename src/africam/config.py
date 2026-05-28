@@ -98,6 +98,10 @@ class AppConfig(BaseSettings):
     notes_tick_seconds: int = 300
     notes_stale_days: int = 7
     notes_min_detections: int = 3
+    # Per-(species, site) note threshold. Higher than notes_min_detections so
+    # we don't burn budget on one-off visitors — but low enough to include
+    # interesting rarities at a site.
+    notes_species_site_min_detections: int = 30
     # Multiplier on detection_count_at_gen that retriggers regeneration even
     # before the age cutoff hits — i.e. "data roughly doubled, old note is
     # stale even at 2 days old."

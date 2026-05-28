@@ -150,6 +150,29 @@ class SiteNoteRow(Base):
     detection_count_at_gen: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class SpeciesSiteNoteRow(Base):
+    """AI-generated commentary on how one species sounds at one specific site,
+    contrasted with its pattern across the network. The cross-product of
+    ``species_notes`` (global per species) and ``site_notes`` (global per site).
+
+    Composite primary key (scientific_name, source_name) — one row per pair.
+    Stored as a few telegraphic bullets, one per line, mirroring the per-site
+    bullets style we use on the daily brief.
+    """
+
+    __tablename__ = "species_site_notes"
+
+    scientific_name: Mapped[str] = mapped_column(String(256), primary_key=True)
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    common_name: Mapped[str] = mapped_column(String(256))
+    note: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    generated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detection_count_at_gen: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class DailyBriefRow(Base):
     """One-paragraph cross-site digest of a single UTC date. Generated once
     after midnight UTC and never regenerated — the day's data is fixed.

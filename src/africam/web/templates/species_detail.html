@@ -64,6 +64,18 @@
       {% if note and note.note %}
         <p class="mt-3 text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ note.note }}</p>
       {% endif %}
+      {% if site_note and site_note.note %}
+        <div class="mt-3 max-w-3xl">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">at {{ active_source }}</div>
+          <ul class="mt-1 space-y-0.5">
+            {% for line in site_note.note.splitlines() %}
+              {% if line.strip() %}
+                <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ line.strip().lstrip('•-* ').strip() }}</span></li>
+              {% endif %}
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
     </div>
     <a href="https://en.wikipedia.org/wiki/{{ scientific.replace(' ', '_') }}"
        target="_blank" rel="noopener"

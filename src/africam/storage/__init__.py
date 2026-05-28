@@ -7,6 +7,7 @@ from africam.storage.models import (
     SiteNoteRow,
     SourceStateRow,
     SpeciesNoteRow,
+    SpeciesSiteNoteRow,
     WorkerHeartbeatRow,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "SiteNoteRow",
     "SourceStateRow",
     "SpeciesNoteRow",
+    "SpeciesSiteNoteRow",
     "WorkerHeartbeatRow",
 ]

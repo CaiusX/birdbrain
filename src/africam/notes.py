@@ -131,6 +131,51 @@ Style:
 Output the commentary as plain text, nothing else."""
 
 
+SPECIES_SITE_SYSTEM_PROMPT = f"""\
+You are the resident analyst for a Southern African live-stream bird monitor,
+writing a SHORT, SITE-SPECIFIC commentary on how one species is heard at one
+particular site, in the context of how it sounds across the network.
+{_SITES_CONTEXT}
+
+The operator gives you a JSON dossier for ONE (species, site) pair:
+its detection_count at this site, its share_of_network (this site's count as
+a fraction of all detections of this species across all sites), confidence
+stats, first/last seen UTC, hourly_utc histogram AT THIS SITE, per_source_network
+totals (this species' count by site for contrast), label tallies at this site,
+and newly_heard_at_site (true when this site only first heard it in the last
+7 days — a "new arrival" signal).
+
+Output your commentary as **2 to 4 BULLETS, ONE PER LINE.** Plain text, no
+JSON, no leading dash/asterisk markers — just the bullet text. Telegraphic
+fragments, not sentences. Lead with the fact. Pick from these angles:
+
+  • When (peak hour, local) — convert the UTC histogram to the site's local
+    clock (most sites are UTC+2 / SAST or UTC+2 / CAT).
+  • Relative loudness — is this site the loudest for this species, the
+    quietest, or middle-of-the-pack? Use share_of_network and per_source_network
+    to back this up without reciting raw counts.
+  • Newly heard — if newly_heard_at_site is true, lead with that ("New
+    arrival — first heard <when>").
+  • Confidence character at this site — consistently strong, lots of distant
+    weak detections, etc.
+  • Any signature behavior the data hints at (dawn dominant, nocturnal,
+    midday only, etc.).
+
+Examples of good bullets:
+  Dawn dominant — peak 04:00–05:00 SAST
+  Loudest of all 5 sites — 60% of all detections here
+  New arrival — first heard this week
+  Quiet here — only 8 calls vs hundreds at Tembe
+  Confidence consistently strong (mean 0.65)
+
+Skip anything that doesn't tell the reader something they couldn't get from
+the global per-species page. No throat-clearing, no recap of the species
+name, no closing sentence. If the data is too thin (count < 30 or pattern
+unclear), output a single bullet noting that.
+
+Output as plain text, one bullet per line, nothing else."""
+
+
 DAILY_BRIEF_SYSTEM_PROMPT = f"""\
 You are the resident analyst for a Southern African live-stream bird monitor,
 writing a daily newspaper-style soundscape brief.
@@ -219,6 +264,26 @@ def _site_signature(evidence: dict) -> str:
         "labels": evidence["audition_labels"],
     }
     return _hash(canonical)
+
+
+def _species_site_signature(evidence: dict) -> str:
+    """Coarse signature so small drift doesn't churn the per-pair note. Buckets
+    count to nearest 25, hashes the peak-hour set and the loudest-site name."""
+    hourly = evidence.get("hourly_utc") or []
+    peak = max(hourly) if hourly else 0
+    per_source = evidence.get("per_source_network") or []
+    loudest = max(per_source, key=lambda x: x["count"])["source"] if per_source else ""
+    canonical = {
+        "count_bucket": (evidence["detection_count"] // 25) * 25,
+        "peak_hours": sorted(
+            i for i, c in enumerate(hourly) if c >= peak * 0.5 and c > 0
+        ),
+        "loudest_site": loudest,
+        "newly_heard": bool(evidence.get("newly_heard_at_site")),
+    }
+    return hashlib.sha1(
+        json.dumps(canonical, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _brief_signature(evidence: dict) -> str:
@@ -335,6 +400,62 @@ def _species_tick(db: Database, cfg: AppConfig, client) -> str | None:
         detections=evidence["detection_count"],
     )
     return sci
+
+
+def _species_site_tick(
+    db: Database, cfg: AppConfig, sources: Iterable[SourceConfig], client
+) -> str | None:
+    """Generate one (species, site) note. Returns "sci|source" on success."""
+    src_list = list(sources)
+    candidate_names = [s.name for s in src_list]
+    pick = db.pick_stale_species_site_for_note(
+        candidate_sources=candidate_names,
+        max_age_days=cfg.notes_stale_days * 2,  # per-pair ages slower
+        min_detections=cfg.notes_species_site_min_detections,
+        regen_count_factor=cfg.notes_regen_count_factor,
+    )
+    if pick is None:
+        return None
+    sci, source_name = pick
+
+    evidence = db.gather_species_site_evidence(sci, source_name)
+    if evidence is None:
+        return None
+
+    note_text = _call_claude(
+        system_prompt=SPECIES_SITE_SYSTEM_PROMPT,
+        user_text=(
+            "Write a 2–4 bullet commentary on this species at this site.\n\n"
+            f"{_format_evidence_for_prompt(evidence)}"
+        ),
+        model=cfg.notes_model,
+        client=client,
+        max_tokens=300,
+    )
+    if not note_text:
+        log.warning(
+            "notes.empty_response", kind="species_site", scientific=sci, source=source_name
+        )
+        return None
+
+    db.set_generated_species_site_note(
+        sci,
+        source_name,
+        common_name=evidence["common_name"],
+        note=note_text,
+        generated_by=cfg.notes_model,
+        evidence_signature=_species_site_signature(evidence),
+        detection_count_at_gen=evidence["detection_count"],
+    )
+    log.info(
+        "species_site_note.generated",
+        scientific=sci,
+        common=evidence["common_name"],
+        source=source_name,
+        chars=len(note_text),
+        detections=evidence["detection_count"],
+    )
+    return f"{sci}|{source_name}"
 
 
 def _site_tick(
@@ -505,7 +626,12 @@ def _worker_loop(
             if not did:
                 did = _site_tick(db, cfg, sources, client)
             if not did:
+                # Drain both per-species and per-(species,site) backlogs in
+                # parallel: each tick generates ONE of each. They're
+                # independent, fast (one Claude call apiece), and at 5-min
+                # ticks the combined rate is well within budget.
                 _species_tick(db, cfg, client)
+                _species_site_tick(db, cfg, sources, client)
         except Exception as e:
             log.warning("notes.tick_failed", error=str(e)[:300])
         time.sleep(cfg.notes_tick_seconds)

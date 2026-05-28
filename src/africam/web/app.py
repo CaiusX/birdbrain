@@ -1000,6 +1000,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # fallback (and covers any source lacking map coordinates).
         all_sources = [name for name, _ in site_counts.most_common()]
 
+        # Per-(species, site) AI note — only when scoped to a single site.
+        site_note = (
+            db.get_species_site_note(scientific, active_source)
+            if active_source else None
+        )
+
         return TEMPLATES.TemplateResponse(
             request,
             "species_detail.html",
@@ -1007,6 +1013,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "scientific": scientific,
                 "common_name": common_name,
                 "note": note,
+                "site_note": site_note,
                 "active_source": active_source,
                 "sites_for_map": sites_for_map,
                 "all_sources": all_sources,
