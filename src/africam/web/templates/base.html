@@ -43,16 +43,17 @@
           {% endif %}
         </nav>
       </div>
-      <span class="text-xs text-zinc-500">live audio → BirdNET v2.4</span>
+      <div class="text-xs text-zinc-500 flex items-center gap-1.5 flex-wrap justify-end">
+        <span>data via <a href="https://africam.com/" target="_blank" rel="noopener" class="hover:text-zinc-200">Africam</a></span>
+        <span class="text-zinc-700">·</span>
+        <span>detection by <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="hover:text-zinc-200">BirdNET</a></span>
+        <span class="text-zinc-700">·</span>
+        <a href="/about" class="hover:text-zinc-200">about</a>
+      </div>
     </div>
   </header>
   <main class="max-w-6xl mx-auto px-6 py-8">
     {% block content %}{% endblock %}
   </main>
-  <footer class="max-w-6xl mx-auto px-6 py-6 mt-4 text-xs text-zinc-600 border-t border-zinc-900">
-    data via <a href="https://africam.com/" target="_blank" rel="noopener" class="hover:text-zinc-300">Africam</a>
-    · detection by <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="hover:text-zinc-300">BirdNET</a>
-    · <a href="/about" class="hover:text-zinc-300">about &amp; credits</a>
-  </footer>
 </body>
 </html>
