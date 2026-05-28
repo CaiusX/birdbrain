@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Africam · about{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-5 max-w-3xl">
+  <h2 class="text-xl font-semibold text-zinc-100">About this site</h2>
+  <p class="mt-3 text-sm text-zinc-300 leading-relaxed">
+    Real-time bird species recognition from live African wildlife cams.
+    Listens to the audio from <a href="https://africam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">Africam</a>'s
+    YouTube streams, runs
+    <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">BirdNET</a>
+    on rolling 3-second windows, and surfaces what it hears here. Hosted on
+    a Raspberry Pi 5.
+  </p>
+  <p class="mt-3 text-xs text-zinc-500 leading-relaxed">
+    This is a non-commercial playtest. The BirdNET models that power detection
+    are licensed under
+    <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noopener" class="hover:text-zinc-300">CC&nbsp;BY-NC-SA&nbsp;4.0</a>,
+    which permits research, education and personal use but not commercial
+    deployment. Wildlife video remains the property of Africam and their
+    partner lodges; we embed their public streams and analyse only the audio.
+  </p>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Powered by</h3>
+  </div>
+  <dl class="px-5 py-4 grid grid-cols-1 sm:grid-cols-[14rem_1fr] gap-x-6 gap-y-3 text-sm text-zinc-300">
+    <dt><a href="https://africam.com/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">Africam</a></dt>
+    <dd class="text-zinc-400">Live YouTube wildlife streams from waterholes and reserves across Southern and East Africa.</dd>
+
+    <dt><a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">BirdNET-Analyzer</a></dt>
+    <dd class="text-zinc-400">Cornell Lab of Ornithology &mdash; Kahl et al. The deep-learning model that turns 3&#8209;second audio chunks into species predictions.</dd>
+
+    <dt><a href="https://commons.wikimedia.org/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">Wikipedia &amp; Wikimedia Commons</a></dt>
+    <dd class="text-zinc-400">Species photos, natural-range maps, and IUCN conservation status icons. Content is CC&nbsp;BY-SA &mdash; each image links back to its source page.</dd>
+
+    <dt><a href="https://www.wikidata.org/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">Wikidata</a></dt>
+    <dd class="text-zinc-400">Fallback range-map source via the <code class="text-zinc-300">P181</code> (range&#8209;map image) property when the Wikipedia article doesn't include one.</dd>
+
+    <dt><a href="https://open-meteo.com/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">Open-Meteo</a></dt>
+    <dd class="text-zinc-400">Historical weather context (temperature, wind, conditions) woven into the AI site narratives and daily briefs.</dd>
+
+    <dt><a href="https://www.xeno-canto.org/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">Xeno-Canto</a></dt>
+    <dd class="text-zinc-400">Reference bird recordings shown alongside our detections for ear-training.</dd>
+
+    <dt><a href="https://www.openstreetmap.org/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">OpenStreetMap</a></dt>
+    <dd class="text-zinc-400">Map tiles (&copy; OpenStreetMap contributors, ODbL).</dd>
+
+    <dt><a href="https://www.anthropic.com/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">Claude (Anthropic)</a></dt>
+    <dd class="text-zinc-400">Writes the daily soundscape brief, the per-species notes, the per-site narratives, and the per-(species,&nbsp;site) bullets.</dd>
+
+    <dt class="text-zinc-400">Plumbing</dt>
+    <dd class="text-zinc-500">
+      <a href="https://github.com/yt-dlp/yt-dlp" target="_blank" rel="noopener" class="hover:text-zinc-300">yt-dlp</a>,
+      <a href="https://ffmpeg.org/" target="_blank" rel="noopener" class="hover:text-zinc-300">ffmpeg</a>,
+      <a href="https://leafletjs.com/" target="_blank" rel="noopener" class="hover:text-zinc-300">Leaflet</a>,
+      <a href="https://htmx.org/" target="_blank" rel="noopener" class="hover:text-zinc-300">HTMX</a>,
+      <a href="https://tailwindcss.com/" target="_blank" rel="noopener" class="hover:text-zinc-300">Tailwind</a>,
+      <a href="https://fastapi.tiangolo.com/" target="_blank" rel="noopener" class="hover:text-zinc-300">FastAPI</a>.
+    </dd>
+  </dl>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 px-5 py-4">
+  <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider mb-2">Citation</h3>
+  <p class="text-xs text-zinc-500 mb-2">
+    If you reference this in any way, please cite the underlying BirdNET work:
+  </p>
+<pre class="text-xs text-zinc-300 bg-zinc-950 border border-zinc-800 rounded p-3 overflow-x-auto">@article{kahl2021birdnet,
+  title   = {BirdNET: A deep learning solution for avian diversity monitoring},
+  author  = {Kahl, Stefan and Wood, Connor M and Eibl, Maximilian and Klinck, Holger},
+  journal = {Ecological Informatics},
+  volume  = {61},
+  pages   = {101236},
+  year    = {2021},
+  publisher = {Elsevier}
+}</pre>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 px-5 py-4">
+  <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider mb-2">Source</h3>
+  <p class="text-sm text-zinc-300">
+    Code is MIT-licensed and lives at
+    <a href="https://github.com/CaiusX/africam-bird" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">github.com/CaiusX/africam-bird</a>.
+  </p>
+</section>
+{% endblock %}

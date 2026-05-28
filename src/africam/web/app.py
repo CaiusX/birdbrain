@@ -528,6 +528,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "all_species": all_species,
         }
 
+    @app.get("/about", response_class=HTMLResponse)
+    def about(request: Request) -> HTMLResponse:
+        """Static credits + citation page. No DB calls; safe to render publicly
+        through the tunnel (middleware only blocks /admin + mutating verbs)."""
+        return TEMPLATES.TemplateResponse(request, "about.html", {})
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
         _, sources_by_name, tiles = _all_sources()
