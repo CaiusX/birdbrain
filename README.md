@@ -51,6 +51,11 @@ This project would not exist without:
   Cornell Lab of Ornithology. Model + library that does the actual
   species recognition. **Source code MIT, models CC BY-NC-SA 4.0.** See
   citation below.
+- **Patrick McGuire / [BirdNET-Pi](https://github.com/mcguirepr89/BirdNET-Pi)** —
+  the original Raspberry-Pi-hosted BirdNET project. The "run BirdNET 24/7
+  on a small box, give the operator a useful UI" pattern was figured out
+  there first, by hand, long before AI-assisted refactoring made the next
+  iteration cheap. This project owes a lot to that prior work.
 - **[Africam](https://africam.com/)** — supplies the live wildlife video
   streams (via YouTube) that this project listens to.
 - **[Wikipedia / Wikimedia Commons](https://commons.wikimedia.org/) and
