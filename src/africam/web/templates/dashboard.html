@@ -277,9 +277,28 @@
   // site can't dominate; the dial inside shows when they were heard.
   function dialSize(n) { return Math.min(90, Math.max(32, Math.round(30 + 6 * Math.sqrt(n)))); }
 
+  // Permanent labels default to the right of each marker. Close pairs (e.g.
+  // Olifants + Timbavati, ~40km apart in the SA Lowveld) would collide, so
+  // when a later marker lands within LBL_PAIR_DEG of an already-placed one,
+  // flip its label to the opposite side. Threshold ≈ 65 km is generous for
+  // the typical multi-country fit-bounds zoom; tighten if false positives.
+  const LBL_PAIR_DEG = 0.6;
   const markers = {};
+  const placed = [];
   SITES.forEach(s => {
     const size = dialSize(s.species_24h);
+    let direction = 'right';
+    for (const p of placed) {
+      if (Math.abs(s.lat - p.lat) < LBL_PAIR_DEG
+          && Math.abs(s.lon - p.lon) < LBL_PAIR_DEG) {
+        direction = (p.direction === 'right') ? 'left' : 'right';
+        break;
+      }
+    }
+    placed.push({ lat: s.lat, lon: s.lon, direction });
+    const offset = direction === 'right'
+      ? [size / 2 + 2, 0]
+      : [-(size / 2 + 2), 0];
     const icon = L.divIcon({
       className: 'site-dial',
       html: `<div class="map-dial" style="width:${size}px;height:${size}px"
@@ -289,7 +308,7 @@
     });
     const m = L.marker([s.lat, s.lon], { icon }).addTo(map);
     m.bindTooltip(`${s.name} · ${s.species_24h}`, {
-      permanent: true, direction: 'right', offset: [size / 2 + 2, 0], className: 'site-label',
+      permanent: true, direction, offset, className: 'site-label',
     });
     m.bindPopup(() => buildSitePopup(s), { minWidth: 230, maxWidth: 260 });
     markers[s.name] = m;
