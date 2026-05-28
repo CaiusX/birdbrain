@@ -272,6 +272,27 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     app.state.sites = sites
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
+    # Public-tunnel gate: Cloudflare attaches CF-Connecting-IP on every proxied
+    # request, so its presence identifies traffic that came in via the public
+    # birds.vcexl.com tunnel (vs LAN/localhost on the Pi). For public visitors
+    # we hide /admin and refuse all mutating verbs — keeps the dashboard
+    # read-only without putting a login in front of the whole site.
+    _PUBLIC_BLOCKED_PREFIXES = ("/admin",)
+    _PUBLIC_BLOCKED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+
+    @app.middleware("http")
+    async def restrict_public(request: Request, call_next):
+        is_public = request.headers.get("cf-connecting-ip") is not None
+        request.state.is_public = is_public
+        if is_public:
+            path = request.url.path
+            if (
+                request.method in _PUBLIC_BLOCKED_METHODS
+                or any(path.startswith(p) for p in _PUBLIC_BLOCKED_PREFIXES)
+            ):
+                return Response(status_code=404)
+        return await call_next(request)
+
     def _runtime_to_cfg(row) -> SourceConfig:
         from africam.config import OcrConfig
         return SourceConfig(
