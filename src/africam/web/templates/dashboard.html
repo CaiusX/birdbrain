@@ -270,11 +270,12 @@
     maxZoom: 18,
   }).addTo(map);
 
-  // Marker diameter scales proportionally with unique-species count (with a
-  // small floor so empty/quiet sites stay clickable, and a cap so a runaway
-  // site doesn't dominate); the simplified dial inside shows when they were
-  // heard. So size = how many species, dial shape = at what hours.
-  function dialSize(n) { return Math.min(118, Math.max(34, Math.round(1.4 * n))); }
+  // Marker AREA scales proportionally with unique-species count (so diameter
+  // ∝ √count) — the cartographic standard for proportional-symbol maps. A
+  // linear diameter scale visually overweights the leader (a 2× count looks
+  // 4× larger). Floored so quiet sites stay clickable, capped so a runaway
+  // site can't dominate; the dial inside shows when they were heard.
+  function dialSize(n) { return Math.min(90, Math.max(32, Math.round(30 + 6 * Math.sqrt(n)))); }
 
   const markers = {};
   SITES.forEach(s => {
