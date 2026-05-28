@@ -1089,6 +1089,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 .limit(20)
             ))
 
+            # Recent unique species at this site — one row per species, most-
+            # recently-heard first. Drives the scrollable panel beside the
+            # video; complements top_species (sorted by count).
+            recent_unique = list(s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    func.count(DetectionRow.id).label("n"),
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                    func.max(DetectionRow.started_at).label("last_seen"),
+                )
+                .where(DetectionRow.source_name == name)
+                .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
+                .order_by(desc("last_seen"))
+                .limit(40)
+            ))
+
             recent = list(s.scalars(
                 select(DetectionRow)
                 .where(DetectionRow.source_name == name)
@@ -1151,6 +1168,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "first_seen": first_seen,
                 "last_seen": last_seen,
                 "top_species": top_species,
+                "recent_unique": recent_unique,
                 "recent": recent,
                 "hours": hours,
                 "peak_hour": peak_hour,
