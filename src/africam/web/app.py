@@ -310,10 +310,17 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         )
 
     def _all_sources() -> tuple[list[SourceConfig], dict[str, SourceConfig], list[LiveTile]]:
-        """Static (toml) + runtime (DB) sources merged; runtime wins on name clash."""
-        merged: dict[str, SourceConfig] = {s.name: s for s in static_sources}
+        """Static (toml) + runtime (DB) sources merged; runtime wins on name
+        clash. Admin-disabled sources are dropped from the active roster — the
+        supervisor's next 15-s tick then stops the worker."""
+        disabled = db.list_disabled_source_names()
+        merged: dict[str, SourceConfig] = {
+            s.name: s for s in static_sources if s.name not in disabled
+        }
         runtime_names: set[str] = set()
         for row in db.list_runtime_sources():
+            if row.name in disabled:
+                continue
             merged[row.name] = _runtime_to_cfg(row)
             runtime_names.add(row.name)
         ordered = list(merged.values())
@@ -792,25 +799,41 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             return sources_partial(request)
         return JSONResponse({"ok": True, "name": name})
 
+    def _is_static_source(name: str) -> bool:
+        """True if ``name`` matches a sources.toml entry — independent of any
+        runtime row that might exist with the same name."""
+        return any(s.name == name for s in static_sources)
+
     @app.post("/api/sources/{name}/enable")
     def enable_source(request: Request, name: str) -> Response:
-        """Restore a soft-deleted runtime source. Supervisor picks it up within
-        SUPERVISOR_INTERVAL (15s) and starts a worker."""
-        ok = db.enable_runtime_source(name)
-        if not ok:
-            raise HTTPException(404, f"Runtime source not found: {name}")
+        """Re-enable a source. Dispatches by origin: runtime sources have
+        their soft-delete cleared; static sources have their disable-override
+        row removed. Supervisor picks it up within SUPERVISOR_INTERVAL (15s)
+        and starts a worker."""
+        did_runtime = db.enable_runtime_source(name)
+        did_static = False
+        if _is_static_source(name):
+            db.set_source_disabled(name, disabled=False)
+            did_static = True
+        if not (did_runtime or did_static):
+            raise HTTPException(404, f"Source not found: {name}")
         if request.headers.get("hx-request"):
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name})
 
     @app.post("/api/sources/{name}/disable")
     def disable_source(request: Request, name: str) -> Response:
-        """Soft-delete a runtime source so the supervisor stops its worker.
-        Equivalent to DELETE /api/sources/{name} but returns the admin
-        partial so the /admin table can re-render in place."""
-        ok = db.soft_delete_runtime_source(name)
-        if not ok:
-            raise HTTPException(404, f"Runtime source not found: {name}")
+        """Disable a source. Dispatches by origin: runtime sources are soft-
+        deleted (deleted_at set); static sources get a row in
+        source_disable_overrides. Supervisor stops the worker on its next tick.
+        Returns the admin partial so the table re-renders in place."""
+        did_runtime = db.soft_delete_runtime_source(name)
+        did_static = False
+        if _is_static_source(name):
+            db.set_source_disabled(name, disabled=True)
+            did_static = True
+        if not (did_runtime or did_static):
+            raise HTTPException(404, f"Source not found: {name}")
         if request.headers.get("hx-request"):
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name})
@@ -1190,10 +1213,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     def _admin_view() -> dict:
         """Build the per-source admin payload: status + knobs + heartbeat info.
-        Combines file-defined sources (sources.toml), live runtime sources
-        (runtime_sources where deleted_at IS NULL), and soft-deleted runtime
-        sources (deleted_at NOT NULL) so the operator can re-enable them."""
-        ordered, sources_by_name, _ = _all_sources()
+        Lists every source we know about — file-defined (sources.toml), live
+        runtime, soft-deleted runtime, AND disabled-via-override — so the
+        operator can toggle any of them from /admin."""
+        disabled = db.list_disabled_source_names()
         runtime_rows = db.list_runtime_sources(include_deleted=True)
         runtime_by_name = {r.name: r for r in runtime_rows}
         heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
@@ -1201,18 +1224,32 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         now = datetime.now(UTC)
         rows: list[dict] = []
         seen: set[str] = set()
-        for cfg_src in ordered:
-            seen.add(cfg_src.name)
-            rt = runtime_by_name.get(cfg_src.name)
-            hb = heartbeats.get(cfg_src.name)
-            rows.append(_admin_row(cfg_src, rt, hb, deleted=False, now=now))
-        # Soft-deleted runtime sources — still listed so they can be re-enabled.
+
+        # Static sources first — they're the stable backbone. A live runtime
+        # row with the same name overrides the config (existing "runtime wins"
+        # merge); a soft-deleted runtime row of the same name is ignored.
+        for static in static_sources:
+            seen.add(static.name)
+            rt = runtime_by_name.get(static.name)
+            cfg_src = (
+                _runtime_to_cfg(rt) if (rt and rt.deleted_at is None) else static
+            )
+            hb = heartbeats.get(static.name)
+            # Static-source disabled-ness lives only in the override table.
+            rows.append(_admin_row(
+                cfg_src, rt, hb, deleted=(static.name in disabled), now=now
+            ))
+
+        # Runtime-only sources (no static counterpart) — soft-deleted ones
+        # are still listed so they can be re-enabled. Disabled by either the
+        # soft-delete OR the override set.
         for rt in runtime_rows:
-            if rt.name in seen or rt.deleted_at is None:
+            if rt.name in seen:
                 continue
             cfg_src = _runtime_to_cfg(rt)
             hb = heartbeats.get(rt.name)
-            rows.append(_admin_row(cfg_src, rt, hb, deleted=True, now=now))
+            is_disabled = rt.deleted_at is not None or rt.name in disabled
+            rows.append(_admin_row(cfg_src, rt, hb, deleted=is_disabled, now=now))
 
         rows.sort(key=lambda r: r["name"].lower())
         running = sum(1 for r in rows if r["status"] == "running")

@@ -274,9 +274,16 @@ def _desired_sources(
     db: Database,
 ) -> dict[str, SourceConfig]:
     """Merge file-based and runtime sources by name. Runtime wins on conflict
-    so the user can override a static source via the UI without editing TOML."""
-    out: dict[str, SourceConfig] = {s.name: s for s in static_sources}
+    so the user can override a static source via the UI without editing TOML.
+    Sources flagged via the /admin disable toggle are dropped from the desired
+    set so the supervisor stops their workers on the next tick."""
+    disabled = db.list_disabled_source_names()
+    out: dict[str, SourceConfig] = {
+        s.name: s for s in static_sources if s.name not in disabled
+    }
     for row in db.list_runtime_sources():
+        if row.name in disabled:
+            continue
         out[row.name] = _runtime_row_to_cfg(row)
     return out
 

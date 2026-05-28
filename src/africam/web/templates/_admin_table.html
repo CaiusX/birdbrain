@@ -67,23 +67,19 @@
             </dl>
           </td>
           <td class="px-5 py-3 align-top text-right">
-            {% if r.is_runtime and r.deleted %}
-              <button hx-post="/api/sources/{{ r.name }}/enable"
+            {% if r.deleted %}
+              <button hx-post="/api/sources/{{ r.name | urlencode }}/enable"
                       hx-target="#admin-table" hx-swap="outerHTML"
                       class="px-2 py-1 rounded text-xs border border-emerald-500/60 text-emerald-300 hover:bg-emerald-500/10">
                 ▶ start
               </button>
-            {% elif r.is_runtime %}
-              <button hx-post="/api/sources/{{ r.name }}/disable"
+            {% else %}
+              <button hx-post="/api/sources/{{ r.name | urlencode }}/disable"
                       hx-target="#admin-table" hx-swap="outerHTML"
                       hx-confirm="Stop the worker for {{ r.name }}?"
                       class="px-2 py-1 rounded text-xs border border-amber-500/60 text-amber-300 hover:bg-amber-500/10">
                 ■ stop
               </button>
-            {% else %}
-              <span class="text-xs text-zinc-600" title="Edit sources.toml to change file-managed sources.">
-                file-managed
-              </span>
             {% endif %}
           </td>
         </tr>

@@ -173,6 +173,23 @@ class SpeciesSiteNoteRow(Base):
     detection_count_at_gen: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class SourceDisableRow(Base):
+    """Marks a source (by name) as administratively disabled. Used to soft-
+    turn-off file-managed sources from sources.toml — runtime sources have
+    their own soft-delete via ``runtime_sources.deleted_at``, so for those
+    this row is just a redundant signal.
+
+    Keyed by source name. Re-enabling = deleting the row. The supervisor
+    polls _all_sources() every 15s; entering or leaving this table starts /
+    stops the worker on the next tick without needing a process restart.
+    """
+
+    __tablename__ = "source_disable_overrides"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    disabled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class DailyBriefRow(Base):
     """One-paragraph cross-site digest of a single UTC date. Generated once
     after midnight UTC and never regenerated — the day's data is fixed.

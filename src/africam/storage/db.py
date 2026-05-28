@@ -15,6 +15,7 @@ from africam.storage.models import (
     DetectionRow,
     RuntimeSourceRow,
     SiteNoteRow,
+    SourceDisableRow,
     SourceStateRow,
     SpeciesNoteRow,
     SpeciesSiteNoteRow,
@@ -650,6 +651,31 @@ class Database:
             if not include_deleted:
                 stmt = stmt.where(RuntimeSourceRow.deleted_at.is_(None))
             return list(s.scalars(stmt))
+
+    # --- Source-level disable overrides (works for static + runtime sources) ---
+
+    def list_disabled_source_names(self) -> set[str]:
+        """Source names currently flagged disabled by an admin toggle. Used
+        by ``_all_sources`` to drop them from the active roster — works for
+        BOTH file-managed (sources.toml) and runtime sources."""
+        with self._Session() as s:
+            return {
+                r for (r,) in s.execute(select(SourceDisableRow.source_name))
+            }
+
+    def set_source_disabled(self, source_name: str, disabled: bool) -> None:
+        """Flip the disable override for a source. Disabling a runtime source
+        is redundant with ``disable_runtime_source`` (which sets deleted_at);
+        the API endpoint dispatches correctly. For static sources this is the
+        only mechanism."""
+        with self._Session() as s, s.begin():
+            row = s.get(SourceDisableRow, source_name)
+            if disabled and row is None:
+                s.add(SourceDisableRow(
+                    source_name=source_name, disabled_at=datetime.now(UTC)
+                ))
+            elif not disabled and row is not None:
+                s.delete(row)
 
     # --- Site-level evidence + AI notes (one per source_name) ---
 
