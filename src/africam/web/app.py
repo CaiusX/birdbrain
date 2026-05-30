@@ -26,6 +26,7 @@ def _zone_info(tz_name: str) -> ZoneInfo:
     except ZoneInfoNotFoundError:
         return ZoneInfo("UTC")
 
+import squarify
 import structlog
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import (
@@ -931,60 +932,189 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/species", response_class=HTMLResponse)
     def species(
         request: Request,
-        sort: str = Query(default="last_seen"),  # last_seen | first_seen | count | max_conf | name
+        since: str = Query(default="all"),  # 24h | 7d | all
+        source: list[str] | None = Query(default=None),
+        q: str = Query(default=""),
     ) -> HTMLResponse:
+        """Per-source treemap of the species catalogue. Top-level rectangles
+        are sources; leaves are (source, species) pairs sized by detection
+        count in the chosen window. Clicking a leaf goes to /species/<sci>
+        already scoped to that source."""
         _, sources_by_name, _ = _all_sources()
-        # One row per (scientific_name, common_name) with aggregates.
-        # SQLite's group_concat handles the per-species source list cheaply.
-        with db.session() as s:
-            rows = list(
-                s.execute(
-                    select(
-                        DetectionRow.scientific_name,
-                        DetectionRow.common_name,
-                        func.count().label("n"),
-                        func.min(DetectionRow.started_at).label("first_seen"),
-                        func.max(DetectionRow.started_at).label("last_seen"),
-                        func.max(DetectionRow.confidence).label("max_conf"),
-                        func.avg(DetectionRow.confidence).label("avg_conf"),
-                        func.group_concat(DetectionRow.source_name.distinct()).label("sources"),
-                    )
-                    .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
-                )
-            )
-        species_list = [
-            {
-                "scientific_name": r.scientific_name,
-                "common_name": r.common_name,
-                "n": r.n,
-                "first_seen": r.first_seen,
-                "last_seen": r.last_seen,
-                "max_conf": r.max_conf,
-                "avg_conf": r.avg_conf,
-                "sources": sorted((r.sources or "").split(",")),
-            }
-            for r in rows
-        ]
-        sort_keys = {
-            "last_seen":  lambda r: r["last_seen"],
-            "first_seen": lambda r: r["first_seen"],
-            "count":      lambda r: r["n"],
-            "max_conf":   lambda r: r["max_conf"],
-            "name":       lambda r: r["common_name"].lower(),
-        }
-        key = sort_keys.get(sort, sort_keys["last_seen"])
-        # name sorts ascending; everything else descending (most recent / most / highest first).
-        species_list.sort(key=key, reverse=(sort != "name"))
+        sources_filter = [s for s in (source or []) if s]
 
-        # Pre-compute timezone per source so the template's localtime filter works.
-        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        # Time window.
+        now = datetime.now(UTC)
+        if since == "24h":
+            start = now - timedelta(hours=24)
+        elif since == "7d":
+            start = now - timedelta(days=7)
+        else:
+            start = None
+
+        # One GROUP BY query covers everything we need for the treemap.
+        stmt = (
+            select(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                func.count().label("n"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.max(DetectionRow.started_at).label("last_seen"),
+            )
+            .group_by(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+            )
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources_filter:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources_filter))
+
+        with db.session() as s:
+            rows = list(s.execute(stmt))
+            iucn = dict(s.execute(
+                select(
+                    SpeciesNoteRow.scientific_name,
+                    SpeciesNoteRow.conservation_status,
+                )
+            ).all())
+
+        # Group rows by source.
+        per_source: dict[str, list[dict]] = {}
+        for r in rows:
+            per_source.setdefault(r.source_name, []).append({
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "n": int(r.n),
+                "max_conf": float(r.max_conf or 0),
+                "last_seen": r.last_seen,
+                "iucn": iucn.get(r.scientific_name),
+            })
+
+        # ---- Squarified layout: outer = sources (sized by total detections),
+        # inner = species inside each source ----
+        viewport = {"w": 1200, "h": 700}
+        source_totals = sorted(
+            ((src, sum(sp["n"] for sp in per_source[src])) for src in per_source),
+            key=lambda t: -t[1],
+        )
+        outer_rects: list[dict] = []
+        tiles: list[dict] = []
+        source_pad_top = 18  # leaves room for the source header label
+        min_leaf_area = 12 * 12  # below this, roll into "+N more"
+
+        if source_totals:
+            outer_sizes = squarify.normalize_sizes(
+                [t[1] for t in source_totals], viewport["w"], viewport["h"]
+            )
+            outer_layout = squarify.squarify(
+                outer_sizes, 0, 0, viewport["w"], viewport["h"]
+            )
+            for (src_name, src_count), rect in zip(
+                source_totals, outer_layout, strict=False
+            ):
+                outer_rects.append({
+                    "name": src_name, "count": src_count,
+                    "x": rect["x"], "y": rect["y"],
+                    "w": rect["dx"], "h": rect["dy"],
+                })
+                inner_x = rect["x"] + 1
+                inner_y = rect["y"] + source_pad_top
+                inner_w = max(1.0, rect["dx"] - 2)
+                inner_h = max(1.0, rect["dy"] - source_pad_top - 1)
+                avail_area = inner_w * inner_h
+
+                species_in_src = sorted(
+                    per_source[src_name], key=lambda s: -s["n"]
+                )
+                total_size = sum(sp["n"] for sp in species_in_src)
+                kept: list[dict] = []
+                other_n = 0
+                other_count = 0
+                for sp in species_in_src:
+                    est_area = (
+                        sp["n"] / total_size * avail_area if total_size else 0
+                    )
+                    if est_area >= min_leaf_area:
+                        kept.append(sp)
+                    else:
+                        other_n += sp["n"]
+                        other_count += 1
+
+                leaf_sizes = [sp["n"] for sp in kept] + (
+                    [other_n] if other_n else []
+                )
+                if not leaf_sizes:
+                    continue
+                leaf_sizes_norm = squarify.normalize_sizes(
+                    leaf_sizes, inner_w, inner_h
+                )
+                leaf_layout = squarify.squarify(
+                    leaf_sizes_norm, inner_x, inner_y, inner_w, inner_h
+                )
+                for sp, lr in zip(kept, leaf_layout, strict=False):
+                    ls = sp["last_seen"]
+                    if ls.tzinfo is None:
+                        ls = ls.replace(tzinfo=UTC)
+                    tiles.append({
+                        "source": src_name,
+                        "scientific": sp["scientific"],
+                        "common": sp["common"],
+                        "n": sp["n"],
+                        "max_conf": sp["max_conf"],
+                        "age_s": int((now - ls).total_seconds()),
+                        "iucn": sp["iucn"],
+                        "x": lr["x"], "y": lr["y"],
+                        "w": lr["dx"], "h": lr["dy"],
+                        "is_other": False,
+                    })
+                if other_n:
+                    or_ = leaf_layout[-1]
+                    tiles.append({
+                        "source": src_name,
+                        "scientific": None,
+                        "common": f"+{other_count} more",
+                        "n": other_n,
+                        "max_conf": None,
+                        "age_s": None,
+                        "iucn": None,
+                        "x": or_["x"], "y": or_["y"],
+                        "w": or_["dx"], "h": or_["dy"],
+                        "is_other": True,
+                    })
+
+        # Alphabetical list — drives the mobile fallback and serves as an
+        # accessible flat view of everything the treemap covers.
+        all_species = sorted(
+            {(sp["scientific"], sp["common"])
+             for ss in per_source.values() for sp in ss},
+            key=lambda x: x[1].lower(),
+        )
+
+        all_known_sources = sorted(
+            set(per_source.keys())
+            | {c.name for c in sources_by_name.values()}
+        )
+
         return TEMPLATES.TemplateResponse(
             request,
             "species.html",
             {
-                "species_list": species_list,
-                "sort": sort,
-                "source_tz": source_tz,
+                "outer_rects": outer_rects,
+                "tiles": tiles,
+                "all_species": all_species,
+                "viewport": viewport,
+                "since": since,
+                "source_filter": sources_filter,
+                "q": q,
+                "all_source_names": all_known_sources,
+                "total_species": len(all_species),
+                "total_detections": sum(
+                    sp["n"] for ss in per_source.values() for sp in ss
+                ),
             },
         )
 

@@ -35,6 +35,7 @@ dependencies = [
     # ANTHROPIC_API_KEY isn't set, so the dep loads but doesn't run for
     # users who haven't opted in.
     "anthropic>=0.71",
+    "squarify>=0.4",
 ]
 
 [project.scripts]
