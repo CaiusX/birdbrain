@@ -570,7 +570,9 @@ def _daily_brief_tick(
             ),
             model=cfg.notes_model,
             client=client,
-            max_tokens=800,
+            # Room for an overall paragraph + ~9 sites × 4 bullets. 800 was
+            # truncating mid-JSON once the cam roster grew past 5.
+            max_tokens=1800,
         )
         if not brief_text:
             log.warning("notes.empty_response", kind="brief", date=d.isoformat())
@@ -685,7 +687,7 @@ def generate_brief_for_date(
         ),
         model=cfg.notes_model,
         client=client,
-        max_tokens=800,
+        max_tokens=1800,
     )
     if not brief_text:
         return None

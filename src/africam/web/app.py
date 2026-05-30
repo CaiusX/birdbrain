@@ -82,20 +82,78 @@ def _tz_abbr(tz_name: str | None) -> str:
         return tz_name
 
 
+def _salvage_truncated_json(raw: str) -> dict | None:
+    """When the model's JSON output was cut off mid-array (max_tokens hit),
+    walk back from the end to the last }, ] or "," and synthesise the closing
+    brackets/braces. String-aware so a } inside a string literal doesn't
+    confuse the counter. Returns the parsed dict on success, None otherwise."""
+    n = len(raw)
+    # Don't try harder than ~600 chars back; truncation is normally at the
+    # very end of a long output.
+    for end in range(n - 1, max(0, n - 600), -1):
+        if raw[end] not in "},]":
+            continue
+        candidate = raw[: end + 1]
+        depth_curly = depth_square = 0
+        in_str = esc = False
+        bad = False
+        for c in candidate:
+            if esc:
+                esc = False
+                continue
+            if in_str:
+                if c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth_curly += 1
+            elif c == "}":
+                depth_curly -= 1
+            elif c == "[":
+                depth_square += 1
+            elif c == "]":
+                depth_square -= 1
+            if depth_curly < 0 or depth_square < 0:
+                bad = True
+                break
+        if bad or in_str:
+            continue
+        # Trim a dangling comma that a truncated array almost always leaves.
+        trimmed = candidate.rstrip()
+        if trimmed.endswith(","):
+            trimmed = trimmed[:-1]
+        suffix = "]" * depth_square + "}" * depth_curly
+        try:
+            data = json.loads(trimmed + suffix)
+        except (ValueError, TypeError):
+            continue
+        return data if isinstance(data, dict) else None
+    return None
+
+
 def _parse_brief(text: str | None) -> dict:
     """Parse a daily brief into {overall, sites:[{site, bullets}]}. New briefs
     are JSON (optionally fenced); legacy briefs are a plain paragraph, returned
-    as the overall text with no per-site sections."""
+    as the overall text with no per-site sections. Truncated JSON (model hit
+    max_tokens) is salvaged by closing trailing brackets."""
     if not text:
         return {"overall": "", "sites": []}
     raw = text.strip()
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.S | re.I)
     if fence:
         raw = fence.group(1).strip()
+    elif raw.startswith("```"):
+        # Opening fence with no closing one — truncation cut it off. Strip
+        # the opening and proceed against the body.
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, count=1)
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
-        return {"overall": text.strip(), "sites": []}
+        data = _salvage_truncated_json(raw)
     if not isinstance(data, dict):
         return {"overall": text.strip(), "sites": []}
     sites: list[dict] = []
