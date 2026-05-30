@@ -50,6 +50,64 @@
   </div>
 </section>
 
+{# ---- 1b. Uptime / downtime ---- #}
+{%- macro dur(s) -%}
+  {%- if s is none or s == 0 -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h {{ ((s % 3600) // 60)|int }}m
+  {%- else -%}{{ (s // 86400)|int }}d {{ ((s % 86400) // 3600)|int }}h
+  {%- endif -%}
+{%- endmacro -%}
+{% set d = downtime %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline justify-between flex-wrap gap-2">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Uptime</h3>
+    <div class="text-xs tabular-nums">
+      <span class="text-zinc-500">last 24h</span>
+      <span class="{{ 'text-rose-300' if d.down_24h_s > 3600 else ('text-amber-300' if d.down_24h_s > 0 else 'text-emerald-300') }} ml-1">
+        {% if d.down_24h_s == 0 %}no downtime{% else %}{{ dur(d.down_24h_s) }} down{% endif %}
+      </span>
+      <span class="text-zinc-700 mx-2">·</span>
+      <span class="text-zinc-500">7d</span>
+      <span class="{{ 'text-rose-300' if d.down_7d_s > 14400 else ('text-amber-300' if d.down_7d_s > 0 else 'text-emerald-300') }} ml-1">
+        {% if d.down_7d_s == 0 %}no downtime{% else %}{{ dur(d.down_7d_s) }} down{% endif %}
+      </span>
+    </div>
+  </div>
+  {% if d.current_outage_s is not none %}
+    <div class="px-5 py-3 bg-rose-500/5 border-b border-rose-500/20 text-sm">
+      <span class="text-rose-300 font-medium">● currently down</span>
+      <span class="text-zinc-400 ml-2">for {{ dur(d.current_outage_s) }}</span>
+      {% if d.current_reason %}
+        <div class="text-xs text-rose-400/80 mt-1 max-w-3xl truncate" title="{{ d.current_reason }}">
+          {{ d.current_reason }}
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% if d.recent %}
+    <ul class="divide-y divide-zinc-800/60">
+      {% for o in d.recent %}
+        {% set duration_s = ((o.ended_at - o.started_at).total_seconds()) | int %}
+        <li class="px-5 py-2 flex items-baseline justify-between gap-3 text-xs">
+          <div class="min-w-0 flex-1">
+            <span class="text-zinc-400 tabular-nums">{{ o.started_at | localtime(tz_name, '%Y-%m-%d %H:%M') }}</span>
+            <span class="text-zinc-600 mx-1">→</span>
+            <span class="text-zinc-400 tabular-nums">{{ o.ended_at | localtime(tz_name, '%H:%M') }}</span>
+            {% if o.reason %}
+              <span class="text-zinc-600 ml-2 truncate inline-block max-w-md align-bottom" title="{{ o.reason }}">{{ o.reason }}</span>
+            {% endif %}
+          </div>
+          <span class="text-zinc-500 tabular-nums shrink-0">{{ dur(duration_s) }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% elif d.current_outage_s is none %}
+    <p class="px-5 py-4 text-xs text-zinc-500">No recorded outages.</p>
+  {% endif %}
+</section>
+
 {# ---- 2. Site header (name + coords; narrative lives below the video) ---- #}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
   <div class="px-5 py-4">

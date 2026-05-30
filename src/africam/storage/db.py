@@ -19,6 +19,7 @@ from africam.storage.models import (
     SourceStateRow,
     SpeciesNoteRow,
     SpeciesSiteNoteRow,
+    WorkerDowntimeRow,
     WorkerHeartbeatRow,
 )
 
@@ -169,10 +170,44 @@ class Database:
 
     # --- Worker heartbeats (admin liveness view) ---
 
+    # --- Downtime interval helpers (called inside heartbeat transactions) ---
+
+    def _ensure_open_downtime(
+        self, s, source_name: str, now: datetime, reason: str
+    ) -> None:
+        """Open an interval for ``source_name`` if no open one exists.
+        Idempotent — safe to call on every backoff tick. Must be called
+        inside an active session transaction."""
+        existing = s.execute(
+            select(WorkerDowntimeRow)
+            .where(WorkerDowntimeRow.source_name == source_name)
+            .where(WorkerDowntimeRow.ended_at.is_(None))
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is None:
+            s.add(WorkerDowntimeRow(
+                source_name=source_name,
+                started_at=now,
+                reason=(reason or "")[:512] or None,
+            ))
+
+    def _close_open_downtime(self, s, source_name: str, now: datetime) -> None:
+        """Close the currently-open interval for ``source_name`` if any."""
+        existing = s.execute(
+            select(WorkerDowntimeRow)
+            .where(WorkerDowntimeRow.source_name == source_name)
+            .where(WorkerDowntimeRow.ended_at.is_(None))
+            .order_by(WorkerDowntimeRow.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.ended_at = now
+
     def worker_started(self, source_name: str) -> None:
         now = datetime.now(UTC)
         with self._Session() as s, s.begin():
             row = s.get(WorkerHeartbeatRow, source_name)
+            was_running = row is not None and row.state == "running"
             if row is None:
                 row = WorkerHeartbeatRow(source_name=source_name)
                 s.add(row)
@@ -180,12 +215,15 @@ class Database:
             row.last_heartbeat_at = now
             row.state = "running"
             row.last_error = None
+            if not was_running:
+                self._close_open_downtime(s, source_name, now)
 
     def worker_heartbeat(self, source_name: str) -> None:
         """Bump last_heartbeat_at. Called every ~15s while the worker is healthy."""
         now = datetime.now(UTC)
         with self._Session() as s, s.begin():
             row = s.get(WorkerHeartbeatRow, source_name)
+            was_running = row is not None and row.state == "running"
             if row is None:
                 row = WorkerHeartbeatRow(
                     source_name=source_name, started_at=now, last_heartbeat_at=now
@@ -195,20 +233,78 @@ class Database:
                 row.last_heartbeat_at = now
                 row.state = "running"
                 row.last_error = None
+            if not was_running:
+                self._close_open_downtime(s, source_name, now)
 
     def worker_backoff(self, source_name: str, error: str) -> None:
+        now = datetime.now(UTC)
         with self._Session() as s, s.begin():
             row = s.get(WorkerHeartbeatRow, source_name)
             if row is None:
                 row = WorkerHeartbeatRow(
-                    source_name=source_name,
-                    started_at=datetime.now(UTC),
-                    last_heartbeat_at=datetime.now(UTC),
+                    source_name=source_name, started_at=now, last_heartbeat_at=now
                 )
                 s.add(row)
             row.state = "backoff"
             row.last_error = (error or "")[:512] or None
-            row.last_heartbeat_at = datetime.now(UTC)
+            row.last_heartbeat_at = now
+            # Idempotent — opens an interval iff none currently open. Note: if
+            # the app starts up while a site is already down, the first backoff
+            # call here will stamp started_at=NOW even though the real outage
+            # may be older; that's a known accuracy limit, not a bug.
+            self._ensure_open_downtime(s, source_name, now, error)
+
+    # --- Downtime query methods (for /admin and /site/<name>) ---
+
+    def current_downtime_by_source(self) -> dict[str, WorkerDowntimeRow]:
+        """Map source_name → currently-open downtime row (for the admin
+        table). Sites not in the dict are currently up (or have never been
+        observed by this codebase yet)."""
+        with self._Session() as s:
+            rows = list(s.scalars(
+                select(WorkerDowntimeRow)
+                .where(WorkerDowntimeRow.ended_at.is_(None))
+            ))
+        return {r.source_name: r for r in rows}
+
+    def downtime_seconds_since(
+        self, source_name: str, since: datetime
+    ) -> int:
+        """Total seconds of downtime for this source in [since, now)."""
+        now = datetime.now(UTC)
+        with self._Session() as s:
+            rows = s.execute(
+                select(WorkerDowntimeRow.started_at, WorkerDowntimeRow.ended_at)
+                .where(WorkerDowntimeRow.source_name == source_name)
+                .where(
+                    WorkerDowntimeRow.ended_at.is_(None)
+                    | (WorkerDowntimeRow.ended_at > since)
+                )
+            ).all()
+        total = 0
+        for start, end in rows:
+            s_utc = start if start.tzinfo else start.replace(tzinfo=UTC)
+            e_utc = (
+                end if (end is None or end.tzinfo) else end.replace(tzinfo=UTC)
+            )
+            effective_start = max(s_utc, since)
+            effective_end = e_utc if e_utc is not None else now
+            if effective_end > effective_start:
+                total += int((effective_end - effective_start).total_seconds())
+        return total
+
+    def recent_downtime(
+        self, source_name: str, limit: int = 5
+    ) -> list[WorkerDowntimeRow]:
+        """Most-recent CLOSED outages for the per-site uptime panel."""
+        with self._Session() as s:
+            return list(s.scalars(
+                select(WorkerDowntimeRow)
+                .where(WorkerDowntimeRow.source_name == source_name)
+                .where(WorkerDowntimeRow.ended_at.is_not(None))
+                .order_by(WorkerDowntimeRow.started_at.desc())
+                .limit(limit)
+            ))
 
     def worker_stopped(self, source_name: str) -> None:
         with self._Session() as s, s.begin():

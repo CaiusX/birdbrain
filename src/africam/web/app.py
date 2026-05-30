@@ -1183,6 +1183,24 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if src_cfg and src_cfg.kind == "youtube" else None
         )
 
+        # Downtime data for the uptime panel: how long this site has been
+        # down right now (None = up), how much in the last 24h / 7 days, and
+        # the last 5 closed outages with their cause.
+        now_utc = datetime.now(UTC)
+        cur_down = db.current_downtime_by_source().get(name)
+        cur_started = cur_down.started_at if cur_down else None
+        if cur_started is not None and cur_started.tzinfo is None:
+            cur_started = cur_started.replace(tzinfo=UTC)
+        downtime = {
+            "current_outage_s": (
+                int((now_utc - cur_started).total_seconds()) if cur_started else None
+            ),
+            "current_reason": cur_down.reason if cur_down else None,
+            "down_24h_s": db.downtime_seconds_since(name, now_utc - timedelta(hours=24)),
+            "down_7d_s": db.downtime_seconds_since(name, now_utc - timedelta(days=7)),
+            "recent": db.recent_downtime(name, limit=5),
+        }
+
         return TEMPLATES.TemplateResponse(
             request,
             "site_detail.html",
@@ -1199,6 +1217,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "top_species": top_species,
                 "recent_unique": recent_unique,
                 "recent": recent,
+                "downtime": downtime,
                 "hours": hours,
                 "peak_hour": peak_hour,
                 "tz_name": tz_name,
@@ -1226,10 +1245,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         runtime_rows = db.list_runtime_sources(include_deleted=True)
         runtime_by_name = {r.name: r for r in runtime_rows}
         heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        current_downs = db.current_downtime_by_source()
 
         now = datetime.now(UTC)
+        last_24h = now - timedelta(hours=24)
         rows: list[dict] = []
         seen: set[str] = set()
+
+        def _down_extras(name: str) -> tuple[int | None, int]:
+            cur = current_downs.get(name)
+            cur_started = cur.started_at if cur else None
+            if cur_started is not None and cur_started.tzinfo is None:
+                cur_started = cur_started.replace(tzinfo=UTC)
+            current_outage_s = (
+                int((now - cur_started).total_seconds()) if cur_started else None
+            )
+            return current_outage_s, db.downtime_seconds_since(name, last_24h)
 
         # Static sources first — they're the stable backbone. A live runtime
         # row with the same name overrides the config (existing "runtime wins"
@@ -1241,9 +1272,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 _runtime_to_cfg(rt) if (rt and rt.deleted_at is None) else static
             )
             hb = heartbeats.get(static.name)
+            cur_s, day_s = _down_extras(static.name)
             # Static-source disabled-ness lives only in the override table.
             rows.append(_admin_row(
-                cfg_src, rt, hb, deleted=(static.name in disabled), now=now
+                cfg_src, rt, hb, deleted=(static.name in disabled), now=now,
+                current_outage_s=cur_s, down_today_s=day_s,
             ))
 
         # Runtime-only sources (no static counterpart) — soft-deleted ones
@@ -1255,7 +1288,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             cfg_src = _runtime_to_cfg(rt)
             hb = heartbeats.get(rt.name)
             is_disabled = rt.deleted_at is not None or rt.name in disabled
-            rows.append(_admin_row(cfg_src, rt, hb, deleted=is_disabled, now=now))
+            cur_s, day_s = _down_extras(rt.name)
+            rows.append(_admin_row(
+                cfg_src, rt, hb, deleted=is_disabled, now=now,
+                current_outage_s=cur_s, down_today_s=day_s,
+            ))
 
         rows.sort(key=lambda r: r["name"].lower())
         running = sum(1 for r in rows if r["status"] == "running")
@@ -1350,6 +1387,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         *,
         deleted: bool,
         now: datetime,
+        current_outage_s: int | None = None,
+        down_today_s: int = 0,
     ) -> dict:
         is_runtime = runtime_row is not None
         if deleted:
@@ -1372,6 +1411,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "state": state,
             "since_s": since_s,
             "error": error,
+            "current_outage_s": current_outage_s,
+            "down_today_s": down_today_s,
         }
 
     def _health_view() -> dict:

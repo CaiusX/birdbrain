@@ -1,4 +1,12 @@
 {# expects: rows (list[dict]) #}
+{%- macro dur(s) -%}
+  {%- if s is none or s == 0 -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h {{ ((s % 3600) // 60)|int }}m
+  {%- else -%}{{ (s // 86400)|int }}d
+  {%- endif -%}
+{%- endmacro -%}
 <div id="admin-table"
      hx-get="/partials/admin" hx-target="this" hx-swap="outerHTML"
      hx-trigger="every 15s">
@@ -47,6 +55,16 @@
             {% if r.error %}
               <div class="text-xs text-rose-400 mt-1 max-w-md truncate" title="{{ r.error }}">
                 {{ r.error }}
+              </div>
+            {% endif %}
+            {% if r.current_outage_s is not none or r.down_today_s > 0 %}
+              <div class="text-xs mt-1 flex items-baseline gap-2">
+                {% if r.current_outage_s is not none %}
+                  <span class="text-rose-300" title="duration of current outage">down {{ dur(r.current_outage_s) }}</span>
+                {% endif %}
+                {% if r.down_today_s > 0 %}
+                  <span class="text-zinc-500" title="total downtime in the last 24 hours">24h: {{ dur(r.down_today_s) }}</span>
+                {% endif %}
               </div>
             {% endif %}
           </td>

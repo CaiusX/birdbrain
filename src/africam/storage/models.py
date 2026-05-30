@@ -173,6 +173,26 @@ class SpeciesSiteNoteRow(Base):
     detection_count_at_gen: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class WorkerDowntimeRow(Base):
+    """One row per outage interval per source. Opened when a worker enters
+    a non-running state (backoff / stale / stopped) from running; closed when
+    the worker reports running again. ``ended_at`` is NULL while the outage is
+    ongoing. Reason captures the first error message that triggered the open.
+
+    Lets the admin/site pages answer 'how much downtime today' and 'why was
+    this site silent' — both questions the point-in-time worker_heartbeats
+    table can't answer.
+    """
+
+    __tablename__ = "worker_downtime"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_name: Mapped[str] = mapped_column(String(128), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
 class SourceDisableRow(Base):
     """Marks a source (by name) as administratively disabled. Used to soft-
     turn-off file-managed sources from sources.toml — runtime sources have
