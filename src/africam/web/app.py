@@ -173,6 +173,22 @@ TEMPLATES.env.filters["tz_abbr"] = _tz_abbr
 TEMPLATES.env.filters["parse_brief"] = _parse_brief
 
 
+# Per-source colour palette for the /species treemap. Hand-picked to evoke
+# each site's biome rather than scraped from a logo (africam.com doesn't
+# carry distinct per-lodge logos — checked). Any source not in this dict
+# falls back to the template's default emerald.
+SOURCE_COLORS: dict[str, str] = {
+    "Tembe":             "#059669",  # KZN coastal sand forest — emerald-600
+    "Olifants (Naledi)": "#84cc16",  # Greater Kruger bushveld — lime-500
+    "Timbavati":         "#b91c1c",  # Lowveld red soils      — red-700
+    "Twin Pan":          "#a8a29e",  # Botswana pan / grass    — stone-400
+    "Safarihoek":        "#ea580c",  # Etosha Heights, arid    — orange-600
+    "Tau Game Lodge":    "#b45309",  # Madikwe bushveld        — amber-700
+    "Tortilis Camp":     "#eab308",  # Amboseli golden grass   — yellow-500
+    "Mara River":        "#0891b2",  # Mara Triangle, riverine — cyan-600
+}
+
+
 def _solar_event_utc_hours(d: date, lat: float, lon: float,
                            altitude_deg: float, morning: bool) -> float | None:
     """Sunrise-equation solver. Returns the UTC fractional hour on date ``d``
@@ -1115,6 +1131,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "total_detections": sum(
                     sp["n"] for ss in per_source.values() for sp in ss
                 ),
+                "source_colors": SOURCE_COLORS,
             },
         )
 

@@ -110,9 +110,10 @@
           {% else %}
             <a class="leaf" href="/species/{{ t.scientific | urlencode }}?source={{ t.source | urlencode }}"
                data-common="{{ t.common | lower }}" data-sci="{{ t.scientific | lower }}">
+              {% set tile_color = source_colors.get(t.source, '#10b981') %}
               <rect x="{{ t.x + 0.5 }}" y="{{ t.y + 0.5 }}" width="{{ t.w - 1 }}" height="{{ t.h - 1 }}"
-                    fill="#10b981" fill-opacity="{{ opacity }}"
-                    stroke="#064e3b" stroke-width="0.5"/>
+                    fill="{{ tile_color }}" fill-opacity="{{ opacity }}"
+                    stroke="#0a0a0a" stroke-width="0.5" stroke-opacity="0.4"/>
               {% if huge %}
                 <text x="{{ t.x + 6 }}" y="{{ t.y + 16 }}"
                       fill="#f4f4f5" font-size="12" font-family="ui-sans-serif, system-ui"
@@ -137,12 +138,26 @@ at {{ t.source }} · {{ "{:,}".format(t.n) }} detections · max conf {{ "%.2f"|f
         {% endfor %}
       </svg>
 
+      {# Per-source colour legend. Only show sources that actually appear in
+         the current rendering (i.e. have at least one outer rect). #}
+      {% if outer_rects %}
+        <div class="text-[11px] text-zinc-400 mt-3 flex items-center gap-3 flex-wrap">
+          {% for o in outer_rects %}
+            {% set sc = source_colors.get(o.name, '#10b981') %}
+            <span class="inline-flex items-baseline gap-1.5 whitespace-nowrap">
+              <span class="inline-block w-3 h-3 rounded-sm" style="background:{{ sc }};"></span>
+              <a href="/site/{{ o.name | urlencode }}" class="hover:text-zinc-100">{{ o.name }}</a>
+              <span class="text-zinc-600 tabular-nums">{{ "{:,}".format(o.count) }}</span>
+            </span>
+          {% endfor %}
+        </div>
+      {% endif %}
       <div class="text-[10px] text-zinc-600 mt-2 flex items-center gap-3 flex-wrap">
-        <span>● tile colour intensity = recency (brighter = heard more recently)</span>
+        <span>tile colour = site · opacity = recency (brighter = heard more recently)</span>
         <span class="text-zinc-700">·</span>
-        <span>tile corner dot = IUCN status</span>
+        <span>corner dot = IUCN status</span>
         <span class="text-zinc-700">·</span>
-        <span>tiles too small to draw are collapsed into <em>+N more</em> per source</span>
+        <span>tiles too small to draw are collapsed into <em>+N more</em></span>
       </div>
     </div>
   {% else %}
