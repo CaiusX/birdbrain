@@ -56,7 +56,7 @@
       {% if active_source %}
         <div class="mt-2">
           <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-emerald-500/10 border border-emerald-500/40 text-emerald-300">
-            filtered to <span class="font-medium">{{ active_source }}</span>
+            filtered to <a href="/site/{{ active_source | urlencode }}" class="font-medium hover:text-white" title="open {{ active_source }} site page">{{ active_source }}</a>
             <a href="/species/{{ scientific | urlencode }}" class="text-emerald-200/70 hover:text-white" title="show all sites">×</a>
           </span>
         </div>
@@ -66,7 +66,7 @@
       {% endif %}
       {% if site_note and site_note.note %}
         <div class="mt-3 max-w-3xl">
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">at {{ active_source }}</div>
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">at <a href="/site/{{ active_source | urlencode }}" class="hover:text-emerald-200" title="open {{ active_source }} site page">{{ active_source }}</a></div>
           <ul class="mt-1 space-y-0.5">
             {% for line in site_note.note.splitlines() %}
               {% if line.strip() %}
@@ -96,10 +96,22 @@
     </div>
     <div class="bg-zinc-900 px-5 py-3">
       <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">distribution <span class="normal-case text-zinc-600">· natural range</span></div>
+      {# Static-image slot: Wikipedia/Wikidata range maps include their own
+         continent outlines. Shown via <img> wrapped in an attribution link. #}
       <a id="species-range-link" href="#" target="_blank" rel="noopener" class="inline-block" style="display:none">
         <img id="species-range" alt="" loading="lazy"
              class="max-w-full max-h-44 rounded border border-zinc-800 bg-zinc-950">
       </a>
+      {# Live Leaflet slot: GBIF tiles are transparent overlays — they need
+         a basemap or you're staring at dots in space. JS swaps between this
+         and the <img> based on the range_map URL. #}
+      <div id="species-range-map"
+           class="w-full rounded border border-zinc-800 overflow-hidden"
+           style="display:none; height: 11rem;"></div>
+      <div id="species-range-attrib" class="text-[10px] text-zinc-500 mt-1" style="display:none;">
+        from <a id="species-range-attrib-link" href="#" target="_blank" rel="noopener" class="text-emerald-400 hover:text-emerald-300">GBIF</a>
+        · occurrence density (CC&nbsp;BY 4.0) over <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" class="hover:text-zinc-300">OpenStreetMap</a>
+      </div>
       <div id="species-range-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no range map</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
@@ -132,14 +144,49 @@
       link.style.display = '';
       if (empty) empty.style.display = 'none';
     }
+    // GBIF density-tile URLs need a live Leaflet map with an OSM basemap
+    // underneath; static-image URLs (Wikipedia, Wikidata) render as <img>.
+    const GBIF_RE = /^https:\/\/api\.gbif\.org\/v2\/map\/occurrence\/density\/\d+\/\d+\/\d+@2x\.png\?taxonKey=(\d+)/;
+    function showRange(src, href) {
+      if (!src) return;
+      const empty = document.getElementById('species-range-empty');
+      if (empty) empty.style.display = 'none';
+      const m = GBIF_RE.exec(src);
+      if (m) {
+        const taxonKey = m[1];
+        const mapEl = document.getElementById('species-range-map');
+        const attrib = document.getElementById('species-range-attrib');
+        const attribLink = document.getElementById('species-range-attrib-link');
+        mapEl.style.display = 'block';
+        attrib.style.display = '';
+        attribLink.href = href || 'https://www.gbif.org/species/' + taxonKey;
+        const map = L.map(mapEl, {
+          zoomControl: false, attributionControl: false,
+          worldCopyJump: true,
+        });
+        lockMap(map);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 8,
+        }).addTo(map);
+        L.tileLayer(
+          'https://api.gbif.org/v2/map/occurrence/density/{z}/{x}/{y}@2x.png'
+          + '?taxonKey=' + taxonKey
+          + '&style=classic.poly&bin=hex&hexPerTile=30',
+          { maxZoom: 8, opacity: 0.85 },
+        ).addTo(map);
+        map.setView([5, 25], 2);
+        return;
+      }
+      // Static image path (Wikipedia / Wikidata P181 / etc.).
+      show('species-range-link', 'species-range', null, src, href);
+    }
     fetch('/api/species_image?' + qs.toString())
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;
         show('species-photo-link', 'species-photo', 'species-photo-empty',
              data.thumbnail, data.page_url);
-        show('species-range-link', 'species-range', 'species-range-empty',
-             data.range_map, data.range_map_page || data.page_url);
+        showRange(data.range_map, data.range_map_page || data.page_url);
       })
       .catch(() => { /* silent — placeholders remain */ });
   })();
@@ -150,7 +197,7 @@
       <span class="uppercase tracking-wider text-[10px]">min confidence for this species</span>
       <input id="species-min-conf-input" type="number" min="0" max="1" step="0.05"
              value="{{ '%.2f'|format(note.min_confidence) if note and note.min_confidence is not none else '' }}"
-             placeholder="(source default)"
+             placeholder="(site default)"
              class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 w-24 tabular-nums text-zinc-100">
     </label>
     <button id="species-min-conf-save"
@@ -200,7 +247,7 @@
       <div class="text-2xl font-semibold tabular-nums">{{ "%.2f"|format(max_conf) }}</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
-      <div class="text-[10px] uppercase tracking-wider text-zinc-500">sources</div>
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500">sites</div>
       <div class="text-2xl font-semibold tabular-nums">{{ source_summary | length }}</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
@@ -238,7 +285,7 @@
     </h3>
     <div class="flex items-center gap-3 text-xs">
       <span class="text-zinc-400">
-        {% if active_source %}<span class="text-emerald-300">{{ active_source }}</span>{% else %}all sites{% endif %}
+        {% if active_source %}<a href="/site/{{ active_source | urlencode }}" class="text-emerald-300 hover:text-emerald-200" title="open {{ active_source }} site page">{{ active_source }}</a>{% else %}all sites{% endif %}
       </span>
       {% if all_sources %}
         <form method="get" action="/species/{{ scientific | urlencode }}" onchange="this.submit()">
@@ -261,8 +308,8 @@
   const SITES = {{ sites_for_map | tojson }};
   const ACTIVE = {{ active_source | tojson }};
   const SCI = {{ scientific | tojson }};
-  const COLOR_ACTIVE = '#10b981';
-  const COLOR_DIM = '#71717a';
+  const SOURCE_COLORS = {{ source_colors | tojson }};
+  const DEFAULT_COLOR = '#10b981';
 
   function speciesUrl(source) {
     const base = '/species/' + encodeURIComponent(SCI);
@@ -270,26 +317,28 @@
   }
 
   const map = L.map('species-map', { scrollWheelZoom: true });
+  lockMap(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap',
     maxZoom: 18,
   }).addTo(map);
 
-  const maxCount = Math.max(1, ...SITES.map(s => s.count));
+  // One small, uniform bubble per site that recorded this species. Colour
+  // comes from the per-site biome palette so the marker matches the legend
+  // on /species and /confidence. The active-filter site gets a thick white
+  // ring around its bubble (same fill colour) so it stands out without
+  // changing its identity.
+  const RADIUS = 7;
   const markers = [];
   SITES.forEach(s => {
     const isActive = ACTIVE && s.name === ACTIVE;
-    // Area ∝ frequency: radius scales with sqrt(count). 0-count sites stay a
-    // small faded dot so the full distribution is still visible.
-    const radius = s.count > 0 ? 6 + 20 * Math.sqrt(s.count / maxCount) : 4;
-    const color = isActive ? COLOR_ACTIVE : (ACTIVE ? COLOR_DIM : COLOR_ACTIVE);
-    const fillOpacity = s.count > 0 ? (isActive || !ACTIVE ? 0.55 : 0.25) : 0.12;
+    const fill = SOURCE_COLORS[s.name] || DEFAULT_COLOR;
     const m = L.circleMarker([s.lat, s.lon], {
-      radius,
-      color,
+      radius: RADIUS,
+      color: isActive ? '#fafafa' : fill,
       weight: isActive ? 3 : 1,
-      fillColor: color,
-      fillOpacity,
+      fillColor: fill,
+      fillOpacity: 0.85,
     }).addTo(map);
     m.bindTooltip(`${s.name} · ${s.count}`, {
       permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
@@ -339,7 +388,7 @@
     <div class="px-5 py-3 border-b border-zinc-800">
       <h3 class="text-sm uppercase tracking-wider text-zinc-400">
         Hour of day
-        <span class="text-zinc-500 normal-case text-xs ml-1">aggregated local time per source</span>
+        <span class="text-zinc-500 normal-case text-xs ml-1">aggregated local time per site</span>
       </h3>
     </div>
     <div class="px-5 py-4">
@@ -363,13 +412,13 @@
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl">
     <div class="px-5 py-3 border-b border-zinc-800">
-      <h3 class="text-sm uppercase tracking-wider text-zinc-400">By source</h3>
+      <h3 class="text-sm uppercase tracking-wider text-zinc-400">By site</h3>
     </div>
     {% if source_summary %}
       <table class="w-full text-sm">
         <thead class="text-zinc-400 text-xs uppercase tracking-wider">
           <tr class="border-b border-zinc-800">
-            <th class="text-left font-medium px-5 py-2">Source</th>
+            <th class="text-left font-medium px-5 py-2">Site</th>
             <th class="text-right font-medium px-5 py-2">Count</th>
             <th class="text-right font-medium px-5 py-2">Max conf</th>
             <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Last seen</th>
@@ -379,7 +428,7 @@
           {% for s in source_summary %}
             {% set tz = (source_tz | default({})).get(s.source, 'UTC') %}
             <tr class="hover:bg-zinc-800/40">
-              <td class="px-5 py-2"><code class="text-zinc-300">{{ s.source }}</code></td>
+              <td class="px-5 py-2"><a href="/site/{{ s.source | urlencode }}" class="text-zinc-300 hover:text-emerald-300">{{ s.source }}</a></td>
               <td class="px-5 py-2 text-right tabular-nums">{{ s.count }}</td>
               <td class="px-5 py-2 text-right tabular-nums">{{ "%.2f"|format(s.max_conf) }}</td>
               <td class="px-5 py-2 text-zinc-400 hidden md:table-cell tabular-nums">

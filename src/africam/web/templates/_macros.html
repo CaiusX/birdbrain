@@ -31,6 +31,14 @@
 <a href="/species/{{ scientific | urlencode }}{% if source %}?source={{ source | urlencode }}{% endif %}"{% if cls %} class="{{ cls }}"{% endif %}>{{ common }}</a>
 {%- endmacro %}
 
+{# Link a site name to its site-detail page. Use this anywhere a site name
+   is shown so the user can always click through to /site/<name>. Pass cls
+   to override the default emerald hover when the surrounding context has
+   its own colour scheme. #}
+{% macro site_link(name, cls="hover:text-emerald-300") -%}
+<a href="/site/{{ name | urlencode }}"{% if cls %} class="{{ cls }}"{% endif %}>{{ name }}</a>
+{%- endmacro %}
+
 {% set _IUCN_CLASS = {
   "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
   "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),

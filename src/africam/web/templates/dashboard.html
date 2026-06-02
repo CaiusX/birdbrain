@@ -113,7 +113,7 @@
         Recent detections · <span id="rows-source-label">all</span>
       </h2>
       <div id="source-chips" class="flex items-center gap-1 flex-wrap text-xs">
-        <span class="text-zinc-500 mr-1">sources</span>
+        <span class="text-zinc-500 mr-1">sites</span>
         <!-- chips rendered by JS from TILES -->
       </div>
     </div>
@@ -254,10 +254,10 @@
     const sel = selectedSources();
     const all = TILES.map((t) => t.name);
     let label;
-    if (sel.length === 0)               label = '(no sources)';
-    else if (sel.length === all.length) label = 'all sources';
+    if (sel.length === 0)               label = '(no sites)';
+    else if (sel.length === all.length) label = 'all sites';
     else if (sel.length === 1)          label = sel[0];
-    else                                label = sel.length + ' sources';
+    else                                label = sel.length + ' sites';
     document.getElementById('rows-source-label').textContent = label;
     htmx.process(list);
     htmx.ajax('GET', list.getAttribute('hx-get'), {target: list, swap: 'innerHTML'});
@@ -265,6 +265,7 @@
 
   // --- Activity map: bubbles sized by unique species in last 24h ---
   const map = L.map('map', { scrollWheelZoom: true });
+  lockMap(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap',
     maxZoom: 18,

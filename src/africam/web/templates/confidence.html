@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block title %}Africam · confidence cutoff{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+
+  {# --- Filter bar (same time pills as /species) --- #}
+  <div class="px-5 py-3 border-b border-zinc-800 flex flex-wrap items-center gap-x-5 gap-y-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Confidence cutoff analysis
+      <span class="text-zinc-500 text-xs normal-case ml-2">
+        how many species survive as you raise the BirdNET floor
+      </span>
+    </h2>
+    <div class="flex items-center gap-1 text-xs ml-auto">
+      <span class="text-zinc-500 mr-1">window:</span>
+      {% for key, label in [('24h','24h'), ('7d','7d'), ('all','all time')] %}
+        {% if since == key %}
+          <span class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/40">{{ label }}</span>
+        {% else %}
+          <a href="/confidence?since={{ key }}&cutoff={{ default_cutoff }}"
+             class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-700/60">{{ label }}</a>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if site_names %}
+  {# --- Slider + live readout --- #}
+  <div class="px-5 py-5 border-b border-zinc-800 grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-6 items-end">
+    <div>
+      <label for="conf-slider" class="block text-xs uppercase tracking-wider text-zinc-500 mb-2">
+        confidence floor ≥ <span id="conf-readout" class="text-emerald-300 text-base font-semibold tabular-nums normal-case tracking-normal">{{ "%.2f"|format(default_cutoff) }}</span>
+      </label>
+      <input id="conf-slider" type="range"
+             min="0" max="{{ n_buckets - 1 }}" step="1"
+             value="{{ default_idx }}"
+             class="w-full accent-emerald-400">
+      <div class="flex justify-between text-[10px] text-zinc-600 mt-1 tabular-nums">
+        <span>0.10</span><span>0.30</span><span>0.50</span><span>0.70</span><span>0.90</span>
+      </div>
+    </div>
+    <div class="flex items-center gap-6 text-sm">
+      <div>
+        <div class="text-xs text-zinc-500 uppercase tracking-wider">species kept</div>
+        <div class="tabular-nums">
+          <span id="species-kept" class="text-2xl font-semibold text-zinc-100">{{ overall_species_curve[default_idx] }}</span>
+          <span class="text-zinc-500 text-sm">of {{ total_species_floor }}</span>
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-zinc-500 uppercase tracking-wider">detections retained</div>
+        <div class="tabular-nums">
+          <span id="dets-kept" class="text-2xl font-semibold text-zinc-100">{{ "{:,}".format(overall_det_curve[default_idx]) }}</span>
+          <span class="text-zinc-500 text-sm">of {{ "{:,}".format(total_dets_floor) }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# --- Line chart: species count vs confidence threshold --- #}
+  <div class="p-4">
+    <svg id="conf-chart" viewBox="0 0 {{ chart.w }} {{ chart.h }}"
+         preserveAspectRatio="xMidYMid meet"
+         class="w-full block" style="max-height: 50vh;">
+
+      {# Y-grid + ticks #}
+      {% for t in y_ticks %}
+        <line x1="{{ chart.padL }}" x2="{{ chart.padL + chart.plotW }}"
+              y1="{{ t.y }}" y2="{{ t.y }}"
+              stroke="#27272a" stroke-width="0.5"
+              {% if t.val == 0 %}stroke="#3f3f46"{% endif %}/>
+        <text x="{{ chart.padL - 6 }}" y="{{ t.y + 3 }}"
+              text-anchor="end" fill="#71717a" font-size="10"
+              font-family="ui-sans-serif, system-ui">{{ t.val }}</text>
+      {% endfor %}
+
+      {# X-axis ticks + labels #}
+      {% for t in x_ticks %}
+        <line x1="{{ t.x }}" x2="{{ t.x }}"
+              y1="{{ chart.padT + chart.plotH }}"
+              y2="{{ chart.padT + chart.plotH + 4 }}"
+              stroke="#52525b" stroke-width="0.5"/>
+        <text x="{{ t.x }}" y="{{ chart.padT + chart.plotH + 16 }}"
+              text-anchor="middle" fill="#71717a" font-size="10"
+              font-family="ui-sans-serif, system-ui">{{ "%.2f"|format(t.val) }}</text>
+      {% endfor %}
+
+      {# Axis labels #}
+      <text x="{{ chart.padL + chart.plotW / 2 }}"
+            y="{{ chart.h - 4 }}"
+            text-anchor="middle" fill="#52525b" font-size="10"
+            font-family="ui-sans-serif, system-ui">
+        BirdNET confidence threshold
+      </text>
+      <text transform="translate(12, {{ chart.padT + chart.plotH / 2 }}) rotate(-90)"
+            text-anchor="middle" fill="#52525b" font-size="10"
+            font-family="ui-sans-serif, system-ui">
+        distinct species
+      </text>
+
+      {# Per-site curves #}
+      {% for src in site_names %}
+        {% set sc = source_colors.get(src, '#10b981') %}
+        <polyline points="{{ site_polylines[src] }}"
+                  fill="none" stroke="{{ sc }}" stroke-width="1.5"
+                  stroke-opacity="0.85"
+                  data-site="{{ src }}"/>
+        <circle r="3" fill="{{ sc }}" stroke="#0a0a0a" stroke-width="0.5"
+                class="conf-dot" data-site="{{ src }}"/>
+      {% endfor %}
+
+      {# Overall curve (drawn on top) #}
+      <polyline points="{{ overall_polyline }}"
+                fill="none" stroke="#f4f4f5" stroke-width="2.5"
+                stroke-opacity="0.95"/>
+      <circle id="conf-dot-overall" r="4" fill="#f4f4f5"
+              stroke="#0a0a0a" stroke-width="0.75"/>
+
+      {# Vertical cutoff marker line #}
+      <line id="conf-cursor"
+            y1="{{ chart.padT }}"
+            y2="{{ chart.padT + chart.plotH }}"
+            stroke="#fbbf24" stroke-width="1" stroke-dasharray="3 2"/>
+    </svg>
+
+    {# Legend #}
+    <div class="text-[11px] text-zinc-400 mt-3 flex items-center gap-3 flex-wrap">
+      <span class="inline-flex items-baseline gap-1.5 whitespace-nowrap font-medium text-zinc-200">
+        <span class="inline-block w-3 h-0.5 align-middle" style="background:#f4f4f5;"></span>
+        overall
+      </span>
+      {% for src in site_names %}
+        {% set sc = source_colors.get(src, '#10b981') %}
+        <span class="inline-flex items-baseline gap-1.5 whitespace-nowrap">
+          <span class="inline-block w-3 h-0.5 align-middle" style="background:{{ sc }};"></span>
+          <a href="/site/{{ src | urlencode }}" class="hover:text-zinc-100">{{ src }}</a>
+        </span>
+      {% endfor %}
+    </div>
+  </div>
+
+  {# --- Per-site cards at current cutoff --- #}
+  <div class="px-5 py-4 border-t border-zinc-800">
+    <div class="text-xs uppercase tracking-wider text-zinc-500 mb-3">
+      at this threshold, per site
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-8 gap-2">
+      {% for src in site_names %}
+        {% set sc = source_colors.get(src, '#10b981') %}
+        <div class="rounded-lg bg-zinc-950 border border-zinc-800 p-3"
+             style="border-top: 2px solid {{ sc }};">
+          <div class="text-xs truncate" title="{{ src }}">
+            <a href="/site/{{ src | urlencode }}" class="text-zinc-400 hover:text-zinc-100">{{ src }}</a>
+          </div>
+          <div class="mt-1 tabular-nums">
+            <span class="text-lg font-semibold text-zinc-100"
+                  data-card-species="{{ src }}">{{ species_curves[src][default_idx] }}</span>
+            <span class="text-zinc-500 text-xs">sp</span>
+          </div>
+          <div class="text-xs text-zinc-500 tabular-nums">
+            <span data-card-dets="{{ src }}">{{ "{:,}".format(det_curves[src][default_idx]) }}</span> det
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-10 text-center">
+      No detections in this window. Switch to <code class="text-zinc-300">all time</code>
+      or wait for the workers to log some.
+    </p>
+  {% endif %}
+</section>
+
+{% if site_names %}
+<script id="conf-data" type="application/json">
+{{ {
+  "speciesCurves": species_curves,
+  "detCurves": det_curves,
+  "overallSpecies": overall_species_curve,
+  "overallDets": overall_det_curve,
+  "confMin": conf_min,
+  "nBuckets": n_buckets,
+  "chart": chart,
+  "yMax": y_max_species
+} | tojson }}
+</script>
+
+<script>
+(function () {
+  const data = JSON.parse(document.getElementById('conf-data').textContent);
+  const slider = document.getElementById('conf-slider');
+  const readout = document.getElementById('conf-readout');
+  const speciesKept = document.getElementById('species-kept');
+  const detsKept = document.getElementById('dets-kept');
+  const cursor = document.getElementById('conf-cursor');
+  const overallDot = document.getElementById('conf-dot-overall');
+  const siteDots = document.querySelectorAll('.conf-dot');
+  const cardSpecies = document.querySelectorAll('[data-card-species]');
+  const cardDets = document.querySelectorAll('[data-card-dets]');
+
+  const ch = data.chart;
+  const N = data.nBuckets;
+  const yMax = Math.max(1, data.yMax);
+  const xFor = i => ch.padL + (i / Math.max(1, N - 1)) * ch.plotW;
+  const yFor = v => ch.padT + ch.plotH * (1 - v / yMax);
+
+  function fmt(n) {
+    return n.toLocaleString();
+  }
+
+  function update(idx) {
+    const conf = data.confMin + idx * 0.01;
+    readout.textContent = conf.toFixed(2);
+    speciesKept.textContent = data.overallSpecies[idx];
+    detsKept.textContent = fmt(data.overallDets[idx]);
+
+    const x = xFor(idx);
+    cursor.setAttribute('x1', x);
+    cursor.setAttribute('x2', x);
+    overallDot.setAttribute('cx', x);
+    overallDot.setAttribute('cy', yFor(data.overallSpecies[idx]));
+
+    siteDots.forEach(dot => {
+      const site = dot.getAttribute('data-site');
+      const curve = data.speciesCurves[site];
+      if (!curve) return;
+      dot.setAttribute('cx', x);
+      dot.setAttribute('cy', yFor(curve[idx]));
+    });
+
+    cardSpecies.forEach(el => {
+      const site = el.getAttribute('data-card-species');
+      const curve = data.speciesCurves[site];
+      if (curve) el.textContent = curve[idx];
+    });
+    cardDets.forEach(el => {
+      const site = el.getAttribute('data-card-dets');
+      const curve = data.detCurves[site];
+      if (curve) el.textContent = fmt(curve[idx]);
+    });
+  }
+
+  let pending = null;
+  slider.addEventListener('input', e => {
+    if (pending !== null) cancelAnimationFrame(pending);
+    pending = requestAnimationFrame(() => {
+      pending = null;
+      update(parseInt(e.target.value, 10));
+    });
+  });
+
+  // Initial dot positions.
+  update(parseInt(slider.value, 10));
+})();
+</script>
+{% endif %}
+{% endblock %}

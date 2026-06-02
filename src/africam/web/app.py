@@ -951,6 +951,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         since: str = Query(default="all"),  # 24h | 7d | all
         source: list[str] | None = Query(default=None),
         q: str = Query(default=""),
+        tail: bool = Query(default=False),  # level-2 zoom: only ≤median species
     ) -> HTMLResponse:
         """Per-source treemap of the species catalogue. Top-level rectangles
         are sources; leaves are (source, species) pairs sized by detection
@@ -1010,6 +1011,44 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "iucn": iucn.get(r.scientific_name),
             })
 
+        # Level-2 zoom: tail mode keeps only species at-or-below the per-site
+        # median count, so the long tail expands to fill the viewport. Only
+        # applied when exactly one source is in scope (otherwise the median
+        # split is per-site and doesn't compose cleanly across sites). The
+        # "loud" species we hid are remembered so the template can surface
+        # them as a back-out list.
+        tail_active = bool(tail) and len(per_source) == 1
+        hidden_loud: list[dict] = []
+        tail_threshold: int | None = None
+        if tail_active:
+            src_only = next(iter(per_source))
+            counts = sorted(sp["n"] for sp in per_source[src_only])
+            if counts:
+                med = counts[len(counts) // 2]
+                tail_threshold = med
+                kept = [sp for sp in per_source[src_only] if sp["n"] <= med]
+                hidden = sorted(
+                    (sp for sp in per_source[src_only] if sp["n"] > med),
+                    key=lambda s: -s["n"],
+                )
+                # If the median collapses everything (e.g. all species have
+                # count 1), don't bother — fall back to the level-1 view.
+                if kept and hidden:
+                    per_source[src_only] = kept
+                    hidden_loud = [
+                        {
+                            "scientific": sp["scientific"],
+                            "common": sp["common"],
+                            "n": sp["n"],
+                            "max_conf": sp["max_conf"],
+                            "iucn": sp["iucn"],
+                        }
+                        for sp in hidden
+                    ]
+                else:
+                    tail_active = False
+                    tail_threshold = None
+
         # ---- Squarified layout: outer = sources (sized by total detections),
         # inner = species inside each source ----
         viewport = {"w": 1200, "h": 700}
@@ -1020,7 +1059,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         outer_rects: list[dict] = []
         tiles: list[dict] = []
         source_pad_top = 18  # leaves room for the source header label
-        min_leaf_area = 12 * 12  # below this, roll into "+N more"
+        # When the user has zoomed in to a single source, the whole viewport
+        # is dedicated to that site — show every species, including the long
+        # tail. Otherwise roll the dust into "+N more" so the layout reads.
+        single_source = len(source_totals) == 1
+        min_leaf_area = 0 if single_source else 12 * 12
 
         if source_totals:
             outer_sizes = squarify.normalize_sizes(
@@ -1110,6 +1153,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             key=lambda x: x[1].lower(),
         )
 
+        # Long tail at the zoomed-in level: rarest species at this site,
+        # surfaced as a clickable list so the tiny tiles aren't the only
+        # way to reach them. Empty list when not zoomed.
+        long_tail: list[dict] = []
+        if single_source:
+            src_name = source_totals[0][0]
+            long_tail = [
+                {
+                    "scientific": sp["scientific"],
+                    "common": sp["common"],
+                    "n": sp["n"],
+                    "max_conf": sp["max_conf"],
+                    "iucn": sp["iucn"],
+                }
+                for sp in sorted(per_source[src_name], key=lambda s: s["n"])[:24]
+            ]
+
         all_known_sources = sorted(
             set(per_source.keys())
             | {c.name for c in sources_by_name.values()}
@@ -1132,6 +1192,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     sp["n"] for ss in per_source.values() for sp in ss
                 ),
                 "source_colors": SOURCE_COLORS,
+                "zoomed": single_source,
+                "zoomed_source": (
+                    source_totals[0][0] if single_source else None
+                ),
+                "long_tail": long_tail,
+                "tail_active": tail_active,
+                "tail_threshold": tail_threshold,
+                "hidden_loud": hidden_loud,
             },
         )
 
@@ -1244,12 +1312,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             spread_clips = []
         good_clips = [r for r in all_rows if r.label == "good" and r.clip_path][:8]
 
-        # Map of every site this species could be heard at, sized by how often
-        # it actually was. Sites with a count of 0 still render (faded) so the
-        # full distribution is visible.
+        # Map of every site this species HAS been heard at, coloured by the
+        # site's biome palette (see SOURCE_COLORS). Sites that have never
+        # recorded this species are omitted from the map entirely — the
+        # absence isn't informative on a species page (the alphabetical
+        # "By site" table below already lists who heard it and who didn't).
         sites_for_map = [
             {**site, "count": site_counts.get(site["name"], 0)}
             for site in _map_sites(sources_by_name)
+            if site_counts.get(site["name"], 0) > 0
         ]
         # Sites where it was heard, most frequent first — drives the <select>
         # fallback (and covers any source lacking map coordinates).
@@ -1271,6 +1342,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "site_note": site_note,
                 "active_source": active_source,
                 "sites_for_map": sites_for_map,
+                "source_colors": SOURCE_COLORS,
                 "all_sources": all_sources,
                 "total": len(all_rows),
                 "max_conf": max((r.confidence for r in all_rows), default=0),
@@ -1290,6 +1362,196 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     name: cfg.timezone for name, cfg in sources_by_name.items()
                 },
                 **_note_tag_context(),
+            },
+        )
+
+    @app.get("/confidence", response_class=HTMLResponse)
+    def confidence_page(
+        request: Request,
+        since: str = Query(default="all"),
+        cutoff: float = Query(default=0.65),
+    ) -> HTMLResponse:
+        """How does the species roster collapse as you raise the BirdNET
+        confidence floor? We pre-compute, per source, the right-cumulative
+        species count and detection count over a 1%-wide bucket grid spanning
+        0.10 → 0.99 (90 buckets). The slider is then a pure client-side index
+        lookup — no server round-trip per drag tick."""
+        from sqlalchemy import Integer
+        from sqlalchemy import cast as sa_cast
+
+        now = datetime.now(UTC)
+        if since == "24h":
+            start = now - timedelta(hours=24)
+        elif since == "7d":
+            start = now - timedelta(days=7)
+        else:
+            start = None
+
+        N_BUCKETS = 90
+        CONF_MIN = 0.10  # bucket index = floor((conf - 0.10) * 100), clamped
+
+        # Per-(source, species) max confidence — drives the species curves.
+        stmt_max = (
+            select(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                func.max(DetectionRow.confidence).label("max_conf"),
+            )
+            .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+        )
+        # Per-(source, bucket) detection counts — drives the detection curves.
+        bucket = sa_cast(
+            (DetectionRow.confidence - CONF_MIN) * 100, Integer
+        ).label("bucket")
+        stmt_hist = (
+            select(
+                DetectionRow.source_name,
+                bucket,
+                func.count().label("n"),
+            )
+            .where(DetectionRow.confidence >= CONF_MIN)
+            .group_by(DetectionRow.source_name, bucket)
+        )
+        if start is not None:
+            stmt_max = stmt_max.where(DetectionRow.started_at >= start)
+            stmt_hist = stmt_hist.where(DetectionRow.started_at >= start)
+
+        with db.session() as s:
+            rows_max = list(s.execute(stmt_max))
+            rows_hist = list(s.execute(stmt_hist))
+
+        per_source_maxconfs: dict[str, list[float]] = {}
+        species_global_max: dict[str, float] = {}
+        for r in rows_max:
+            c = float(r.max_conf or 0)
+            per_source_maxconfs.setdefault(r.source_name, []).append(c)
+            if c > species_global_max.get(r.scientific_name, 0.0):
+                species_global_max[r.scientific_name] = c
+
+        per_source_hist: dict[str, list[int]] = {}
+        for r in rows_hist:
+            h = per_source_hist.setdefault(r.source_name, [0] * N_BUCKETS)
+            b = int(r.bucket)
+            if 0 <= b < N_BUCKETS:
+                h[b] += int(r.n)
+
+        def species_buckets(maxconfs: list[float]) -> list[int]:
+            b = [0] * N_BUCKETS
+            for c in maxconfs:
+                idx = int((c - CONF_MIN) * 100)
+                if idx < 0:
+                    continue
+                if idx >= N_BUCKETS:
+                    idx = N_BUCKETS - 1
+                b[idx] += 1
+            return b
+
+        def cumulative_from_right(buckets: list[int]) -> list[int]:
+            out = [0] * len(buckets)
+            running = 0
+            for i in range(len(buckets) - 1, -1, -1):
+                running += buckets[i]
+                out[i] = running
+            return out
+
+        species_curves: dict[str, list[int]] = {
+            src: cumulative_from_right(species_buckets(per_source_maxconfs[src]))
+            for src in per_source_maxconfs
+        }
+        det_curves: dict[str, list[int]] = {
+            src: cumulative_from_right(per_source_hist[src])
+            for src in per_source_hist
+        }
+        overall_species_curve = cumulative_from_right(
+            species_buckets(list(species_global_max.values()))
+        )
+        overall_hist = [0] * N_BUCKETS
+        for h in per_source_hist.values():
+            for i, v in enumerate(h):
+                overall_hist[i] += v
+        overall_det_curve = cumulative_from_right(overall_hist)
+
+        # Chart geometry.
+        chart = {"w": 820, "h": 320, "padL": 44, "padR": 16, "padT": 14, "padB": 32}
+        chart["plotW"] = chart["w"] - chart["padL"] - chart["padR"]
+        chart["plotH"] = chart["h"] - chart["padT"] - chart["padB"]
+
+        y_max_species = max(
+            overall_species_curve[0] if overall_species_curve else 0, 1
+        )
+
+        def polyline(curve: list[int], y_max: int) -> str:
+            pts = []
+            for i, v in enumerate(curve):
+                x = chart["padL"] + (i / max(1, N_BUCKETS - 1)) * chart["plotW"]
+                y = chart["padT"] + chart["plotH"] * (1 - v / y_max)
+                pts.append(f"{x:.1f},{y:.1f}")
+            return " ".join(pts)
+
+        site_polylines = {
+            src: polyline(species_curves[src], y_max_species)
+            for src in species_curves
+        }
+        overall_polyline = polyline(overall_species_curve, y_max_species)
+
+        x_ticks = []
+        for tv in (0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99):
+            idx = int(round((tv - CONF_MIN) * 100))
+            x_ticks.append({
+                "val": tv,
+                "x": chart["padL"] + (idx / max(1, N_BUCKETS - 1)) * chart["plotW"],
+            })
+
+        # Y ticks: pick a 1/2/5 × 10^k step that yields ~5 ticks.
+        def nice_step(y_max: int, target: int = 5) -> int:
+            raw = max(1, y_max / target)
+            mag = 10 ** int(math.floor(math.log10(raw)))
+            for m in (1, 2, 5, 10):
+                if raw / mag <= m:
+                    return m * mag
+            return 10 * mag
+
+        step = nice_step(y_max_species)
+        y_ticks = []
+        v = 0
+        while v <= y_max_species + step // 2:
+            y_ticks.append({
+                "val": v,
+                "y": chart["padT"]
+                    + chart["plotH"] * (1 - v / max(1, y_max_species)),
+            })
+            v += step
+
+        cutoff = max(CONF_MIN, min(0.99, cutoff))
+        default_idx = int(round((cutoff - CONF_MIN) * 100))
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "confidence.html",
+            {
+                "since": since,
+                "site_names": sorted(per_source_maxconfs.keys()),
+                "species_curves": species_curves,
+                "det_curves": det_curves,
+                "overall_species_curve": overall_species_curve,
+                "overall_det_curve": overall_det_curve,
+                "site_polylines": site_polylines,
+                "overall_polyline": overall_polyline,
+                "source_colors": SOURCE_COLORS,
+                "chart": chart,
+                "y_max_species": y_max_species,
+                "x_ticks": x_ticks,
+                "y_ticks": y_ticks,
+                "conf_min": CONF_MIN,
+                "n_buckets": N_BUCKETS,
+                "default_cutoff": cutoff,
+                "default_idx": default_idx,
+                "total_species_floor": (
+                    overall_species_curve[0] if overall_species_curve else 0
+                ),
+                "total_dets_floor": (
+                    overall_det_curve[0] if overall_det_curve else 0
+                ),
             },
         )
 
@@ -1412,6 +1674,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             {
                 "name": name,
                 "src_cfg": src_cfg,
+                "source_color": SOURCE_COLORS.get(name, "#10b981"),
                 "video_id": video_id,
                 "multisite": bool(src_cfg and src_cfg.multisite),
                 "note": site_note,
@@ -3120,6 +3383,55 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 }
         return None
 
+    def _gbif_range_map(scientific: str) -> dict | None:
+        """GBIF fallback: when Wikipedia and Wikidata both have no range map,
+        GBIF's occurrence-density tile (CC-BY 4.0) is the next licence-clean
+        rung. Two cheap HTTPs — species/match to resolve the scientific name
+        to a usageKey, then occurrence/count so we don't store a deterministic
+        URL that renders as an empty world tile for taxa GBIF has no records
+        for. Returns ``{range_map, range_map_page}`` or None.
+
+        Tile params: classic.poly style fills hex-bins so range reads at a
+        glance from the zoom-0 (whole-world) tile rather than as sparse pixel
+        points; @2x suffix gives a retina-sharp 512×512 PNG."""
+        name = (scientific or "").strip()
+        if not name:
+            return None
+        try:
+            req = urllib.request.Request(
+                "https://api.gbif.org/v1/species/match?name="
+                + urllib.parse.quote(name),
+                headers={"User-Agent": "africam-bird/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        key = data.get("usageKey")
+        if not isinstance(key, int):
+            return None
+        if data.get("matchType") not in ("EXACT", "FUZZY"):
+            return None
+        try:
+            req = urllib.request.Request(
+                f"https://api.gbif.org/v1/occurrence/count?taxonKey={key}",
+                headers={"User-Agent": "africam-bird/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                n_records = int(resp.read().decode().strip() or "0")
+        except Exception:
+            n_records = 0
+        if n_records < 1:
+            return None
+        tile = (
+            f"https://api.gbif.org/v2/map/occurrence/density/0/0/0@2x.png"
+            f"?taxonKey={key}&style=classic.poly&bin=hex&hexPerTile=30"
+        )
+        return {
+            "range_map": tile,
+            "range_map_page": f"https://www.gbif.org/species/{key}",
+        }
+
     def _resolve_species_media(scientific: str, common: str = "") -> dict:
         """Photo + range-map + IUCN status for a species, behind two cache
         layers: a process-local 24h cache and a durable per-species row in the
@@ -3177,6 +3489,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             wd = _wikidata_range_map(payload.get("wikidata_qid"))
             if wd:
                 payload = {**payload, **wd}
+        # GBIF fallback (CC-BY 4.0): when Wikipedia *and* Wikidata both have
+        # nothing, GBIF almost always does — it covers ~all bird species via
+        # the occurrence density tile. Two extra HTTPs, only when nothing
+        # else hit. Persisted to species_notes.range_map_url like the others.
+        if not payload.get("range_map"):
+            gb = _gbif_range_map(scientific)
+            if gb:
+                payload = {**payload, **gb}
         # Persist only when we actually reached Wikipedia and got something —
         # otherwise a transient hiccup would poison both caches (and stamp
         # media_fetched_at, suppressing retries for 30 days).

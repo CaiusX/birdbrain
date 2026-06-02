@@ -3,6 +3,22 @@
 {% block title %}Africam · species{% endblock %}
 
 {% block content %}
+{# Opt the treemap pages into the View Transitions API. Browsers that
+   support cross-document transitions (Chrome/Edge stable, Safari TP, Firefox
+   behind a flag as of 2026) will cross-fade the SVG between the all-sites
+   and single-site renderings. Other browsers just do an instant swap. #}
+<style>
+  @view-transition { navigation: auto; }
+  ::view-transition-old(species-treemap),
+  ::view-transition-new(species-treemap) {
+    animation-duration: 320ms;
+  }
+  /* Zoom-in header strip — visible affordance for the click-through zoom. */
+  .zoom-in-target { cursor: zoom-in; }
+  .zoom-in-target:hover .zoom-header { fill-opacity: 0.85; }
+  .zoom-in-target:focus { outline: none; }
+  .zoom-in-target:focus .zoom-header { fill-opacity: 0.85; }
+</style>
 {# --- IUCN dot palette (matches the iucn_badge macro's colour scheme) --- #}
 {% set IUCN_COLOR = {
   'LC': '#71717a', 'NT': '#10b981', 'VU': '#f59e0b',
@@ -35,7 +51,7 @@
 
     {# Source chips #}
     <div class="flex items-center gap-1 flex-wrap text-xs">
-      <span class="text-zinc-500 mr-1">sources:</span>
+      <span class="text-zinc-500 mr-1">sites:</span>
       {% for src in all_source_names %}
         {% set on = src in source_filter or not source_filter %}
         {% set new_filter = source_filter | reject('equalto', src) | list if src in source_filter else (source_filter + [src] if source_filter else []) %}
@@ -61,27 +77,113 @@
     </label>
   </div>
 
+  {# --- Breadcrumb / zoom path. Up to three levels:
+       1. all sites (top of the tree)
+       2. single site (?source=X)
+       3. rarest at site (?source=X&tail=1)
+  --- #}
+  {% if outer_rects %}
+    <div class="px-5 py-2 border-b border-zinc-800 flex items-center gap-2 text-xs flex-wrap">
+      {% if zoomed %}
+        {% set back_all = '/species?since=' ~ since %}
+        {% if q %}{% set back_all = back_all ~ '&q=' ~ (q | urlencode) %}{% endif %}
+        <a href="{{ back_all }}"
+           class="px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 inline-flex items-center gap-1">
+          ← all sites
+        </a>
+        <span class="text-zinc-600">›</span>
+        {% if tail_active %}
+          {# Level-2: site is a back link, "rarest" is the current node. #}
+          {% set back_site = '/species?source=' ~ (zoomed_source | urlencode) ~ '&since=' ~ since %}
+          <a href="{{ back_site }}"
+             class="px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500">
+            ← {{ zoomed_source }}
+          </a>
+          <span class="text-zinc-600">›</span>
+          <span class="text-zinc-100 font-medium">rarest</span>
+          <span class="text-zinc-500">·
+            {{ tiles | length }} species at ≤ {{ tail_threshold }} det ·
+            {{ hidden_loud | length }} louder species hidden
+          </span>
+        {% else %}
+          <span class="text-zinc-100 font-medium">{{ zoomed_source }}</span>
+          <span class="text-zinc-500">·
+            {{ tiles | length }} species ·
+            {{ "{:,}".format(total_detections) }} detections
+          </span>
+        {% endif %}
+      {% else %}
+        <span class="text-zinc-400">all sites</span>
+        <span class="text-zinc-600">·
+          <span class="text-emerald-400">click the coloured header bar</span>
+          on any site (or its name in the legend below) to zoom in
+        </span>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {# --- Treemap --- #}
   {% if tiles %}
     <div class="p-4">
       <svg id="species-treemap" viewBox="0 0 {{ viewport.w }} {{ viewport.h }}"
            preserveAspectRatio="xMidYMid meet"
-           class="w-full block" style="max-height: 72vh;">
-        {# Source frames + header labels (drawn first, behind leaves) #}
+           class="w-full block" style="max-height: 72vh; view-transition-name: species-treemap;">
+        {# Source frames + header labels (drawn first, behind leaves).
+           When NOT zoomed, the whole source rectangle is a click target —
+           anything not covered by a leaf (header strip, tile gaps) zooms in
+           to ?source=<name>. When zoomed, the frame is a plain visual and
+           zoom-out happens via the breadcrumb. #}
         {% for o in outer_rects %}
+          {% set sc = source_colors.get(o.name, '#10b981') %}
+          {# Frame of the source rect (just stroke). #}
           <rect x="{{ o.x }}" y="{{ o.y }}" width="{{ o.w }}" height="{{ o.h }}"
                 fill="none" stroke="#3f3f46" stroke-width="1"/>
-          {% if o.w > 80 and o.h > 24 %}
-            {# Clicking the source label drills down to a full-page treemap
-               for just this site (re-uses the existing ?source= filter). #}
-            <a href="/species?source={{ o.name | urlencode }}{% if since != 'all' %}&since={{ since }}{% endif %}">
-              <title>Drill into {{ o.name }}</title>
-              <text x="{{ o.x + 6 }}" y="{{ o.y + 12 }}"
-                    fill="#a1a1aa" font-size="11" font-family="ui-sans-serif, system-ui"
-                    font-weight="600" style="text-transform:uppercase; letter-spacing:0.05em; cursor:pointer;">
-                {{ o.name }} <tspan fill="#52525b" font-weight="400">· {{ "{:,}".format(o.count) }}</tspan>
-              </text>
+          {% if not zoomed %}
+            {# Tinted header strip — the visible "zoom into <site>" button.
+               It's drawn over the top 18 px of the source rect (above the
+               species leaves, since leaves are inset by source_pad_top).
+               Wrapping <a> + pointer-events="all" makes the whole strip a
+               click target, not just the text. #}
+            <a href="/species?source={{ o.name | urlencode }}{% if since != 'all' %}&since={{ since }}{% endif %}"
+               class="zoom-in-target">
+              <title>Zoom into {{ o.name }} ({{ "{:,}".format(o.count) }} detections)</title>
+              <rect class="zoom-header"
+                    x="{{ o.x + 0.5 }}" y="{{ o.y + 0.5 }}"
+                    width="{{ o.w - 1 }}" height="17"
+                    fill="{{ sc }}" fill-opacity="0.45"
+                    pointer-events="all" style="cursor: zoom-in;"/>
+              {% if o.w > 80 %}
+                <text x="{{ o.x + 6 }}" y="{{ o.y + 13 }}"
+                      fill="#fafafa" font-size="11" font-family="ui-sans-serif, system-ui"
+                      font-weight="700" pointer-events="none"
+                      style="text-transform:uppercase; letter-spacing:0.05em;">
+                  {{ o.name }}
+                  <tspan fill="#fafafa" fill-opacity="0.7" font-weight="400">·
+                    {{ "{:,}".format(o.count) }} det</tspan>
+                </text>
+                <text x="{{ o.x + o.w - 6 }}" y="{{ o.y + 13 }}"
+                      text-anchor="end" fill="#fafafa" font-size="11"
+                      font-weight="700" pointer-events="none"
+                      font-family="ui-sans-serif, system-ui">
+                  zoom in ↗
+                </text>
+              {% endif %}
             </a>
+          {% else %}
+            {# Zoomed-in: header is non-interactive, just a label. #}
+            <rect x="{{ o.x + 0.5 }}" y="{{ o.y + 0.5 }}"
+                  width="{{ o.w - 1 }}" height="17"
+                  fill="{{ sc }}" fill-opacity="0.30"/>
+            {% if o.w > 80 %}
+              <text x="{{ o.x + 6 }}" y="{{ o.y + 13 }}"
+                    fill="#fafafa" font-size="11" font-family="ui-sans-serif, system-ui"
+                    font-weight="700"
+                    style="text-transform:uppercase; letter-spacing:0.05em;">
+                {{ o.name }}
+                <tspan fill="#fafafa" fill-opacity="0.7" font-weight="400">·
+                  {{ "{:,}".format(o.count) }} det</tspan>
+              </text>
+            {% endif %}
           {% endif %}
         {% endfor %}
 
@@ -143,17 +245,18 @@ at {{ t.source }} · {{ "{:,}".format(t.n) }} detections · max conf {{ "%.2f"|f
         {% endfor %}
       </svg>
 
-      {# Per-source colour legend. Only show sources that actually appear in
-         the current rendering (i.e. have at least one outer rect). #}
+      {# Per-site colour legend. Each name links to that site's home page
+         (the treemap header bar inside the SVG is the zoom-into-treemap
+         affordance — the legend is for "go to site"). #}
       {% if outer_rects %}
         <div class="text-[11px] text-zinc-400 mt-3 flex items-center gap-3 flex-wrap">
           {% for o in outer_rects %}
             {% set sc = source_colors.get(o.name, '#10b981') %}
             <span class="inline-flex items-baseline gap-1.5 whitespace-nowrap">
               <span class="inline-block w-3 h-3 rounded-sm" style="background:{{ sc }};"></span>
-              <a href="/species?source={{ o.name | urlencode }}{% if since != 'all' %}&since={{ since }}{% endif %}"
+              <a href="/site/{{ o.name | urlencode }}"
                  class="hover:text-zinc-100"
-                 title="Drill into {{ o.name }}">{{ o.name }}</a>
+                 title="Open {{ o.name }} site page">{{ o.name }}</a>
               <span class="text-zinc-600 tabular-nums">{{ "{:,}".format(o.count) }}</span>
             </span>
           {% endfor %}
@@ -163,13 +266,80 @@ at {{ t.source }} · {{ "{:,}".format(t.n) }} detections · max conf {{ "%.2f"|f
         <span>tile colour = site · opacity = recency (brighter = heard more recently)</span>
         <span class="text-zinc-700">·</span>
         <span>corner dot = IUCN status</span>
-        <span class="text-zinc-700">·</span>
-        <span>tiles too small to draw are collapsed into <em>+N more</em></span>
+        {% if not zoomed %}
+          <span class="text-zinc-700">·</span>
+          <span>tiles too small to draw are collapsed into <em>+N more</em> — zoom in to see them all</span>
+        {% endif %}
       </div>
     </div>
+
+    {# --- Bottom panel.
+         - Level 1 (zoomed, no tail): rarest species + button to zoom further
+           into the long tail.
+         - Level 2 (tail_active): list the LOUD species we hid, so the user
+           has a quick path back to the dominants. --- #}
+    {% if tail_active and hidden_loud %}
+      <div class="border-t border-zinc-800 px-5 py-4">
+        <div class="flex items-baseline justify-between mb-3 gap-3 flex-wrap">
+          <h3 class="text-xs uppercase tracking-wider text-zinc-400">
+            Louder species hidden from this view
+            <span class="text-zinc-600 normal-case tracking-normal ml-1">
+              (above the {{ tail_threshold }}-detection median)
+            </span>
+          </h3>
+          {% set back_site = '/species?source=' ~ (zoomed_source | urlencode) ~ '&since=' ~ since %}
+          <a href="{{ back_site }}"
+             class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500">
+            ← back to all species
+          </a>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1 text-sm">
+          {% for sp in hidden_loud %}
+            <div class="flex items-baseline justify-between gap-3 truncate">
+              <a href="/species/{{ sp.scientific | urlencode }}?source={{ zoomed_source | urlencode }}"
+                 class="text-zinc-200 hover:text-emerald-300 truncate">
+                {{ sp.common }}
+              </a>
+              <span class="text-zinc-500 text-xs tabular-nums shrink-0">
+                {{ "{:,}".format(sp.n) }} det
+              </span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% elif zoomed and long_tail %}
+      <div class="border-t border-zinc-800 px-5 py-4">
+        <div class="flex items-baseline justify-between mb-3 gap-3 flex-wrap">
+          <h3 class="text-xs uppercase tracking-wider text-zinc-400">
+            Rarest at <span class="text-zinc-200">{{ zoomed_source }}</span>
+            <span class="text-zinc-600 normal-case tracking-normal ml-1">
+              · bottom {{ long_tail | length }} by detection count
+            </span>
+          </h3>
+          {% set tail_href = '/species?source=' ~ (zoomed_source | urlencode) ~ '&tail=1&since=' ~ since %}
+          <a href="{{ tail_href }}"
+             class="text-xs px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200 inline-flex items-center gap-1">
+            zoom into rarest ↗
+          </a>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1 text-sm">
+          {% for sp in long_tail %}
+            <div class="flex items-baseline justify-between gap-3 truncate">
+              <a href="/species/{{ sp.scientific | urlencode }}?source={{ zoomed_source | urlencode }}"
+                 class="text-zinc-200 hover:text-emerald-300 truncate">
+                {{ sp.common }}
+              </a>
+              <span class="text-zinc-500 text-xs tabular-nums shrink-0">
+                {{ sp.n }} det{% if sp.max_conf %} · {{ "%.2f"|format(sp.max_conf) }}{% endif %}
+              </span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
   {% else %}
     <p class="text-zinc-500 text-sm px-5 py-10 text-center">
-      No species in this window. Widen the time range or clear source filters.
+      No species in this window. Widen the time range or clear site filters.
     </p>
   {% endif %}
 

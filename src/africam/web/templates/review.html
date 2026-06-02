@@ -40,7 +40,7 @@
   <form method="get" action="/review" class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-7 gap-3 text-xs">
     <input type="hidden" name="tab" value="detections">
     <label class="flex flex-col gap-1">
-      <span class="text-zinc-500 uppercase tracking-wider">Source</span>
+      <span class="text-zinc-500 uppercase tracking-wider">Site</span>
       {% include "_source_filter.html" %}
     </label>
     <label class="flex flex-col gap-1">
@@ -148,7 +148,7 @@
     <input type="hidden" name="tab" value="chunks">
     <input type="hidden" name="bucket" value="{{ bucket }}">
     <label class="flex flex-col gap-1">
-      <span class="text-zinc-500 uppercase tracking-wider">Source</span>
+      <span class="text-zinc-500 uppercase tracking-wider">Site</span>
       {% include "_source_filter.html" %}
     </label>
     <label class="flex flex-col gap-1">

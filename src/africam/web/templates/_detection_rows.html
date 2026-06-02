@@ -9,7 +9,7 @@
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
       <tr class="border-b border-zinc-800">
         <th class="text-left font-medium px-5 py-2">Time (local)</th>
-        <th class="text-left font-medium px-5 py-2">Source</th>
+        <th class="text-left font-medium px-5 py-2">Site</th>
         <th class="text-left font-medium px-5 py-2">Species</th>
         <th class="text-right font-medium px-5 py-2">Confidence · clip</th>
         <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Label</th>
@@ -33,7 +33,7 @@
             {% endif %}
           </td>
           <td class="px-5 py-2">
-            <code class="text-zinc-300">{{ r.source_name }}</code>
+            <a href="/site/{{ r.source_name | urlencode }}" class="text-zinc-300 hover:text-emerald-300">{{ r.source_name }}</a>
             {% if r.site %}
               <span class="text-zinc-500"> · </span>
               <span class="text-zinc-200" title="{% if r.latitude is not none and r.longitude is not none %}{{ '%.3f'|format(r.latitude) }}, {{ '%.3f'|format(r.longitude) }}{% endif %}">{{ r.site }}</span>

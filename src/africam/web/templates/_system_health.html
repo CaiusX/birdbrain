@@ -32,9 +32,9 @@
 {% endif %}
 {% if h.worker_problems %}
   <div class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs rounded-lg mb-3">
-    {{ h.worker_problems | length }} source{{ '' if h.worker_problems|length == 1 else 's' }} not running:
+    {{ h.worker_problems | length }} site{{ '' if h.worker_problems|length == 1 else 's' }} not running:
     {% for p in h.worker_problems %}
-      <span class="inline-block ml-1" title="{{ p.error or '' }}">{{ p.name }} <span class="text-amber-200/60">({{ p.status }}{% if p.since_s is not none %}, {{ dur(p.since_s) }} ago{% endif %})</span>{{ ',' if not loop.last }}</span>
+      <span class="inline-block ml-1" title="{{ p.error or '' }}"><a href="/site/{{ p.name | urlencode }}" class="underline decoration-amber-500/40 hover:text-amber-200">{{ p.name }}</a> <span class="text-amber-200/60">({{ p.status }}{% if p.since_s is not none %}, {{ dur(p.since_s) }} ago{% endif %})</span>{{ ',' if not loop.last }}</span>
     {% endfor %}
   </div>
 {% endif %}
@@ -104,7 +104,7 @@
   {# Workers #}
   {% set wc = 'text-emerald-300' if h.workers_running == h.workers_total and h.workers_total > 0
               else ('text-rose-300' if h.workers_running == 0 else 'text-amber-300') %}
-  {{ card('Workers', h.workers_running ~ '/' ~ h.workers_total, wc, 'sources running') }}
+  {{ card('Workers', h.workers_running ~ '/' ~ h.workers_total, wc, 'sites running') }}
 
   {# Last detection (data flowing?) #}
   {% set a = h.last_det_age_s %}

@@ -25,14 +25,14 @@
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Sources
+      Sites
       <span class="text-zinc-200 ml-2">{{ running }}/{{ total }}</span>
       <span class="text-zinc-500 text-xs ml-1">running</span>
     </h2>
     <div class="flex items-center gap-2">
       <button id="open-add-source"
               class="text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium">
-        + add a source
+        + add a site
       </button>
       <button hx-get="/partials/admin" hx-target="#admin-table" hx-swap="outerHTML"
               class="text-xs text-zinc-400 hover:text-zinc-100 px-2 py-0.5 rounded border border-zinc-800 hover:border-zinc-600">
@@ -48,7 +48,7 @@
         class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-full max-w-3xl max-h-[92vh] overflow-y-auto backdrop:bg-black/70">
   <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
     <div>
-      <h3 class="text-sm font-semibold text-zinc-100 uppercase tracking-wider">Add a source</h3>
+      <h3 class="text-sm font-semibold text-zinc-100 uppercase tracking-wider">Add a site</h3>
       <p class="text-xs text-zinc-500 mt-0.5">YouTube live stream or RTSP camera · click the map, drag the pin, or type coordinates</p>
     </div>
     <button type="button" id="close-add-source"
@@ -170,7 +170,7 @@
       <button type="button" id="cancel-add-source"
               class="px-3 py-1.5 rounded text-xs border border-zinc-800 text-zinc-400 hover:text-zinc-100">cancel</button>
       <button type="submit"
-              class="px-3 py-1.5 rounded text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium">add source</button>
+              class="px-3 py-1.5 rounded text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium">add site</button>
     </div>
   </form>
 </dialog>
@@ -212,7 +212,7 @@
     const m = L.marker(latlng, {
       icon: pickIcon, draggable: true, zIndexOffset: 1000,
     }).addTo(map);
-    m.bindTooltip('new source', {
+    m.bindTooltip('new site', {
       permanent: true, direction: 'top', offset: [0, -12], className: 'site-label',
     });
     m.on('drag', (e) => writeInputs(e.target.getLatLng()));
@@ -246,6 +246,7 @@
       return;
     }
     map = L.map('add-source-map', { scrollWheelZoom: true });
+    lockMap(map);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap', maxZoom: 18,
     }).addTo(map);

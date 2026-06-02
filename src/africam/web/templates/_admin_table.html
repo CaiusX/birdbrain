@@ -13,7 +13,7 @@
   <table class="w-full text-sm">
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
       <tr class="border-b border-zinc-800">
-        <th class="text-left font-medium px-5 py-2">Source</th>
+        <th class="text-left font-medium px-5 py-2">Site</th>
         <th class="text-left font-medium px-5 py-2">Status</th>
         <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Model knobs</th>
         <th class="text-right font-medium px-5 py-2">Actions</th>
@@ -32,7 +32,7 @@
         {% set badge_cls, badge_label = badge.get(r.status, ('bg-zinc-800 text-zinc-400 border-zinc-700', r.status)) %}
         <tr class="hover:bg-zinc-800/30">
           <td class="px-5 py-3 align-top">
-            <div class="font-medium text-zinc-100">{{ r.name }}</div>
+            <div class="font-medium text-zinc-100"><a href="/site/{{ r.name | urlencode }}" class="hover:text-emerald-300">{{ r.name }}</a></div>
             <div class="text-xs text-zinc-500">
               <code class="text-zinc-400">{{ r.kind }}</code>
               · {{ 'runtime' if r.is_runtime else 'file' }}
@@ -103,7 +103,7 @@
         </tr>
       {% endfor %}
       {% if not rows %}
-        <tr><td colspan="4" class="px-5 py-6 text-center text-zinc-500 text-sm">No sources configured.</td></tr>
+        <tr><td colspan="4" class="px-5 py-6 text-center text-zinc-500 text-sm">No sites configured.</td></tr>
       {% endif %}
     </tbody>
   </table>

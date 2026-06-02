@@ -24,8 +24,69 @@
       white-space: nowrap;
     }
     .leaflet-tooltip.site-label::before { display: none; }
+
+    /* Lock state — maps stay non-interactive until the user clicks them.
+       Stops scroll-wheel hijack and accidental marker triggers while
+       scrolling the page. The container catches mousedown (our JS uses
+       that to remove the lock); all child panes & controls have pointer
+       events disabled so nothing inside responds to the lock-breaking
+       click either. */
+    .leaflet-container.map-locked { cursor: pointer; }
+    .leaflet-container.map-locked .leaflet-pane,
+    .leaflet-container.map-locked .leaflet-control-container {
+      pointer-events: none;
+    }
+    .leaflet-container.map-locked::after {
+      content: "click map to interact";
+      position: absolute;
+      left: 50%;
+      bottom: 12px;
+      transform: translateX(-50%);
+      padding: 4px 12px;
+      border-radius: 4px;
+      background: rgba(24, 24, 27, 0.85);
+      color: #fafafa;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      pointer-events: none;
+      z-index: 800;
+      border: 1px solid #3f3f46;
+    }
   </style>
   {% block head_extra %}{% endblock %}
+  <script>
+    // Shared helper for Leaflet pages — keep a map non-interactive until
+    // the user explicitly clicks it. Call lockMap(map) right after L.map().
+    // Disables every interaction handler and decorates the container with
+    // .map-locked (see CSS above). The first mousedown or touchstart on
+    // the container removes the lock and re-enables handlers, so
+    // subsequent scrolls/drags/marker clicks work normally.
+    //
+    // Defined in <head> so it's available before the page's body-inline
+    // <script> runs L.map() + lockMap(map).
+    window.lockMap = function (map) {
+      if (!map || typeof map.getContainer !== 'function') return;
+      const handlers = [
+        'dragging', 'scrollWheelZoom', 'doubleClickZoom',
+        'boxZoom', 'keyboard', 'touchZoom',
+      ];
+      handlers.forEach(h => { if (map[h]) map[h].disable(); });
+      if (map.tap) map.tap.disable();
+      const el = map.getContainer();
+      el.classList.add('map-locked');
+      const enable = () => {
+        handlers.forEach(h => { if (map[h]) map[h].enable(); });
+        if (map.tap) map.tap.enable();
+        el.classList.remove('map-locked');
+        el.removeEventListener('mousedown', enable);
+        el.removeEventListener('touchstart', enable);
+      };
+      el.addEventListener('mousedown', enable);
+      el.addEventListener('touchstart', enable, { passive: true });
+    };
+  </script>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans">
   <header class="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/90 supports-[backdrop-filter]:bg-zinc-950/70 backdrop-blur">
@@ -36,6 +97,7 @@
           <a href="/" class="text-zinc-400 hover:text-zinc-100">live</a>
           <a href="/rollup" class="text-zinc-400 hover:text-zinc-100">rollup</a>
           <a href="/species" class="text-zinc-400 hover:text-zinc-100">species</a>
+          <a href="/confidence" class="text-zinc-400 hover:text-zinc-100">confidence</a>
           <a href="/review" class="text-zinc-400 hover:text-zinc-100">review</a>
           <a href="/diurnal" class="text-zinc-400 hover:text-zinc-100">diurnal</a>
           {% if not request.state.is_public %}

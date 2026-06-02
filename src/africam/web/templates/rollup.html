@@ -27,7 +27,7 @@
     <table class="w-full text-sm">
       <thead class="text-zinc-400 text-xs uppercase tracking-wider">
         <tr class="border-b border-zinc-800">
-          <th class="text-left font-medium px-5 py-2">Source</th>
+          <th class="text-left font-medium px-5 py-2">Site</th>
           <th class="text-right font-medium px-5 py-2">Count</th>
           <th class="text-right font-medium px-5 py-2">Species</th>
           <th class="text-right font-medium px-5 py-2">Mean conf</th>
@@ -66,7 +66,7 @@
   <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
     <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
       <h3 class="text-sm uppercase tracking-wider text-zinc-400">
-        {{ s.source }}
+        <a href="/site/{{ s.source | urlencode }}" class="hover:text-emerald-300">{{ s.source }}</a>
         <span class="text-zinc-500 text-xs ml-1">top {{ s.species | length }} species</span>
       </h3>
       <span class="text-xs text-zinc-500">{{ s.tz | tz_abbr }}</span>
