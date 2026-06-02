@@ -3432,6 +3432,50 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "range_map_page": f"https://www.gbif.org/species/{key}",
         }
 
+    def _inat_range_map(scientific: str) -> dict | None:
+        """iNaturalist fallback: when even GBIF has nothing, iNat sometimes
+        does (citizen-science observations cover taxa where research-grade
+        records are sparse). API is open, rate-limited ~100 req/min, content
+        is CC BY-NC which composes cleanly with BirdNET's CC BY-NC-SA.
+
+        Two HTTPs: /v1/taxa search to resolve a scientific name to a numeric
+        taxon_id (we require an exact case-insensitive match on the result's
+        ``name`` to avoid genus-only hits stealing the slot), then we trust
+        the tile URL — iNat returns a transparent PNG for taxa with zero
+        observations so the client-side rendering will simply look blank if
+        the species has no data, which is harmless."""
+        name = (scientific or "").strip()
+        if not name:
+            return None
+        try:
+            req = urllib.request.Request(
+                "https://api.inaturalist.org/v1/taxa"
+                "?rank=species&per_page=5&q="
+                + urllib.parse.quote(name),
+                headers={"User-Agent": "africam-bird/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        wanted = name.lower()
+        taxon_id: int | None = None
+        for r in data.get("results", []):
+            rname = (r.get("name") or "").strip().lower()
+            if rname == wanted and isinstance(r.get("id"), int):
+                taxon_id = r["id"]
+                break
+        if taxon_id is None:
+            return None
+        tile = (
+            f"https://api.inaturalist.org/v1/colored_heatmap/0/0/0.png"
+            f"?taxon_id={taxon_id}"
+        )
+        return {
+            "range_map": tile,
+            "range_map_page": f"https://www.inaturalist.org/taxa/{taxon_id}",
+        }
+
     def _resolve_species_media(scientific: str, common: str = "") -> dict:
         """Photo + range-map + IUCN status for a species, behind two cache
         layers: a process-local 24h cache and a durable per-species row in the
@@ -3497,6 +3541,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             gb = _gbif_range_map(scientific)
             if gb:
                 payload = {**payload, **gb}
+        # iNaturalist fallback (CC BY-NC, composes with our BirdNET CC
+        # BY-NC-SA): citizen-science observation density. Last rung — fires
+        # only when Wikipedia, Wikidata, AND GBIF have all come back empty.
+        if not payload.get("range_map"):
+            inat = _inat_range_map(scientific)
+            if inat:
+                payload = {**payload, **inat}
         # Persist only when we actually reached Wikipedia and got something —
         # otherwise a transient hiccup would poison both caches (and stamp
         # media_fetched_at, suppressing retries for 30 days).

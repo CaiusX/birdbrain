@@ -37,22 +37,25 @@
       pointer-events: none;
     }
     .leaflet-container.map-locked::after {
-      content: "click map to interact";
+      /* Small "click to activate" hint instead of the old centred pill —
+         dark circular badge in the lower-right corner. Title attr on the
+         container provides a tooltip with the full sentence for clarity. */
+      content: "👆";
       position: absolute;
-      left: 50%;
-      bottom: 12px;
-      transform: translateX(-50%);
-      padding: 4px 12px;
-      border-radius: 4px;
+      right: 8px;
+      bottom: 8px;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
       background: rgba(24, 24, 27, 0.85);
-      color: #fafafa;
-      font-size: 11px;
-      font-weight: 500;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
+      border: 1px solid #3f3f46;
+      font-size: 13px;
+      line-height: 1;
       pointer-events: none;
       z-index: 800;
-      border: 1px solid #3f3f46;
     }
   </style>
   {% block head_extra %}{% endblock %}
@@ -76,10 +79,13 @@
       if (map.tap) map.tap.disable();
       const el = map.getContainer();
       el.classList.add('map-locked');
+      const prevTitle = el.title;
+      el.title = 'Click to interact';
       const enable = () => {
         handlers.forEach(h => { if (map[h]) map[h].enable(); });
         if (map.tap) map.tap.enable();
         el.classList.remove('map-locked');
+        el.title = prevTitle;
         el.removeEventListener('mousedown', enable);
         el.removeEventListener('touchstart', enable);
       };

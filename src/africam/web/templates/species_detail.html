@@ -109,8 +109,9 @@
            class="w-full rounded border border-zinc-800 overflow-hidden"
            style="display:none; height: 11rem;"></div>
       <div id="species-range-attrib" class="text-[10px] text-zinc-500 mt-1" style="display:none;">
-        from <a id="species-range-attrib-link" href="#" target="_blank" rel="noopener" class="text-emerald-400 hover:text-emerald-300">GBIF</a>
-        · occurrence density (CC&nbsp;BY 4.0) over <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" class="hover:text-zinc-300">OpenStreetMap</a>
+        from <a id="species-range-attrib-link" href="#" target="_blank" rel="noopener" class="text-emerald-400 hover:text-emerald-300">source</a>
+        · <span id="species-range-attrib-text">occurrence density</span>
+        over <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" class="hover:text-zinc-300">OpenStreetMap</a>
       </div>
       <div id="species-range-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no range map</div>
     </div>
@@ -144,37 +145,150 @@
       link.style.display = '';
       if (empty) empty.style.display = 'none';
     }
-    // GBIF density-tile URLs need a live Leaflet map with an OSM basemap
-    // underneath; static-image URLs (Wikipedia, Wikidata) render as <img>.
+    // Live-tile URLs (GBIF, iNaturalist) need a Leaflet map with an OSM
+    // basemap underneath; static-image URLs (Wikipedia, Wikidata) render as
+    // an <img>. We detect by URL regex.
     const GBIF_RE = /^https:\/\/api\.gbif\.org\/v2\/map\/occurrence\/density\/\d+\/\d+\/\d+@2x\.png\?taxonKey=(\d+)/;
+    const INAT_RE = /^https:\/\/api\.inaturalist\.org\/v1\/colored_heatmap\/\d+\/\d+\/\d+\.png\?taxon_id=(\d+)/;
+
+    // Continent lookups for fitting GBIF range maps to a sensible startup
+    // extent. We tally the country facet, pick the continent with the most
+    // occurrences, and fit that bbox — provided the winner is clearly
+    // dominant (≥ 70% of total). Widespread species (Tyto alba, etc.) keep
+    // the default world view.
+    const CC_CONTINENT = {
+      // Africa
+      AO:'AF',BF:'AF',BI:'AF',BJ:'AF',BW:'AF',CD:'AF',CF:'AF',CG:'AF',CI:'AF',CM:'AF',
+      CV:'AF',DJ:'AF',DZ:'AF',EG:'AF',EH:'AF',ER:'AF',ET:'AF',GA:'AF',GH:'AF',GM:'AF',
+      GN:'AF',GQ:'AF',GW:'AF',KE:'AF',KM:'AF',LR:'AF',LS:'AF',LY:'AF',MA:'AF',MG:'AF',
+      ML:'AF',MR:'AF',MU:'AF',MW:'AF',MZ:'AF',NA:'AF',NE:'AF',NG:'AF',RE:'AF',RW:'AF',
+      SC:'AF',SD:'AF',SH:'AF',SL:'AF',SN:'AF',SO:'AF',SS:'AF',ST:'AF',SZ:'AF',TD:'AF',
+      TG:'AF',TN:'AF',TZ:'AF',UG:'AF',YT:'AF',ZA:'AF',ZM:'AF',ZW:'AF',
+      // Europe
+      AD:'EU',AL:'EU',AT:'EU',AX:'EU',BA:'EU',BE:'EU',BG:'EU',BY:'EU',CH:'EU',CZ:'EU',
+      DE:'EU',DK:'EU',EE:'EU',ES:'EU',FI:'EU',FO:'EU',FR:'EU',GB:'EU',GG:'EU',GI:'EU',
+      GR:'EU',HR:'EU',HU:'EU',IE:'EU',IM:'EU',IS:'EU',IT:'EU',JE:'EU',LI:'EU',LT:'EU',
+      LU:'EU',LV:'EU',MC:'EU',MD:'EU',ME:'EU',MK:'EU',MT:'EU',NL:'EU',NO:'EU',PL:'EU',
+      PT:'EU',RO:'EU',RS:'EU',RU:'EU',SE:'EU',SI:'EU',SK:'EU',SM:'EU',UA:'EU',VA:'EU',
+      XK:'EU',
+      // Asia
+      AE:'AS',AF:'AS',AM:'AS',AZ:'AS',BD:'AS',BH:'AS',BN:'AS',BT:'AS',CN:'AS',CY:'AS',
+      GE:'AS',HK:'AS',ID:'AS',IL:'AS',IN:'AS',IQ:'AS',IR:'AS',JO:'AS',JP:'AS',KG:'AS',
+      KH:'AS',KP:'AS',KR:'AS',KW:'AS',KZ:'AS',LA:'AS',LB:'AS',LK:'AS',MM:'AS',MN:'AS',
+      MO:'AS',MV:'AS',MY:'AS',NP:'AS',OM:'AS',PH:'AS',PK:'AS',PS:'AS',QA:'AS',SA:'AS',
+      SG:'AS',SY:'AS',TH:'AS',TJ:'AS',TL:'AS',TM:'AS',TR:'AS',TW:'AS',UZ:'AS',VN:'AS',
+      YE:'AS',
+      // North/Central America + Caribbean
+      AG:'NA',AI:'NA',AW:'NA',BB:'NA',BM:'NA',BS:'NA',BZ:'NA',CA:'NA',CR:'NA',CU:'NA',
+      DM:'NA',DO:'NA',GD:'NA',GL:'NA',GT:'NA',HN:'NA',HT:'NA',JM:'NA',KN:'NA',KY:'NA',
+      LC:'NA',MX:'NA',NI:'NA',PA:'NA',PR:'NA',SV:'NA',TC:'NA',TT:'NA',US:'NA',VC:'NA',
+      VG:'NA',VI:'NA',
+      // South America
+      AR:'SA',BO:'SA',BR:'SA',CL:'SA',CO:'SA',EC:'SA',FK:'SA',GF:'SA',GY:'SA',PE:'SA',
+      PY:'SA',SR:'SA',UY:'SA',VE:'SA',
+      // Oceania
+      AS:'OC',AU:'OC',CK:'OC',FJ:'OC',FM:'OC',GU:'OC',KI:'OC',MH:'OC',MP:'OC',NC:'OC',
+      NF:'OC',NR:'OC',NU:'OC',NZ:'OC',PF:'OC',PG:'OC',PN:'OC',PW:'OC',SB:'OC',TK:'OC',
+      TO:'OC',TV:'OC',VU:'OC',WF:'OC',WS:'OC',
+    };
+    const CONTINENT_BBOX = {
+      AF: [[-35, -20], [38, 55]],
+      EU: [[35, -25], [72, 60]],
+      AS: [[-12, 25], [78, 180]],
+      NA: [[7, -170], [83, -52]],
+      SA: [[-56, -82], [13, -34]],
+      OC: [[-50, 110], [-10, 180]],
+    };
+
+    function fitGBIFExtent(map, taxonKey) {
+      const url = 'https://api.gbif.org/v1/occurrence/search'
+        + '?taxonKey=' + taxonKey
+        + '&hasCoordinate=true&limit=0'
+        + '&facet=country&facetLimit=15';
+      fetch(url).then(r => r.ok ? r.json() : null).then(d => {
+        if (!d || !d.facets || !d.facets[0]) return;
+        const counts = d.facets[0].counts || [];
+        if (!counts.length) return;
+        const totals = {};
+        let grand = 0;
+        counts.forEach(c => {
+          const cont = CC_CONTINENT[c.name];
+          if (!cont) return;
+          totals[cont] = (totals[cont] || 0) + c.count;
+          grand += c.count;
+        });
+        let winner = null, max = 0;
+        for (const k in totals) {
+          if (totals[k] > max) { winner = k; max = totals[k]; }
+        }
+        if (winner && max >= grand * 0.70 && CONTINENT_BBOX[winner]) {
+          map.fitBounds(CONTINENT_BBOX[winner],
+            { padding: [8, 8], animate: false });
+        }
+      }).catch(() => { /* silent — keep default view */ });
+    }
+
+    function renderLiveTile({ mapEl, tileTemplate, attribSource, attribText,
+                              attribLink, onMapReady }) {
+      // CRITICAL ORDERING: make the container visible BEFORE L.map(). Leaflet
+      // measures the container at init time and caches the dimensions; if the
+      // element is display:none, that cache is 0×0 and every subsequent
+      // setView/fitBounds computes nonsense zoom levels (we ended up at z>10,
+      // past the maxZoom where GBIF serves tiles → no overlay visible).
+      mapEl.style.display = 'block';
+      document.getElementById('species-range-attrib').style.display = '';
+
+      const map = L.map(mapEl, {
+        zoomControl: false, attributionControl: false,
+        worldCopyJump: true,
+      });
+      lockMap(map);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+      L.tileLayer(tileTemplate, { maxZoom: 14, opacity: 0.85 }).addTo(map);
+      // Defensive invalidateSize on the next frame in case the parent is
+      // still mid-layout (Tailwind grid + lazy fetch can race).
+      map.setView([5, 25], 2);
+      requestAnimationFrame(() => map.invalidateSize());
+
+      const a = document.getElementById('species-range-attrib-link');
+      a.textContent = attribSource;
+      a.href = attribLink;
+      document.getElementById('species-range-attrib-text').textContent = attribText;
+      if (onMapReady) onMapReady(map);
+    }
     function showRange(src, href) {
       if (!src) return;
       const empty = document.getElementById('species-range-empty');
       if (empty) empty.style.display = 'none';
-      const m = GBIF_RE.exec(src);
-      if (m) {
-        const taxonKey = m[1];
-        const mapEl = document.getElementById('species-range-map');
-        const attrib = document.getElementById('species-range-attrib');
-        const attribLink = document.getElementById('species-range-attrib-link');
-        mapEl.style.display = 'block';
-        attrib.style.display = '';
-        attribLink.href = href || 'https://www.gbif.org/species/' + taxonKey;
-        const map = L.map(mapEl, {
-          zoomControl: false, attributionControl: false,
-          worldCopyJump: true,
+      const mapEl = document.getElementById('species-range-map');
+      const mg = GBIF_RE.exec(src);
+      if (mg) {
+        const taxonKey = mg[1];
+        renderLiveTile({
+          mapEl,
+          tileTemplate:
+            'https://api.gbif.org/v2/map/occurrence/density/{z}/{x}/{y}@2x.png'
+            + '?taxonKey=' + taxonKey
+            + '&style=classic.poly&bin=hex&hexPerTile=30',
+          attribSource: 'GBIF',
+          attribText: 'occurrence density (CC BY 4.0)',
+          attribLink: href || 'https://www.gbif.org/species/' + taxonKey,
+          onMapReady: (map) => fitGBIFExtent(map, taxonKey),
         });
-        lockMap(map);
-        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          maxZoom: 8,
-        }).addTo(map);
-        L.tileLayer(
-          'https://api.gbif.org/v2/map/occurrence/density/{z}/{x}/{y}@2x.png'
-          + '?taxonKey=' + taxonKey
-          + '&style=classic.poly&bin=hex&hexPerTile=30',
-          { maxZoom: 8, opacity: 0.85 },
-        ).addTo(map);
-        map.setView([5, 25], 2);
+        return;
+      }
+      const mi = INAT_RE.exec(src);
+      if (mi) {
+        const taxonId = mi[1];
+        renderLiveTile({
+          mapEl,
+          tileTemplate:
+            'https://api.inaturalist.org/v1/colored_heatmap/{z}/{x}/{y}.png'
+            + '?taxon_id=' + taxonId,
+          attribSource: 'iNaturalist',
+          attribText: 'observation density (CC BY-NC)',
+          attribLink: href || 'https://www.inaturalist.org/taxa/' + taxonId,
+        });
         return;
       }
       // Static image path (Wikipedia / Wikidata P181 / etc.).

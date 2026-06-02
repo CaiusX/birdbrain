@@ -33,6 +33,11 @@
       Species detected · <span class="text-zinc-200">{{ total_species }}</span>
       <span class="text-zinc-500 text-xs normal-case ml-2">{{ "{:,}".format(total_detections) }} detections</span>
     </h2>
+    {# Treemap key — moved up from a footer caption so the area under the
+       chart stays clean. #}
+    <span class="text-[10px] text-zinc-600 normal-case tracking-normal hidden md:inline">
+      tile colour = site · opacity = recency · corner dot = IUCN status
+    </span>
 
     {# Time-window pills #}
     <div class="flex items-center gap-1 text-xs">
@@ -245,30 +250,23 @@ at {{ t.source }} · {{ "{:,}".format(t.n) }} detections · max conf {{ "%.2f"|f
         {% endfor %}
       </svg>
 
-      {# Per-site colour legend. Each name links to that site's home page
-         (the treemap header bar inside the SVG is the zoom-into-treemap
-         affordance — the legend is for "go to site"). #}
-      {% if outer_rects %}
-        <div class="text-[11px] text-zinc-400 mt-3 flex items-center gap-3 flex-wrap">
-          {% for o in outer_rects %}
-            {% set sc = source_colors.get(o.name, '#10b981') %}
-            <span class="inline-flex items-baseline gap-1.5 whitespace-nowrap">
-              <span class="inline-block w-3 h-3 rounded-sm" style="background:{{ sc }};"></span>
-              <a href="/site/{{ o.name | urlencode }}"
-                 class="hover:text-zinc-100"
-                 title="Open {{ o.name }} site page">{{ o.name }}</a>
-              <span class="text-zinc-600 tabular-nums">{{ "{:,}".format(o.count) }}</span>
-            </span>
-          {% endfor %}
-        </div>
-      {% endif %}
-      <div class="text-[10px] text-zinc-600 mt-2 flex items-center gap-3 flex-wrap">
-        <span>tile colour = site · opacity = recency (brighter = heard more recently)</span>
-        <span class="text-zinc-700">·</span>
-        <span>corner dot = IUCN status</span>
+      {# Bottom-right action row. At zoomed-out level we just nudge the user
+         to keep going if anything's still collapsed; at level 1 (single
+         site) the prominent "zoom into rarest" button sits here. The row
+         is empty (and therefore invisible) at level 2 / no-zoom. #}
+      <div class="mt-3 flex justify-end items-center gap-3 min-h-[1.5rem]">
         {% if not zoomed %}
-          <span class="text-zinc-700">·</span>
-          <span>tiles too small to draw are collapsed into <em>+N more</em> — zoom in to see them all</span>
+          <span class="text-[10px] text-zinc-600">
+            tiles too small to draw are collapsed into <em>+N more</em> — zoom in to see them all
+          </span>
+        {% endif %}
+        {% if zoomed and long_tail and not tail_active %}
+          {% set tail_href = '/species?source=' ~ (zoomed_source | urlencode) ~ '&tail=1&since=' ~ since %}
+          <a href="{{ tail_href }}"
+             class="text-sm px-4 py-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200 inline-flex items-center gap-2">
+            <span>zoom into rarest</span>
+            <span class="text-emerald-400">↗</span>
+          </a>
         {% endif %}
       </div>
     </div>
@@ -309,18 +307,13 @@ at {{ t.source }} · {{ "{:,}".format(t.n) }} detections · max conf {{ "%.2f"|f
       </div>
     {% elif zoomed and long_tail %}
       <div class="border-t border-zinc-800 px-5 py-4">
-        <div class="flex items-baseline justify-between mb-3 gap-3 flex-wrap">
+        <div class="mb-3">
           <h3 class="text-xs uppercase tracking-wider text-zinc-400">
             Rarest at <span class="text-zinc-200">{{ zoomed_source }}</span>
             <span class="text-zinc-600 normal-case tracking-normal ml-1">
               · bottom {{ long_tail | length }} by detection count
             </span>
           </h3>
-          {% set tail_href = '/species?source=' ~ (zoomed_source | urlencode) ~ '&tail=1&since=' ~ since %}
-          <a href="{{ tail_href }}"
-             class="text-xs px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200 inline-flex items-center gap-1">
-            zoom into rarest ↗
-          </a>
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1 text-sm">
           {% for sp in long_tail %}
