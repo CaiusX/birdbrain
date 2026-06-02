@@ -4,8 +4,12 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import timedelta
+
+import numpy as np
 
 from africam.audio import AudioSource, RtspSource, YouTubeSource
+from africam.audio.source import AudioChunk
 from africam.clips import save_chunk
 from africam.config import AppConfig, OcrConfig, SourceConfig
 from africam.detector import BirdNetDetector
@@ -178,6 +182,13 @@ def _consume_stream(
     # we don't need millisecond freshness — once a minute is plenty given the
     # UI tweaks land seconds-to-minutes after the user wants them.
     SPECIES_FLOOR_REFRESH_S = 60.0
+    # Rolling pre-roll buffer: keep the previous chunk's PCM samples per
+    # worker so saved clips include the 3 s before the BirdNET window. Calls
+    # that straddle a chunk boundary used to be cut at the start (we'd save
+    # only the half BirdNET happened to fire on); with pre-roll, the full
+    # call lives in seconds 3-6 of the saved clip. Memory cost: one chunk
+    # per worker (~580 KB at 48 kHz mono float32, 3 s).
+    prev_samples: np.ndarray | None = None
     for chunk in source.stream(stop_event=stop_event):
         if stop_event.is_set():
             return
@@ -217,11 +228,33 @@ def _consume_stream(
             ]
 
         if not detections:
+            # Even when no detections fire, advance the pre-roll buffer so
+            # the NEXT chunk (if it has detections) carries this one's audio
+            # as its pre-roll context.
+            prev_samples = chunk.samples
             continue
 
         clip_path = None
         if app.save_clips:
-            clip_path = str(save_chunk(chunk, app.clips_dir, fmt=app.clip_format))
+            # Prepend the previous chunk's samples so the saved clip is 6 s:
+            # 3 s pre-roll + 3 s BirdNET window. Filename's started_at gets
+            # shifted back so the on-disk file uniquely names its real start;
+            # DB-level Detection.started_at stays at the BirdNET window's
+            # actual start (set by the detector).
+            if prev_samples is not None and len(prev_samples) > 0:
+                merged = np.concatenate([prev_samples, chunk.samples])
+                pre_s = float(len(prev_samples)) / float(chunk.sample_rate)
+                extended = AudioChunk(
+                    samples=merged,
+                    sample_rate=chunk.sample_rate,
+                    started_at=chunk.started_at - timedelta(seconds=pre_s),
+                    source_name=chunk.source_name,
+                )
+                clip_path = str(save_chunk(extended, app.clips_dir, fmt=app.clip_format))
+            else:
+                clip_path = str(save_chunk(chunk, app.clips_dir, fmt=app.clip_format))
+        # Buffer this chunk for next iteration's pre-roll.
+        prev_samples = chunk.samples
 
         db.insert_detections(
             detections,

@@ -430,11 +430,22 @@
     return source ? base + '?source=' + encodeURIComponent(source) : base;
   }
 
-  const map = L.map('species-map', { scrollWheelZoom: true });
+  const map = L.map('species-map', {
+    scrollWheelZoom: true,
+    worldCopyJump: false,
+    // Constrain panning to one world so you can't slide off into the void;
+    // viscosity 1 makes the bounce hard.
+    maxBounds: [[-85, -180], [85, 180]],
+    maxBoundsViscosity: 1.0,
+  });
   lockMap(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap',
     maxZoom: 18,
+    // noWrap stops Leaflet from rendering a second copy of the world to
+    // the east/west — at z=1 the globe is only 512 px wide so without
+    // this you see two duplicate continents side by side.
+    noWrap: true,
   }).addTo(map);
 
   // One small, uniform bubble per site that recorded this species. Colour
@@ -462,11 +473,10 @@
     markers.push(m);
   });
 
-  if (markers.length > 0) {
-    map.fitBounds(L.featureGroup(markers).getBounds().pad(0.25));
-  } else {
-    map.setView([-24, 31], 6);
-  }
+  // Default to a global overview so the spread of sites (and the empty
+  // continents around them) reads at a glance. Click-to-interact unlocks
+  // pan/zoom; the locked map widget defaults to the whole world.
+  map.setView([10, 0], 1);
 })();
 </script>
 {% endif %}

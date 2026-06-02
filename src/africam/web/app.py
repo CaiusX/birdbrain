@@ -178,14 +178,17 @@ TEMPLATES.env.filters["parse_brief"] = _parse_brief
 # carry distinct per-lodge logos — checked). Any source not in this dict
 # falls back to the template's default emerald.
 SOURCE_COLORS: dict[str, str] = {
-    "Tembe":             "#059669",  # KZN coastal sand forest — emerald-600
-    "Olifants (Naledi)": "#84cc16",  # Greater Kruger bushveld — lime-500
-    "Timbavati":         "#b91c1c",  # Lowveld red soils      — red-700
-    "Twin Pan":          "#a8a29e",  # Botswana pan / grass    — stone-400
-    "Safarihoek":        "#ea580c",  # Etosha Heights, arid    — orange-600
-    "Tau Game Lodge":    "#b45309",  # Madikwe bushveld        — amber-700
-    "Tortilis Camp":     "#eab308",  # Amboseli golden grass   — yellow-500
-    "Mara River":        "#0891b2",  # Mara Triangle, riverine — cyan-600
+    "Tembe":               "#059669",  # KZN coastal sand forest — emerald-600
+    "Olifants (Naledi)":   "#84cc16",  # Greater Kruger bushveld — lime-500
+    "Timbavati":           "#b91c1c",  # Lowveld red soils       — red-700
+    "Twin Pan":            "#a8a29e",  # Botswana pan / grass    — stone-400
+    "Safarihoek":          "#ea580c",  # Etosha Heights, arid    — orange-600
+    "Tau Game Lodge":      "#b45309",  # Madikwe bushveld        — amber-700
+    "Tortilis Camp":       "#eab308",  # Amboseli golden grass   — yellow-500
+    "Mara River":          "#0891b2",  # Mara Triangle, riverine — cyan-600
+    "Mpala Watering Hole": "#4d7c0f",  # Laikipia acacia plateau — lime-700
+    "Stony Point":         "#1d4ed8",  # Coastal Atlantic colony — blue-700
+    "Elephant Pan":        "#7c2d12",  # Tuli rusty riparian     — orange-900
 }
 
 
@@ -1552,6 +1555,443 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "total_dets_floor": (
                     overall_det_curve[0] if overall_det_curve else 0
                 ),
+            },
+        )
+
+    # IUCN statuses we treat as "conservation-flagged" on /rare. NT is on the
+    # edge but worth surfacing for sub-Saharan birding; EX/EW are kept for
+    # completeness even though hearing one would be world-news. Ordered most
+    # urgent first so /rare can sort by this list's index.
+    _RARE_IUCN_ORDER = ["CR", "EN", "VU", "NT", "EW", "EX"]
+    _RARE_IUCN_SET = set(_RARE_IUCN_ORDER)
+
+    def _rare_pick_clip_id(s, sci: str, src: str, max_conf: float) -> int | None:
+        """For a (species, source) pair, return the detection_id of the
+        clip whose confidence equals the group's max_conf. Used by every
+        section to pick a representative spectrogram trigger."""
+        return s.execute(
+            select(DetectionRow.id)
+            .where(DetectionRow.scientific_name == sci)
+            .where(DetectionRow.source_name == src)
+            .where(DetectionRow.confidence == max_conf)
+            .order_by(desc(DetectionRow.started_at))
+            .limit(1)
+        ).scalar()
+
+    def _rare_newly_heard(s, start, sources: list[str]) -> list[dict]:
+        """(source, species) pairs whose first-ever detection at that source
+        lies inside the window. Empty for since=all. Up to 20 rows, sorted
+        by max confidence so the most clip-worthy newcomers come first."""
+        if start is None:
+            return []
+        stmt = (
+            select(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                func.min(DetectionRow.started_at).label("first_at"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.count().label("n"),
+            )
+            .group_by(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+            )
+            .having(func.min(DetectionRow.started_at) >= start)
+            .order_by(desc("max_conf"))
+            .limit(20)
+        )
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        out = []
+        for r in s.execute(stmt):
+            out.append({
+                "source": r.source_name,
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "first_at": r.first_at,
+                "max_conf": float(r.max_conf or 0),
+                "n": int(r.n),
+                "detection_id": _rare_pick_clip_id(
+                    s, r.scientific_name, r.source_name, float(r.max_conf or 0)
+                ),
+            })
+        return out
+
+    def _rare_long_tail(s, start, sources: list[str],
+                        bad_set: set[str]) -> list[dict]:
+        """Species with COUNT ≤ 3 in the window and max_conf ≥ 0.50, ranked
+        by max_conf. Drops species whose every reviewed clip is 'bad' — those
+        are systemic errors, not rarities. Surfaces (best_source, best clip)
+        for each, so the user can audit the one most likely to be a real
+        find."""
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                func.count().label("n"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.count(func.distinct(DetectionRow.source_name)).label(
+                    "n_sites"
+                ),
+            )
+            .group_by(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+            )
+            .having(func.count() <= 3)
+            .having(func.max(DetectionRow.confidence) >= 0.50)
+            .order_by(desc("max_conf"))
+            .limit(40)  # over-fetch; bad_set filter trims below
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        rows = list(s.execute(stmt))
+        out = []
+        for r in rows:
+            if r.scientific_name in bad_set:
+                continue
+            # Best source for this species in the window.
+            best_src = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                )
+                .where(DetectionRow.scientific_name == r.scientific_name)
+                .where(DetectionRow.confidence == r.max_conf)
+                .group_by(DetectionRow.source_name)
+                .limit(1)
+            ).first()
+            src_name = best_src.source_name if best_src else None
+            out.append({
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "n": int(r.n),
+                "n_sites": int(r.n_sites),
+                "max_conf": float(r.max_conf or 0),
+                "best_source": src_name,
+                "detection_id": (
+                    _rare_pick_clip_id(
+                        s, r.scientific_name, src_name, float(r.max_conf or 0)
+                    ) if src_name else None
+                ),
+            })
+            if len(out) >= 20:
+                break
+        return out
+
+    def _rare_label_counts(s, sources: list[str]) -> dict[str, dict]:
+        """Per-species good/bad/unsure tallies across all time (labels are
+        rare enough that the window doesn't materially help here)."""
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                DetectionRow.label,
+                func.count().label("n"),
+            )
+            .where(DetectionRow.label.isnot(None))
+            .group_by(DetectionRow.scientific_name, DetectionRow.label)
+        )
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        out: dict[str, dict] = {}
+        for r in s.execute(stmt):
+            d = out.setdefault(r.scientific_name, {
+                "good": 0, "bad": 0, "unsure": 0,
+            })
+            if r.label in d:
+                d[r.label] = int(r.n)
+        return out
+
+    def _rare_misclass_patterns(s, label_counts: dict[str, dict],
+                                tag_by_sci: dict[str, str | None],
+                                common_by_sci: dict[str, str],
+                                start, sources: list[str]) -> list[dict]:
+        """Species the model gets wrong: tag='suspect' OR (>=5 reviewed AND
+        bad/(good+bad) >= 0.5). Each row carries its dominant suggested-
+        species correction and a representative clip."""
+        suspect: list[dict] = []
+        seen: set[str] = set()
+        # Candidates: every labelled species AND every tag='suspect' species
+        # (the latter may have no labelled detections yet, but we still want
+        # them surfaced as patterns the model is known to confuse).
+        candidates = set(label_counts.keys()) | {
+            sci for sci, tag in tag_by_sci.items() if tag == "suspect"
+        }
+        for sci in candidates:
+            counts = label_counts.get(sci, {"good": 0, "bad": 0, "unsure": 0})
+            good, bad = counts["good"], counts["bad"]
+            reviewed = good + bad
+            tag = tag_by_sci.get(sci)
+            bad_rate = (bad / reviewed) if reviewed else 0.0
+            qualifies = (
+                tag == "suspect"
+                or (reviewed >= 5 and bad_rate >= 0.5)
+            )
+            if not qualifies:
+                continue
+            seen.add(sci)
+            # Top correction for this species (most common
+            # suggested_species when labelled bad).
+            top_corr = s.execute(
+                select(
+                    DetectionRow.suggested_species,
+                    func.count().label("n"),
+                )
+                .where(DetectionRow.scientific_name == sci)
+                .where(DetectionRow.label == "bad")
+                .where(DetectionRow.suggested_species.isnot(None))
+                .group_by(DetectionRow.suggested_species)
+                .order_by(desc("n"))
+                .limit(1)
+            ).first()
+            # Best clip in window for audit.
+            clip_q = (
+                select(
+                    DetectionRow.id,
+                    DetectionRow.source_name,
+                    func.max(DetectionRow.confidence).label("c"),
+                )
+                .where(DetectionRow.scientific_name == sci)
+                .group_by(DetectionRow.source_name)
+                .order_by(desc("c"))
+                .limit(1)
+            )
+            if start is not None:
+                clip_q = clip_q.where(DetectionRow.started_at >= start)
+            if sources:
+                clip_q = clip_q.where(
+                    DetectionRow.source_name.in_(sources)
+                )
+            clip = s.execute(clip_q).first()
+            suspect.append({
+                "scientific": sci,
+                "common": common_by_sci.get(sci, sci),
+                "tag": tag,
+                "good": good,
+                "bad": bad,
+                "reviewed": reviewed,
+                "bad_rate": bad_rate,
+                "top_correction": top_corr.suggested_species if top_corr else None,
+                "top_correction_n": int(top_corr.n) if top_corr else 0,
+                "best_source": clip.source_name if clip else None,
+                "best_conf": float(clip.c) if clip else 0.0,
+                "detection_id": clip.id if clip else None,
+            })
+        # Sort: tag='suspect' first, then by bad_rate desc, then reviewed desc.
+        suspect.sort(
+            key=lambda r: (
+                0 if r["tag"] == "suspect" else 1,
+                -r["bad_rate"],
+                -r["reviewed"],
+            )
+        )
+        return suspect[:10], seen
+
+    def _rare_top_corrections(s, sources: list[str]) -> list[dict]:
+        """Across all reviews, the most common "X actually was Y" patterns.
+        Surfaces systemic BirdNET confusions like 'Red-eyed Dove →
+        Cape Turtle-Dove'. Compact list, capped at 10."""
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                DetectionRow.suggested_species,
+                func.count().label("n"),
+            )
+            .where(DetectionRow.label == "bad")
+            .where(DetectionRow.suggested_species.isnot(None))
+            .group_by(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                DetectionRow.suggested_species,
+            )
+            .order_by(desc("n"))
+            .limit(10)
+        )
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        return [
+            {
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "suggested": r.suggested_species,
+                "n": int(r.n),
+            }
+            for r in s.execute(stmt)
+        ]
+
+    def _rare_audit_queue(s, start, sources: list[str],
+                          patterns_set: set[str]) -> list[dict]:
+        """Up to 10 unreviewed in-window detections of species already
+        flagged as suspect. Highest-confidence first — those are the
+        outliers most worth a listen."""
+        if not patterns_set:
+            return []
+        stmt = (
+            select(DetectionRow)
+            .where(DetectionRow.label.is_(None))
+            .where(DetectionRow.scientific_name.in_(patterns_set))
+            .order_by(desc(DetectionRow.confidence))
+            .limit(10)
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        return list(s.scalars(stmt))
+
+    def _rare_conservation_flagged(s, start, sources: list[str]) -> list[dict]:
+        """Species whose IUCN status is in {CR,EN,VU,NT,EW,EX} and have at
+        least one detection in the window. Sorted by status severity, then
+        by max confidence so the strongest evidence per status floats up."""
+        # Get every threatened-status species' notes — small table, in-memory
+        # filter is fine.
+        notes = list(s.execute(
+            select(
+                SpeciesNoteRow.scientific_name,
+                SpeciesNoteRow.common_name,
+                SpeciesNoteRow.conservation_status,
+            ).where(
+                SpeciesNoteRow.conservation_status.in_(_RARE_IUCN_SET)
+            )
+        ))
+        if not notes:
+            return []
+        sci_to_status = {n.scientific_name: n.conservation_status for n in notes}
+        sci_to_common = {n.scientific_name: n.common_name for n in notes}
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                func.count().label("n"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.max(DetectionRow.started_at).label("last_seen"),
+                func.count(func.distinct(DetectionRow.source_name)).label(
+                    "n_sites"
+                ),
+            )
+            .where(DetectionRow.scientific_name.in_(sci_to_status.keys()))
+            .group_by(DetectionRow.scientific_name)
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        out = []
+        for r in s.execute(stmt):
+            status = sci_to_status[r.scientific_name]
+            # Best site for this species (where the max-conf clip lives).
+            best_src = s.execute(
+                select(DetectionRow.source_name)
+                .where(DetectionRow.scientific_name == r.scientific_name)
+                .where(DetectionRow.confidence == r.max_conf)
+                .limit(1)
+            ).scalar()
+            out.append({
+                "scientific": r.scientific_name,
+                "common": sci_to_common[r.scientific_name],
+                "conservation_status": status,
+                "severity": _RARE_IUCN_ORDER.index(status),
+                "n": int(r.n),
+                "n_sites": int(r.n_sites),
+                "max_conf": float(r.max_conf or 0),
+                "last_seen": r.last_seen,
+                "best_source": best_src,
+                "detection_id": (
+                    _rare_pick_clip_id(
+                        s, r.scientific_name, best_src,
+                        float(r.max_conf or 0),
+                    ) if best_src else None
+                ),
+            })
+        # Severity first (CR has index 0 — most urgent), then max_conf desc.
+        out.sort(key=lambda r: (r["severity"], -r["max_conf"]))
+        return out[:20]
+
+    @app.get("/rare", response_class=HTMLResponse)
+    def rare_page(
+        request: Request,
+        since: str = Query(default="7d"),
+        source: list[str] | None = Query(default=None),
+    ) -> HTMLResponse:
+        """Rare & interesting detections — surfaces species the loud-common
+        cacophony drowns out, and patterns that look like systemic BirdNET
+        misclassifications. Four sections; see the plan file for the rules
+        behind each."""
+        _, sources_by_name, _ = _all_sources()
+        sources_filter = [s for s in (source or []) if s]
+
+        now = datetime.now(UTC)
+        if since == "24h":
+            start = now - timedelta(hours=24)
+        elif since == "7d":
+            start = now - timedelta(days=7)
+        else:
+            start = None
+
+        with db.session() as s:
+            # Shared lookups used by multiple sections.
+            notes = list(s.execute(
+                select(
+                    SpeciesNoteRow.scientific_name,
+                    SpeciesNoteRow.common_name,
+                    SpeciesNoteRow.tag,
+                    SpeciesNoteRow.conservation_status,
+                )
+            ))
+            tag_by_sci = {n.scientific_name: n.tag for n in notes}
+            status_by_sci = {
+                n.scientific_name: n.conservation_status
+                for n in notes if n.conservation_status
+            }
+            common_by_sci = {n.scientific_name: n.common_name for n in notes}
+
+            label_counts = _rare_label_counts(s, sources_filter)
+            # Set of species whose every reviewed clip was 'bad' — excluded
+            # from the long-tail surface so we don't promote known noise.
+            all_bad = {
+                sci for sci, c in label_counts.items()
+                if c["bad"] > 0 and c["good"] == 0 and c["unsure"] == 0
+            }
+
+            newly_heard = _rare_newly_heard(s, start, sources_filter)
+            long_tail = _rare_long_tail(s, start, sources_filter, all_bad)
+            misclass_patterns, patterns_set = _rare_misclass_patterns(
+                s, label_counts, tag_by_sci, common_by_sci,
+                start, sources_filter,
+            )
+            top_corrections = _rare_top_corrections(s, sources_filter)
+            audit_queue = _rare_audit_queue(
+                s, start, sources_filter, patterns_set,
+            )
+            conservation = _rare_conservation_flagged(
+                s, start, sources_filter,
+            )
+
+        all_source_names = sorted(sources_by_name.keys())
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "rare.html",
+            {
+                "since": since,
+                "source_filter": sources_filter,
+                "all_source_names": all_source_names,
+                "newly_heard": newly_heard,
+                "long_tail": long_tail,
+                "misclass_patterns": misclass_patterns,
+                "top_corrections": top_corrections,
+                "audit_queue": audit_queue,
+                "conservation": conservation,
+                "source_tz": {
+                    n: c.timezone for n, c in sources_by_name.items()
+                },
+                "status_by_sci": status_by_sci,
+                "tag_by_sci": tag_by_sci,
+                **_note_tag_context(),
             },
         )
 

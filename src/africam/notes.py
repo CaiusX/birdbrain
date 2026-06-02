@@ -33,25 +33,87 @@ from africam.weather import daily_weather_summary, recent_weather_summary
 log = get_logger(__name__)
 
 
-# Shared site context — referenced by all three prompts so the model has
-# a consistent mental map of the sites regardless of which task type fires.
-_SITES_CONTEXT = """\
-The monitor watches four Southern African live-stream wildlife cams:
+# Per-site descriptive blurbs the prompts reference. Update this dict when
+# adding a new site (same maintenance burden as the SOURCE_COLORS palette
+# in web/app.py). A site that's live but missing from this dict still
+# appears in the prompt — it just shows up with a "(no description on
+# file)" tail so the model knows about its existence even before we fill
+# in the blurb.
+#
+# Each line ends with the per-site UTC offset in parentheses; the prompt
+# header instructs Claude to use that offset when discussing diurnal rhythm.
+_SITE_DESCRIPTIONS: dict[str, str] = {
+    "Olifants (Naledi)":   "riverine bushveld, Kruger NP (Limpopo, UTC+2)",
+    "Tembe":               "coastal sand forest, KZN / Mozambique border (UTC+2)",
+    "Timbavati":           "Lowveld savanna, private reserve adjoining Kruger (UTC+2)",
+    "Twin Pan":            "Kalahari pan, Nxai Pan area, northern Botswana (UTC+2)",
+    "Safarihoek":          "Etosha Heights escarpment, northern Namibia (UTC+2)",
+    "Tau Game Lodge":      "Madikwe Game Reserve bushveld, NW South Africa (UTC+2)",
+    "Tortilis Camp":       "Amboseli, semi-arid grassland under Kilimanjaro, southern Kenya (UTC+3)",
+    "Mara River":          "Maasai Mara Triangle, riverine savanna, southwestern Kenya (UTC+3)",
+    "Mpala Watering Hole": "Laikipia plateau acacia-Commiphora bushland, ~1800 m, research-station camera, central Kenya (UTC+3)",
+    "Stony Point":         "Coastal African Penguin colony with Cape Cormorants, Betty's Bay, Western Cape (UTC+2)",
+    "Elephant Pan":        "Northern Tuli Block riparian waterhole, Mashatu area, eastern Botswana (UTC+2)",
+}
 
-  • Olifants (Naledi)  — riverine bushveld, Kruger NP (Limpopo)
-  • Tembe              — coastal sand forest, KZN/Mozambique border
-  • Timbavati          — Lowveld savanna, private reserve adjoining Kruger
-  • Twin Pan           — Kalahari pan, Nxai Pan area, northern Botswana
+# Counting word for the opening line ("watches eight cams"). Falls back to
+# the digit beyond what's listed — the prompt still reads naturally.
+_NUM_WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    11: "eleven", 12: "twelve",
+}
 
-A BirdNET-Analyzer classifier runs continuously over the audio. All times
-in the evidence dossiers are UTC; local clock is UTC+2 (SAST or CAT)."""
+
+def _live_source_names(
+    static_sources: Iterable[SourceConfig], db: Database
+) -> list[str]:
+    """Source list as the pipeline actually sees it: sources.toml entries
+    minus admin-disabled ones, plus undeleted runtime sources added via
+    /admin. Mirrors pipeline._desired_sources, kept here so notes doesn't
+    have a cyclic dep on pipeline. Returns names sorted so the prompt is
+    stable across ticks (cache-friendly)."""
+    disabled = db.list_disabled_source_names()
+    names = {s.name for s in static_sources if s.name not in disabled}
+    for row in db.list_runtime_sources():
+        if row.deleted_at is None and row.name not in disabled:
+            names.add(row.name)
+    return sorted(names)
 
 
-# Stable across species → eligible for prompt caching once the prompt
-# crosses the model's cache-floor token count.
-SPECIES_SYSTEM_PROMPT = f"""\
-You are the resident analyst for a Southern African live-stream bird monitor.
-{_SITES_CONTEXT}
+def _build_sites_context(source_names: list[str]) -> str:
+    """Build the shared context block for all four prompts from the live
+    source list. Cheap (microseconds); rebuilt every tick so adding or
+    removing a source is reflected on the next generation without a
+    restart."""
+    n = len(source_names)
+    count_word = _NUM_WORDS.get(n, str(n))
+    width = max((len(name) for name in source_names), default=0)
+    bullets = "\n".join(
+        f"  • {name:<{width}}  — {_SITE_DESCRIPTIONS.get(name, '(no description on file)')}"
+        for name in source_names
+    )
+    return (
+        f"The monitor watches {count_word} African live-stream wildlife cams "
+        f"across two broad regions (Southern Africa: UTC+2 SAST/CAT; "
+        f"East Africa: UTC+3 EAT):\n\n"
+        f"{bullets}\n\n"
+        f"A BirdNET-Analyzer classifier runs continuously over the audio. "
+        f"All times in the evidence dossiers are UTC; convert to each site's "
+        f"local clock using the bracketed offset above when discussing "
+        f"diurnal rhythm."
+    )
+
+
+# Prompts are built from the current source list every tick — see
+# species_system_prompt() / site_system_prompt() / species_site_system_prompt()
+# / daily_brief_system_prompt() below. The body of each prompt is constant;
+# only the {sites_context} block changes, so as long as the source list is
+# stable between ticks the rendered prompt is byte-identical and Anthropic's
+# prompt cache stays warm.
+_SPECIES_PROMPT_TEMPLATE = """\
+You are the resident analyst for an African live-stream bird monitor network.
+{sites_context}
 
 For each species the operator gives you a JSON evidence dossier drawn from
 our own detections: total count, per-source distribution, hour-of-day
@@ -90,9 +152,9 @@ Style:
 Output the commentary as plain text, nothing else."""
 
 
-SITE_SYSTEM_PROMPT = f"""\
-You are the resident analyst for a Southern African live-stream bird monitor.
-{_SITES_CONTEXT}
+_SITE_PROMPT_TEMPLATE = """\
+You are the resident analyst for an African live-stream bird monitor network.
+{sites_context}
 
 The operator gives you a JSON evidence dossier for ONE site: its total
 detection count, distinct species count, hour-of-day histogram (UTC), top
@@ -131,11 +193,11 @@ Style:
 Output the commentary as plain text, nothing else."""
 
 
-SPECIES_SITE_SYSTEM_PROMPT = f"""\
-You are the resident analyst for a Southern African live-stream bird monitor,
+_SPECIES_SITE_PROMPT_TEMPLATE = """\
+You are the resident analyst for an African live-stream bird monitor network,
 writing a SHORT, SITE-SPECIFIC commentary on how one species is heard at one
 particular site, in the context of how it sounds across the network.
-{_SITES_CONTEXT}
+{sites_context}
 
 The operator gives you a JSON dossier for ONE (species, site) pair:
 its detection_count at this site, its share_of_network (this site's count as
@@ -176,10 +238,10 @@ unclear), output a single bullet noting that.
 Output as plain text, one bullet per line, nothing else."""
 
 
-DAILY_BRIEF_SYSTEM_PROMPT = f"""\
-You are the resident analyst for a Southern African live-stream bird monitor,
+_DAILY_BRIEF_PROMPT_TEMPLATE = """\
+You are the resident analyst for an African live-stream bird monitor network,
 writing a daily newspaper-style soundscape brief.
-{_SITES_CONTEXT}
+{sites_context}
 
 The operator gives you a JSON evidence dossier for ONE UTC date: per-site
 detection counts, each site's top species and peak hour, high-confidence
@@ -223,6 +285,30 @@ Rules:
     interesting sites first.
   • Species by common name. Convey shape, don't recite raw counts.
   • No throat-clearing, no sign-offs, no full-sentence padding in bullets."""
+
+
+# ---------- prompt builders ----------
+# Each builder formats its template with the current sites context, so adding
+# or removing a source via /admin shows up in the very next tick — no restart
+# needed. The body of each prompt is constant, so as long as the source list
+# is stable between ticks the rendered prompt stays byte-identical and
+# Anthropic's prompt cache keeps hitting.
+
+
+def species_system_prompt(sites_context: str) -> str:
+    return _SPECIES_PROMPT_TEMPLATE.format(sites_context=sites_context)
+
+
+def site_system_prompt(sites_context: str) -> str:
+    return _SITE_PROMPT_TEMPLATE.format(sites_context=sites_context)
+
+
+def species_site_system_prompt(sites_context: str) -> str:
+    return _SPECIES_SITE_PROMPT_TEMPLATE.format(sites_context=sites_context)
+
+
+def daily_brief_system_prompt(sites_context: str) -> str:
+    return _DAILY_BRIEF_PROMPT_TEMPLATE.format(sites_context=sites_context)
 
 
 # ---------- evidence signatures (re-trigger when these change) ----------
@@ -357,7 +443,10 @@ def _make_client():
 # ---------- tick functions: one per task type, each returns truthy on work ----------
 
 
-def _species_tick(db: Database, cfg: AppConfig, client) -> str | None:
+def _species_tick(
+    db: Database, cfg: AppConfig,
+    sources: Iterable[SourceConfig], client,
+) -> str | None:
     sci = db.pick_stale_species_for_note(
         max_age_days=cfg.notes_stale_days,
         min_detections=cfg.notes_min_detections,
@@ -370,8 +459,9 @@ def _species_tick(db: Database, cfg: AppConfig, client) -> str | None:
     if evidence is None:
         return None
 
+    sites_context = _build_sites_context(_live_source_names(sources, db))
     note_text = _call_claude(
-        system_prompt=SPECIES_SYSTEM_PROMPT,
+        system_prompt=species_system_prompt(sites_context),
         user_text=(
             "Write a commentary on this species' detections at our sites.\n\n"
             f"{_format_evidence_for_prompt(evidence)}"
@@ -407,7 +497,9 @@ def _species_site_tick(
 ) -> str | None:
     """Generate one (species, site) note. Returns "sci|source" on success."""
     src_list = list(sources)
-    candidate_names = [s.name for s in src_list]
+    # candidate_names must include runtime sources (added via /admin),
+    # otherwise per-(species, runtime-site) pairs never become candidates.
+    candidate_names = _live_source_names(src_list, db)
     pick = db.pick_stale_species_site_for_note(
         candidate_sources=candidate_names,
         max_age_days=cfg.notes_stale_days * 2,  # per-pair ages slower
@@ -422,8 +514,9 @@ def _species_site_tick(
     if evidence is None:
         return None
 
+    sites_context = _build_sites_context(_live_source_names(src_list, db))
     note_text = _call_claude(
-        system_prompt=SPECIES_SITE_SYSTEM_PROMPT,
+        system_prompt=species_site_system_prompt(sites_context),
         user_text=(
             "Write a 2–4 bullet commentary on this species at this site.\n\n"
             f"{_format_evidence_for_prompt(evidence)}"
@@ -462,8 +555,11 @@ def _site_tick(
     db: Database, cfg: AppConfig, sources: Iterable[SourceConfig], client
 ) -> str | None:
     src_list = list(sources)
+    # Runtime sources (added via /admin, e.g. Safarihoek) need to be in the
+    # candidate set too — otherwise they're invisible to the site picker and
+    # never get a narrative even with thousands of detections.
     source_name = db.pick_stale_site_for_note(
-        candidate_sources=[s.name for s in src_list],
+        candidate_sources=_live_source_names(src_list, db),
         max_age_days=cfg.notes_stale_days,
         min_detections=cfg.notes_min_detections,
         regen_count_factor=cfg.notes_regen_count_factor,
@@ -485,8 +581,9 @@ def _site_tick(
         if weather:
             evidence["weather_recent"] = weather
 
+    sites_context = _build_sites_context(_live_source_names(src_list, db))
     note_text = _call_claude(
-        system_prompt=SITE_SYSTEM_PROMPT,
+        system_prompt=site_system_prompt(sites_context),
         user_text=(
             "Write a commentary on this site's soundscape.\n\n"
             f"{_format_evidence_for_prompt(evidence)}"
@@ -562,8 +659,9 @@ def _daily_brief_tick(
 
         _enrich_brief_evidence_with_weather(evidence, src_list)
 
+        sites_context = _build_sites_context(_live_source_names(src_list, db))
         brief_text = _call_claude(
-            system_prompt=DAILY_BRIEF_SYSTEM_PROMPT,
+            system_prompt=daily_brief_system_prompt(sites_context),
             user_text=(
                 "Return the JSON soundscape digest for this date.\n\n"
                 f"{_format_evidence_for_prompt(evidence)}"
@@ -632,7 +730,7 @@ def _worker_loop(
                 # parallel: each tick generates ONE of each. They're
                 # independent, fast (one Claude call apiece), and at 5-min
                 # ticks the combined rate is well within budget.
-                _species_tick(db, cfg, client)
+                _species_tick(db, cfg, sources, client)
                 _species_site_tick(db, cfg, sources, client)
         except Exception as e:
             log.warning("notes.tick_failed", error=str(e)[:300])
@@ -677,10 +775,12 @@ def generate_brief_for_date(
     evidence = db.gather_daily_evidence(date_utc)
     if evidence is None:
         return None
-    if sources:
-        _enrich_brief_evidence_with_weather(evidence, list(sources))
+    src_list = list(sources)
+    if src_list:
+        _enrich_brief_evidence_with_weather(evidence, src_list)
+    sites_context = _build_sites_context(_live_source_names(src_list, db))
     brief_text = _call_claude(
-        system_prompt=DAILY_BRIEF_SYSTEM_PROMPT,
+        system_prompt=daily_brief_system_prompt(sites_context),
         user_text=(
             "Return the JSON soundscape digest for this date.\n\n"
             f"{_format_evidence_for_prompt(evidence)}"
