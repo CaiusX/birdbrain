@@ -2145,6 +2145,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # event without burying recent ones under stale entries.
         anomalies = db.list_recent_anomalies(name, days=30)
 
+        # Current local time + weather for the site header. Both come from
+        # cached upstreams (Open-Meteo TTL = 1h) so this adds no real cost
+        # to the page render. Falls back to None when coords/tz missing or
+        # the API call fails — the template hides the line gracefully.
+        current_weather = None
+        if src_cfg and src_cfg.lat is not None and src_cfg.lon is not None:
+            current_weather = weather_module.current_weather_at(
+                src_cfg.lat, src_cfg.lon, tz_name
+            )
+        local_now = datetime.now(local_tz).strftime("%H:%M")
+        tz_abbr = _tz_abbr(tz_name)
+
         return TEMPLATES.TemplateResponse(
             request,
             "site_detail.html",
@@ -2168,6 +2180,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "tz_name": tz_name,
                 "source_tz": {n: c.timezone for n, c in sources_by_name.items()},
                 "anomalies": anomalies,
+                "current_weather": current_weather,
+                "local_now": local_now,
+                "tz_abbr": tz_abbr,
                 **_note_tag_context(),
             },
         )

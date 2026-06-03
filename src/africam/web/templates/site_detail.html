@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import species_link %}
+{% from "_macros.html" import species_link, weather_icon %}
 {% block title %}BirdBrain · {{ name }}{% endblock %}
 
 {% block head_extra %}
@@ -49,6 +49,32 @@
           {% endif %}
           {{ src_cfg.kind }} · timezone {{ tz_name }}
         </div>
+        {# Local "now" line: ticking clock in the site's tz + current weather
+           from Open-Meteo (cached 1h). The clock is initialised server-side
+           so it shows the right value pre-JS, and a tiny script re-renders
+           it every 30 s with Intl.DateTimeFormat so it stays correct on
+           long-open tabs without a page reload. #}
+        <div class="text-zinc-300 text-sm mt-2 flex items-center gap-2 flex-wrap">
+          <span class="tabular-nums font-medium"
+                data-local-clock="{{ tz_name }}">{{ local_now }}</span>
+          <span class="text-zinc-500 text-xs">{{ tz_abbr }}</span>
+          {% if current_weather %}
+            <span class="text-zinc-600">·</span>
+            <span class="text-zinc-300 inline-flex items-center gap-1.5">
+              <span class="text-zinc-200">{{ weather_icon(current_weather.icon, size=20) }}</span>
+              {% if current_weather.temp is not none %}
+                <span class="tabular-nums">{{ "%.0f"|format(current_weather.temp) }}°C</span>
+              {% endif %}
+              {% if current_weather.label %}
+                <span class="text-zinc-500">{{ current_weather.label }}</span>
+              {% endif %}
+            </span>
+            {% if current_weather.wind is not none %}
+              <span class="text-zinc-600">·</span>
+              <span class="text-zinc-500 text-xs tabular-nums">wind {{ "%.0f"|format(current_weather.wind) }} km/h</span>
+            {% endif %}
+          {% endif %}
+        </div>
       {% endif %}
     </div>
     {% if src_cfg and src_cfg.lat is not none and src_cfg.lon is not none %}
@@ -80,6 +106,27 @@
   })();
 </script>
 {% endif %}
+
+<script>
+  // Tick the site's local clock so long-open tabs don't show a stale
+  // server-rendered minute. 30 s cadence is more than enough for a
+  // HH:MM display; uses the browser's Intl + the tz stored on the span.
+  (function () {
+    const el = document.querySelector('[data-local-clock]');
+    if (!el) return;
+    const tz = el.getAttribute('data-local-clock');
+    let fmt;
+    try {
+      fmt = new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit', minute: '2-digit',
+        hour12: false, timeZone: tz,
+      });
+    } catch (_e) { return; }
+    function tick() { el.textContent = fmt.format(new Date()); }
+    tick();
+    setInterval(tick, 30000);
+  })();
+</script>
 
 {# ---- 2. Headline stats ---- #}
 <section class="grid grid-cols-2 md:grid-cols-4 gap-px bg-zinc-800/50 rounded-xl overflow-hidden border border-zinc-800 mt-4">

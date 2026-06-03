@@ -51,6 +51,26 @@
   "NE": ("bg-zinc-800 text-zinc-500 border-zinc-700", "Not Evaluated"),
 } %}
 
+{# Inline weather icon matching the keys returned by ``wmo_summary`` in
+   africam.weather. Keep in sync with the bigger inline copies in the
+   diurnal popup. Returns nothing for unknown keys so the surrounding
+   layout collapses cleanly. #}
+{% macro weather_icon(key, size=20) -%}
+{%- if key == 'clear' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+{%- elif key == 'partly' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="9" r="3"/><path d="M8 2v2M2 9h2M13.5 4.5L12 6M3.5 14.5L2 16"/><path d="M17.5 21a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 13.5 4.5 4.5 0 0 0 6.5 21h11Z"/></svg>
+{%- elif key == 'overcast' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 11.5 4.5 4.5 0 0 0 6.5 19h11Z"/></svg>
+{%- elif key == 'fog' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h18M3 13h12M3 18h18"/></svg>
+{%- elif key == 'rain' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M17.5 14a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 6.5 4.5 4.5 0 0 0 6.5 14h11Z"/><path d="M9 17v3M13 17v3M11 19v3"/></svg>
+{%- elif key == 'thunder' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 14a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 6.5 4.5 4.5 0 0 0 6.5 14h11Z"/><path d="M13 15l-3 5h4l-3 5"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
 {# IUCN Red List badge. size="sm" (10px, for inline row use) or "md" (11px,
    for species-detail headers). Renders nothing when status is empty/unknown. #}
 {% macro iucn_badge(status, size="sm") -%}

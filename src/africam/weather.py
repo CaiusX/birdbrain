@@ -82,6 +82,58 @@ def fetch_open_meteo_hourly(
     return data
 
 
+def current_weather_at(lat: float, lon: float, tz_name: str) -> dict | None:
+    """Current local-hour weather for the site header.
+
+    Reuses the cached Open-Meteo hourly fetch (past_days=0, forecast_days=1)
+    and picks the row whose timestamp matches the current local hour. Returns
+    ``{temp, humidity, wind, cloud_cover, code, icon, label, local_time, tz}``
+    or None when the upstream call fails / produces no match.
+    """
+    data = fetch_open_meteo_hourly(lat, lon, 0, tz_name)
+    if not data:
+        return None
+    hourly = (data.get("hourly") or {})
+    times = hourly.get("time") or []
+    if not times:
+        return None
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz)
+    needle = now_local.strftime("%Y-%m-%dT%H:00")
+    try:
+        idx = times.index(needle)
+    except ValueError:
+        # Fall back to the most recent past hour in the array.
+        idx = None
+        for i, t in enumerate(times):
+            if isinstance(t, str) and t <= needle:
+                idx = i
+        if idx is None:
+            return None
+
+    def _pick(name: str):
+        arr = hourly.get(name) or []
+        return arr[idx] if idx < len(arr) else None
+
+    code_raw = _pick("weather_code")
+    code = int(code_raw) if code_raw is not None else None
+    icon, label = wmo_summary(code)
+    return {
+        "temp": _pick("temperature_2m"),
+        "humidity": _pick("relative_humidity_2m"),
+        "wind": _pick("wind_speed_10m"),
+        "cloud_cover": _pick("cloud_cover"),
+        "code": code,
+        "icon": icon,
+        "label": label,
+        "local_time": now_local.strftime("%H:%M"),
+        "tz": tz_name,
+    }
+
+
 def weather_at_hour(data: dict, hour: int) -> dict:
     """Aggregate hourly weather values for one hour-of-day across the
     Open-Meteo response window. Returns ``{}`` if no samples landed on
