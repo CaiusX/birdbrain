@@ -3796,7 +3796,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         title_enc = urllib.parse.quote(title.strip().replace(" ", "_"))
         url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title_enc}"
         req = urllib.request.Request(
-            url, headers={"User-Agent": "africam-bird/0.1"}
+            url, headers={"User-Agent": "birdbrain/0.1"}
         )
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
@@ -3828,7 +3828,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             return None
         url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
         req = urllib.request.Request(
-            url, headers={"User-Agent": "africam-bird/0.1"}
+            url, headers={"User-Agent": "birdbrain/0.1"}
         )
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
@@ -3873,7 +3873,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             req = urllib.request.Request(
                 "https://api.gbif.org/v1/species/match?name="
                 + urllib.parse.quote(name),
-                headers={"User-Agent": "africam-bird/0.1"},
+                headers={"User-Agent": "birdbrain/0.1"},
             )
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
                 data = json.load(resp)
@@ -3887,7 +3887,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         try:
             req = urllib.request.Request(
                 f"https://api.gbif.org/v1/occurrence/count?taxonKey={key}",
-                headers={"User-Agent": "africam-bird/0.1"},
+                headers={"User-Agent": "birdbrain/0.1"},
             )
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
                 n_records = int(resp.read().decode().strip() or "0")
@@ -3924,7 +3924,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "https://api.inaturalist.org/v1/taxa"
                 "?rank=species&per_page=5&q="
                 + urllib.parse.quote(name),
-                headers={"User-Agent": "africam-bird/0.1"},
+                headers={"User-Agent": "birdbrain/0.1"},
             )
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
                 data = json.load(resp)
@@ -4084,7 +4084,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "&redirects=1&format=json&imlimit=80"
         )
         req = urllib.request.Request(
-            list_url, headers={"User-Agent": "africam-bird/0.1"}
+            list_url, headers={"User-Agent": "birdbrain/0.1"}
         )
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
@@ -4140,7 +4140,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "&prop=imageinfo&iiprop=url&iiurlwidth=320&format=json"
         )
         req2 = urllib.request.Request(
-            info_url, headers={"User-Agent": "africam-bird/0.1"}
+            info_url, headers={"User-Agent": "birdbrain/0.1"}
         )
         try:
             with urllib.request.urlopen(req2, timeout=8) as resp:  # noqa: S310
@@ -4280,7 +4280,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         params = urllib.parse.urlencode({"query": tag_query, "key": api_key})
         url = f"https://xeno-canto.org/api/3/recordings?{params}"
-        req = urllib.request.Request(url, headers={"User-Agent": "africam-bird/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "birdbrain/0.1"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
                 data = json.load(resp)
@@ -4377,7 +4377,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         params = urllib.parse.urlencode({"query": tag_query, "key": api_key})
         url = f"https://xeno-canto.org/api/3/recordings?{params}"
-        req = urllib.request.Request(url, headers={"User-Agent": "africam-bird/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "birdbrain/0.1"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 (https only)
                 data = json.load(resp)
