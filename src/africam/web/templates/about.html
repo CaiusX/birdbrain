@@ -1,13 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Africam · about{% endblock %}
+{% block title %}BirdBrain · about{% endblock %}
 
 {% block content %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-5 max-w-3xl">
   <h2 class="text-xl font-semibold text-zinc-100">About this site</h2>
   <p class="mt-3 text-sm text-zinc-300 leading-relaxed">
     Real-time bird species recognition from live African wildlife cams.
-    Listens to the audio from <a href="https://africam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">Africam</a>'s
-    YouTube streams, runs
+    Listens to the audio from
+    <a href="https://africam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">Africam</a>,
+    <a href="https://explore.org/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">explore.org</a>,
+    and other African wildlife live-stream channels, runs
     <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">BirdNET</a>
     on rolling 3-second windows, and surfaces what it hears here. Hosted on
     a Raspberry Pi 5.
@@ -17,8 +19,9 @@
     are licensed under
     <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noopener" class="hover:text-zinc-300">CC&nbsp;BY-NC-SA&nbsp;4.0</a>,
     which permits research, education and personal use but not commercial
-    deployment. Wildlife video remains the property of Africam and their
-    partner lodges; we embed their public streams and analyse only the audio.
+    deployment. Wildlife video remains the property of the originating
+    channels (Africam, explore.org, and partner lodges); we embed their
+    public streams and analyse only the audio.
   </p>
 </section>
 
@@ -28,7 +31,10 @@
   </div>
   <dl class="px-5 py-4 grid grid-cols-1 sm:grid-cols-[14rem_1fr] gap-x-6 gap-y-3 text-sm text-zinc-300">
     <dt><a href="https://africam.com/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">Africam</a></dt>
-    <dd class="text-zinc-400">Live YouTube wildlife streams from waterholes and reserves across Southern and East Africa.</dd>
+    <dd class="text-zinc-400">Most of the live YouTube wildlife streams in this network &mdash; waterholes, lodges, and reserves across Southern and East Africa, plus the Stony Point African Penguin colony via Africam Conservation.</dd>
+
+    <dt><a href="https://explore.org/" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">explore.org</a></dt>
+    <dd class="text-zinc-400">Mpala Watering Hole (Laikipia, central Kenya) and other live streams via the <em>Explore African Wildlife</em> channel &mdash; Cornell-aligned research-station cameras filling biome gaps the Africam roster doesn't reach.</dd>
 
     <dt><a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="text-zinc-100 hover:text-emerald-300 font-medium">BirdNET-Analyzer</a></dt>
     <dd class="text-zinc-400">Cornell Lab of Ornithology &mdash; Kahl et al. The deep-learning model that turns 3&#8209;second audio chunks into species predictions.</dd>
@@ -92,7 +98,7 @@
   <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider mb-2">Source</h3>
   <p class="text-sm text-zinc-300">
     Code is MIT-licensed and lives at
-    <a href="https://github.com/CaiusX/africam-bird" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">github.com/CaiusX/africam-bird</a>.
+    <a href="https://github.com/CaiusX/birdbrain" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">github.com/CaiusX/birdbrain</a>.
   </p>
 </section>
 {% endblock %}

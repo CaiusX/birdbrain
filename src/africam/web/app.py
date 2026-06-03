@@ -344,7 +344,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         static_sources = []
     sites: dict[str, Site] = load_sites(cfg.sites_file)
 
-    app = FastAPI(title="Africam Bird Recognition", version="0.1.0")
+    app = FastAPI(title="BirdBrain", version="0.1.0")
     app.state.db = db
     app.state.clips_root = clips_root
     app.state.sites = sites
@@ -611,6 +611,38 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         """Static credits + citation page. No DB calls; safe to render publicly
         through the tunnel (middleware only blocks /admin + mutating verbs)."""
         return TEMPLATES.TemplateResponse(request, "about.html", {})
+
+    @app.get("/logo-test", response_class=HTMLResponse)
+    def logo_test_page(request: Request) -> HTMLResponse:
+        """Side-by-side gallery of the 10 logo iterations. SVGs are generated
+        by tools/build_logos.py and served from /static/logo-test/. Each card
+        shows the same file on dark + light backgrounds at lockup, 32 px and
+        16 px scales so favicon legibility is visible at a glance."""
+        variants = [
+            (1,  "Birdbrain Classic",     "Symmetric · depth 6 · angle 30° · ratio 0.65"),
+            (2,  "Heart Canopy",          "Squat · depth 6 · angle 35° · ratio 0.60"),
+            (3,  "Tilted Perch",          "Classic geometry rotated 12° clockwise"),
+            (4,  "Asymmetric Branches",   "Left split 35°, right split 25°, depth 6"),
+            (5,  "Dense Network",         "Classic + skip-connections at depths 4–6"),
+            (6,  "Minimal Mark",          "Depth 4, thicker strokes — favicon-optimised"),
+            (7,  "Deep Detail",           "Depth 7, fine strokes — large-display canopy"),
+            (8,  "Head Accent",           "Classic + emerald chevron and amber beak dot"),
+            (9,  "Wing Spread",           "Angle 45°, ratio 0.70 — wings extended"),
+            (10, "Spectrogram Rotation",  "Classic rotated 90° CCW — trunk left, branches right"),
+            (11, "Crested Heart",         "v2 heart canopy + head chevron + beak dot — bird emerging from brain"),
+            (12, "Heart on Neck",         "v2 canopy on an S-curved bird neck — anatomy hint"),
+            (13, "Synaptic Heart",        "v2 + sparse arc skip-connections with synaptic dots — dendritic web"),
+            (14, "Soaring Heart (polished)",  "Centred head + triangular beak + tail-feather chevron · final candidate"),
+            (15, "Wide Crested Heart",    "Angle 40° (compromise between v2 and v9) + head chevron + beak dot"),
+        ]
+        return TEMPLATES.TemplateResponse(
+            request, "logo_test.html",
+            {"variants": [
+                {"n": n, "name": name, "blurb": blurb,
+                 "url": f"/static/logo-test/logo-{n:02d}.svg"}
+                for n, name, blurb in variants
+            ]},
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:

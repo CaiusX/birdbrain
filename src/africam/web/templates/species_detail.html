@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Africam · {{ common_name }}{% endblock %}
+{% block title %}BirdBrain · {{ common_name }}{% endblock %}
 
 {% set sp_tag = (note_tag_by_sci or {}).get(scientific) %}
 {% set sp_palette = (palette_for_tag or {}).get(sp_tag, default_palette or 'fire') %}
