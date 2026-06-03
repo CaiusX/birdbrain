@@ -2140,6 +2140,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "recent": db.recent_downtime(name, limit=5),
         }
 
+        # Notable-day anomalies for the panel between the AI narrative and
+        # hourly activity. 30-day lookback is enough to catch a migration
+        # event without burying recent ones under stale entries.
+        anomalies = db.list_recent_anomalies(name, days=30)
+
         return TEMPLATES.TemplateResponse(
             request,
             "site_detail.html",
@@ -2162,6 +2167,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "peak_hour": peak_hour,
                 "tz_name": tz_name,
                 "source_tz": {n: c.timezone for n, c in sources_by_name.items()},
+                "anomalies": anomalies,
                 **_note_tag_context(),
             },
         )

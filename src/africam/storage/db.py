@@ -5,11 +5,12 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import Integer, create_engine, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from africam.detector.birdnet import Detection
 from africam.storage.models import (
+    AnomalyEventRow,
     Base,
     DailyBriefRow,
     DetectionRow,
@@ -1184,6 +1185,484 @@ class Database:
             "labels_at_site": {k: int(v) for k, v in label_counts.items()},
             "newly_heard_at_site": int(prior or 0) == 0,
         }
+
+    # --- Notable-day anomaly detection (volume spike / nocturnal burst / new
+    # species wave). Detection is cheap SQL — group-bys against
+    # ``detections``. Interpretation lives in the notes worker as one
+    # cached Claude call per fired anomaly. ---
+
+    def detect_anomalies_for(
+        self, source_name: str, date_utc: date, *,
+        tz_utc_offset_hours: int = 2,
+        volume_spike_factor: float = 3.0,
+        volume_spike_floor: int = 30,
+        # Volume-spike requires the baseline ALSO have signal; otherwise
+        # every detection at a brand-new site looks like a spike. 10
+        # detections/day median is the smallest baseline worth comparing to.
+        volume_spike_baseline_floor: float = 10.0,
+        nocturnal_burst_ratio: float = 2.0,
+        nocturnal_burst_floor: int = 30,
+        new_species_floor: int = 3,
+        # New-species-wave needs a substantial prior corpus to be meaningful;
+        # without it, every species at a new site is "new". 15 species heard
+        # in the prior month is a reasonable maturity check.
+        new_species_prior_floor: int = 15,
+        baseline_window_days: int = 7,
+        novelty_window_days: int = 30,
+    ) -> list[dict]:
+        """Run every detector against (source, date) and return a list of
+        triggered anomalies as plain dicts.
+
+        Each detector is a pure SQL aggregation against ``detections``.
+        Returning dicts (not rows) keeps this side-effect-free; the caller
+        decides whether to ``record_anomaly`` them.
+
+        Detectors:
+          * volume_spike  — day's count ≥ ``volume_spike_factor`` × median of
+            the prior ``baseline_window_days`` AND ≥ ``volume_spike_floor``.
+          * nocturnal_burst — night (local 18:00–06:00) detections ≥
+            ``nocturnal_burst_ratio`` × daytime AND ≥ ``nocturnal_burst_floor``.
+            Local-time window approximated from ``tz_utc_offset_hours`` —
+            UTC range that maps to local night.
+          * new_species_wave — ≥ ``new_species_floor`` species appear on
+            this date that haven't been heard at this source in the prior
+            ``novelty_window_days`` days. Catches stop-over migration pulses.
+        """
+        from sqlalchemy import func
+
+        with self._Session() as s:
+            day_start = datetime.combine(date_utc, time(0, 0), tzinfo=UTC)
+            day_end = day_start + timedelta(days=1)
+
+            # All-day count + species set + top-species snapshot.
+            total = s.execute(
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= day_start)
+                .where(DetectionRow.started_at < day_end)
+            ).scalar() or 0
+            if total == 0:
+                return []
+
+            today_species = set(s.scalars(
+                select(DetectionRow.scientific_name)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= day_start)
+                .where(DetectionRow.started_at < day_end)
+                .group_by(DetectionRow.scientific_name)
+            ).all())
+
+            top_species = list(s.execute(
+                select(
+                    DetectionRow.common_name,
+                    DetectionRow.scientific_name,
+                    func.count(DetectionRow.id).label("n"),
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                )
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= day_start)
+                .where(DetectionRow.started_at < day_end)
+                .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
+                .order_by(func.count(DetectionRow.id).desc())
+                .limit(10)
+            ).all())
+
+            anomalies: list[dict] = []
+
+            # ---- volume_spike ----
+            baseline_start = day_start - timedelta(days=baseline_window_days)
+            per_day_counts = [
+                r[0] for r in s.execute(
+                    select(func.count(DetectionRow.id))
+                    .where(DetectionRow.source_name == source_name)
+                    .where(DetectionRow.started_at >= baseline_start)
+                    .where(DetectionRow.started_at < day_start)
+                    .group_by(func.date(DetectionRow.started_at))
+                ).all()
+            ]
+            # Pad with zeros for days that had no detections.
+            per_day_counts += [0] * max(0, baseline_window_days - len(per_day_counts))
+            per_day_counts.sort()
+            mid = len(per_day_counts) // 2
+            baseline = (
+                per_day_counts[mid] if len(per_day_counts) % 2
+                else (per_day_counts[mid - 1] + per_day_counts[mid]) / 2
+            ) if per_day_counts else 0.0
+            if (total >= volume_spike_floor
+                and baseline >= volume_spike_baseline_floor
+                and total >= baseline * volume_spike_factor):
+                anomalies.append({
+                    "kind": "volume_spike",
+                    "detection_count": total,
+                    "baseline_count": float(baseline),
+                    "magnitude": total / max(1.0, baseline),
+                    "evidence": {
+                        "baseline_days": per_day_counts,
+                        "top_species": [
+                            {
+                                "common": r.common_name,
+                                "scientific": r.scientific_name,
+                                "n": int(r.n),
+                                "max_conf": float(r.max_conf or 0),
+                            }
+                            for r in top_species
+                        ],
+                    },
+                })
+
+            # ---- nocturnal_burst ----
+            # Local night = 18:00–06:00 local. Convert to UTC hours using
+            # the site's offset. SQLite holds wall-clock UTC strings, so
+            # we can pick the matching utc hours directly.
+            #
+            # E.g. for UTC+3 (EAT): night = 15:00–03:00 UTC.
+            #      for UTC+2 (SAST/CAT): night = 16:00–04:00 UTC.
+            night_hours_utc = set()
+            for local_h in list(range(18, 24)) + list(range(0, 6)):
+                utc_h = (local_h - tz_utc_offset_hours) % 24
+                night_hours_utc.add(utc_h)
+            # Hourly histogram.
+            hourly = dict(s.execute(
+                select(
+                    func.cast(
+                        func.strftime("%H", DetectionRow.started_at),
+                        Integer,
+                    ),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= day_start)
+                .where(DetectionRow.started_at < day_end)
+                .group_by(func.strftime("%H", DetectionRow.started_at))
+            ).all())
+            night_n = sum(n for h, n in hourly.items() if h in night_hours_utc)
+            day_n = sum(n for h, n in hourly.items() if h not in night_hours_utc)
+            # Require ≥5 daytime detections so we don't false-fire when a
+            # site was only online at night (e.g. brand-new sources added
+            # late in the day get all-nocturnal coverage by accident).
+            if (night_n >= nocturnal_burst_floor
+                and day_n >= 5
+                and night_n >= day_n * nocturnal_burst_ratio):
+                anomalies.append({
+                    "kind": "nocturnal_burst",
+                    "detection_count": night_n,
+                    "baseline_count": float(day_n),
+                    "magnitude": night_n / max(1.0, day_n),
+                    "evidence": {
+                        "night_hours_utc": sorted(night_hours_utc),
+                        "hourly_utc": {int(h): int(n) for h, n in hourly.items()},
+                        "top_species": [
+                            {
+                                "common": r.common_name,
+                                "scientific": r.scientific_name,
+                                "n": int(r.n),
+                                "max_conf": float(r.max_conf or 0),
+                            }
+                            for r in top_species
+                        ],
+                    },
+                })
+
+            # ---- new_species_wave ----
+            novelty_start = day_start - timedelta(days=novelty_window_days)
+            prior_species = set(s.scalars(
+                select(DetectionRow.scientific_name)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= novelty_start)
+                .where(DetectionRow.started_at < day_start)
+                .group_by(DetectionRow.scientific_name)
+            ).all())
+            new_species = today_species - prior_species
+            if (len(new_species) >= new_species_floor
+                and len(prior_species) >= new_species_prior_floor):
+                # Pull commons + counts for the *new* species so the LLM can
+                # interpret without re-querying.
+                new_rows = list(s.execute(
+                    select(
+                        DetectionRow.common_name,
+                        DetectionRow.scientific_name,
+                        func.count(DetectionRow.id).label("n"),
+                        func.max(DetectionRow.confidence).label("max_conf"),
+                    )
+                    .where(DetectionRow.source_name == source_name)
+                    .where(DetectionRow.started_at >= day_start)
+                    .where(DetectionRow.started_at < day_end)
+                    .where(DetectionRow.scientific_name.in_(new_species))
+                    .group_by(
+                        DetectionRow.scientific_name, DetectionRow.common_name,
+                    )
+                    .order_by(func.count(DetectionRow.id).desc())
+                ).all())
+                anomalies.append({
+                    "kind": "new_species_wave",
+                    "detection_count": sum(int(r.n) for r in new_rows),
+                    "baseline_count": float(novelty_window_days),  # context
+                    "magnitude": float(len(new_species)),
+                    "evidence": {
+                        "novelty_window_days": novelty_window_days,
+                        "new_species": [
+                            {
+                                "common": r.common_name,
+                                "scientific": r.scientific_name,
+                                "n": int(r.n),
+                                "max_conf": float(r.max_conf or 0),
+                            }
+                            for r in new_rows
+                        ],
+                    },
+                })
+
+        return anomalies
+
+    def record_anomaly(
+        self, source_name: str, date_utc: date, anomaly: dict,
+    ) -> bool:
+        """Insert (or skip if already present). Returns True iff a new row
+        was created.
+
+        If ``anomaly['interpretation']`` is provided (the deterministic
+        kinds — first_live_day, down_day — fill it in), the row is written
+        ready-to-display and the notes worker won't burn an LLM call on it.
+        Otherwise the row goes in with interpretation=NULL and the worker
+        picks it up on the next anomaly_tick."""
+        import json as _json
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            existing = s.get(
+                AnomalyEventRow,
+                (source_name, date_utc, anomaly["kind"]),
+            )
+            if existing is not None:
+                return False
+            interp = anomaly.get("interpretation")
+            row = AnomalyEventRow(
+                source_name=source_name,
+                date_utc=date_utc,
+                kind=anomaly["kind"],
+                detection_count=int(anomaly.get("detection_count") or 0),
+                baseline_count=anomaly.get("baseline_count"),
+                magnitude=float(anomaly["magnitude"]),
+                evidence_json=_json.dumps(anomaly["evidence"]),
+                interpretation=interp,
+                generated_by="deterministic" if interp else None,
+                generated_at=now if interp else None,
+                created_at=now,
+            )
+            s.add(row)
+        return True
+
+    # ---- Operational/factual anomaly detectors (deterministic, no LLM) ----
+
+    def detect_first_live(self, source_name: str) -> dict | None:
+        """The first calendar day this source produced detections. Returns
+        an anomaly dict with date pre-attached and a deterministic
+        interpretation already filled in — emit once per source, ever."""
+        with self._Session() as s:
+            first_at = s.execute(
+                select(func.min(DetectionRow.started_at))
+                .where(DetectionRow.source_name == source_name)
+            ).scalar()
+            if first_at is None:
+                return None
+            if first_at.tzinfo is None:
+                first_at = first_at.replace(tzinfo=UTC)
+            first_date = first_at.date()
+            day_start = datetime.combine(first_date, time(0, 0), tzinfo=UTC)
+            day_end = day_start + timedelta(days=1)
+            n = s.execute(
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= day_start)
+                .where(DetectionRow.started_at < day_end)
+            ).scalar() or 0
+            # Total distinct species on day one.
+            n_species = s.execute(
+                select(func.count(func.distinct(DetectionRow.scientific_name)))
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= day_start)
+                .where(DetectionRow.started_at < day_end)
+            ).scalar() or 0
+            # Top 5 by count — for the evidence dossier + naming the
+            # "first calls included …" phrase.
+            top_species = list(s.execute(
+                select(
+                    DetectionRow.common_name,
+                    DetectionRow.scientific_name,
+                    func.count().label("n"),
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                )
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= day_start)
+                .where(DetectionRow.started_at < day_end)
+                .group_by(
+                    DetectionRow.scientific_name, DetectionRow.common_name,
+                )
+                .order_by(func.count().desc())
+                .limit(5)
+            ).all())
+
+        top_names = [r.common_name for r in top_species[:3]]
+        if len(top_names) >= 3:
+            top_phrase = (
+                f"{top_names[0]}, {top_names[1]}, and {top_names[2]}"
+            )
+        elif top_names:
+            top_phrase = ", ".join(top_names)
+        else:
+            top_phrase = "(no species above the confidence floor on this day)"
+        interp = (
+            f"{source_name} came online on this day. "
+            f"{n} detection{'s' if n != 1 else ''} were captured across "
+            f"{n_species} species — first calls included {top_phrase}."
+        )
+        return {
+            "kind": "first_live_day",
+            "date": first_date,
+            "detection_count": int(n),
+            "baseline_count": None,
+            "magnitude": float(n_species),
+            "evidence": {
+                "first_detection_utc": first_at.isoformat(),
+                "top_species": [
+                    {
+                        "common": r.common_name,
+                        "scientific": r.scientific_name,
+                        "n": int(r.n),
+                        "max_conf": float(r.max_conf or 0),
+                    }
+                    for r in top_species
+                ],
+            },
+            "interpretation": interp,
+        }
+
+    def detect_down_day(
+        self, source_name: str, date_utc: date,
+        *, downtime_floor_s: int = 3600,
+    ) -> dict | None:
+        """Sum ``worker_downtime`` intervals that overlap ``date_utc`` for
+        this source. Emit if total ≥ ``downtime_floor_s`` (default 1 h —
+        the routine 10-20 s stream-EOF reconnects don't qualify).
+
+        Returns an anomaly dict with deterministic interpretation already
+        written (no LLM needed for an operational fact)."""
+        day_start = datetime.combine(date_utc, time(0, 0), tzinfo=UTC)
+        day_end = day_start + timedelta(days=1)
+        with self._Session() as s:
+            intervals = list(s.execute(
+                select(
+                    WorkerDowntimeRow.started_at,
+                    WorkerDowntimeRow.ended_at,
+                    WorkerDowntimeRow.reason,
+                )
+                .where(WorkerDowntimeRow.source_name == source_name)
+                .where(or_(
+                    WorkerDowntimeRow.ended_at.is_(None),
+                    WorkerDowntimeRow.ended_at >= day_start,
+                ))
+                .where(WorkerDowntimeRow.started_at < day_end)
+            ).all())
+
+        total_s = 0.0
+        longest_s = 0.0
+        longest_reason: str | None = None
+        outages: list[dict] = []
+        now = datetime.now(UTC)
+        for start_at, end_at, reason in intervals:
+            if start_at.tzinfo is None:
+                start_at = start_at.replace(tzinfo=UTC)
+            s_eff = max(start_at, day_start)
+            if end_at is None:
+                e_eff = min(now, day_end)
+            else:
+                if end_at.tzinfo is None:
+                    end_at = end_at.replace(tzinfo=UTC)
+                e_eff = min(end_at, day_end)
+            if e_eff > s_eff:
+                dur = (e_eff - s_eff).total_seconds()
+                total_s += dur
+                if dur > longest_s:
+                    longest_s = dur
+                    longest_reason = reason
+                outages.append({
+                    "started_at": start_at.isoformat(),
+                    "duration_s": int(dur),
+                    "reason": reason or "",
+                })
+
+        if total_s < downtime_floor_s:
+            return None
+
+        def _fmt(s: float) -> str:
+            if s < 60:
+                return f"{int(s)} s"
+            if s < 3600:
+                return f"{int(s / 60)} min"
+            return f"{s / 3600:.1f} h"
+
+        n_out = len(outages)
+        interp_parts = [
+            f"{source_name} was offline for {_fmt(total_s)} on this day "
+            f"across {n_out} outage{'s' if n_out != 1 else ''}."
+        ]
+        if longest_s > 0:
+            tail = f" ({longest_reason})" if longest_reason else ""
+            interp_parts.append(
+                f"Longest interruption: {_fmt(longest_s)}{tail}."
+            )
+        interp = " ".join(interp_parts)
+
+        return {
+            "kind": "down_day",
+            "detection_count": 0,
+            "baseline_count": None,
+            "magnitude": total_s / 3600.0,  # hours
+            "evidence": {
+                "total_seconds": int(total_s),
+                "n_outages": n_out,
+                "longest_seconds": int(longest_s),
+                "longest_reason": longest_reason,
+                "outages": outages,
+            },
+            "interpretation": interp,
+        }
+
+    def list_uninterpreted_anomalies(self, limit: int = 20) -> list[AnomalyEventRow]:
+        """Detected-but-not-yet-explained anomalies. Notes worker picks
+        these up oldest-first."""
+        with self._Session() as s:
+            return list(s.scalars(
+                select(AnomalyEventRow)
+                .where(AnomalyEventRow.interpretation.is_(None))
+                .order_by(AnomalyEventRow.created_at)
+                .limit(limit)
+            ))
+
+    def set_anomaly_interpretation(
+        self, source_name: str, date_utc: date, kind: str,
+        *, interpretation: str, generated_by: str,
+    ) -> None:
+        with self._Session() as s, s.begin():
+            row = s.get(AnomalyEventRow, (source_name, date_utc, kind))
+            if row is None:
+                return
+            row.interpretation = interpretation
+            row.generated_by = generated_by
+            row.generated_at = datetime.now(UTC)
+
+    def list_recent_anomalies(
+        self, source_name: str, days: int = 30,
+    ) -> list[AnomalyEventRow]:
+        """For the /site/<name> Notable Days panel."""
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).date()
+        with self._Session() as s:
+            return list(s.scalars(
+                select(AnomalyEventRow)
+                .where(AnomalyEventRow.source_name == source_name)
+                .where(AnomalyEventRow.date_utc >= cutoff)
+                .order_by(AnomalyEventRow.date_utc.desc(),
+                          AnomalyEventRow.kind)
+            ))
 
     # --- Daily soundscape brief (one row per UTC date, generated once) ---
 

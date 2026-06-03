@@ -227,6 +227,46 @@ class DailyBriefRow(Base):
     evidence_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
+class AnomalyEventRow(Base):
+    """A notable day at a source — surfaced by the SQL anomaly detectors and
+    optionally interpreted by Claude.
+
+    Composite PK is (source_name, date_utc, kind) so the same calendar day
+    can carry multiple flavours of anomaly: e.g. a migration wave shows up
+    as ``volume_spike``, ``nocturnal_burst`` AND ``new_species_wave`` at
+    once — each gets its own row and its own LLM-written interpretation if
+    interesting enough to spend a token budget on.
+
+    Detection is cheap (SQL group-bys against ``detections``); interpretation
+    is the Claude call. ``interpretation`` starts NULL when a detector fires
+    and gets filled in by the notes-worker anomaly tick on the next pass."""
+
+    __tablename__ = "anomaly_events"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    date_utc: Mapped[date] = mapped_column(Date, primary_key=True)
+    # 'volume_spike' | 'nocturnal_burst' | 'new_species_wave' (extensible).
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # Raw counts that triggered the rule.
+    detection_count: Mapped[int] = mapped_column(Integer)
+    baseline_count: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # n/baseline (volume_spike), night/day (nocturnal_burst), or new-species
+    # count (new_species_wave) — interpretation depends on ``kind``.
+    magnitude: Mapped[float] = mapped_column(Float)
+    # Compact JSON snapshot of the triggering data so we can re-interpret
+    # without re-querying the detections table. Schema is per-kind.
+    evidence_json: Mapped[str] = mapped_column(Text)
+    # Claude's interpretation, written lazily. NULL = not yet interpreted.
+    interpretation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_anomaly_source_date", "source_name", "date_utc"),
+    )
+
+
 class SourceStateRow(Base):
     """Mutable per-source runtime state. The pipeline reads it on every chunk
     and the web app writes manual overrides to it. Used to coordinate the

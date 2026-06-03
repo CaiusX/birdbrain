@@ -24,6 +24,7 @@ import os
 import threading
 import time
 from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from africam.config import AppConfig, SourceConfig
 from africam.logging import get_logger
@@ -287,6 +288,48 @@ Rules:
   • No throat-clearing, no sign-offs, no full-sentence padding in bullets."""
 
 
+_ANOMALY_PROMPT_TEMPLATE = """\
+You are the resident analyst for an African live-stream bird monitor network.
+{sites_context}
+
+A simple SQL detector has flagged ONE specific (site, date) as anomalous
+because it crosses a numerical threshold. You're given the evidence dossier
+and have to decide WHY this day was unusual in 2-3 sentences of plain prose
+that an operator can act on.
+
+Anomaly kinds you'll see:
+  • volume_spike — count of detections this day is ≥3× the prior-week median.
+  • nocturnal_burst — night-time (local 18:00–06:00) detections ≥2× daytime,
+    with night count ≥30. Often a nocturnal flight-call signature of migrating
+    passerines and waders. Listen for Bank Swallow, Common Swift, Sedge Warbler,
+    Olivaceous Warbler, Common Snipe, Lesser Kestrel as palearctic migrants;
+    Common Cuckoo, European Bee-eater, White Stork as intra-African migrants.
+    Date matters: late April–May = northbound; September–November = southbound.
+  • new_species_wave — N species heard on this day that weren't recorded at
+    this site in the prior 30 days. Often migration; sometimes a single
+    weather front pushing a guild of arrivals.
+
+Your job:
+  1. State plainly what most likely happened (1 sentence). If the evidence
+     strongly suggests a specific named cause (e.g. "northbound spring
+     palearctic passage"), say so.
+  2. Cite the 1–3 most diagnostic species or hourly cues from the dossier.
+  3. If the evidence is ambiguous or could equally be a microphone artefact
+     / camera-angle change / detector noise, say so honestly. Don't invent
+     specificity that isn't in the data.
+
+Style:
+  • Plain prose. No bullets. 60–120 words total.
+  • Start with the inference, not "Based on the evidence...".
+  • Use SCIENTIFIC names sparingly — common names are friendlier.
+  • Refer to the site by its short name (Tortilis Camp, Tembe, etc.).
+  • If site is known to be a migration crossroads (Tortilis = Amboseli /
+    East African corridor; Tembe = KZN coastal; Mara River = Rift), lean on
+    that geography.
+
+Output the explanation as plain text, nothing else."""
+
+
 # ---------- prompt builders ----------
 # Each builder formats its template with the current sites context, so adding
 # or removing a source via /admin shows up in the very next tick — no restart
@@ -309,6 +352,10 @@ def species_site_system_prompt(sites_context: str) -> str:
 
 def daily_brief_system_prompt(sites_context: str) -> str:
     return _DAILY_BRIEF_PROMPT_TEMPLATE.format(sites_context=sites_context)
+
+
+def anomaly_system_prompt(sites_context: str) -> str:
+    return _ANOMALY_PROMPT_TEMPLATE.format(sites_context=sites_context)
 
 
 # ---------- evidence signatures (re-trigger when these change) ----------
@@ -695,6 +742,175 @@ def _daily_brief_tick(
     return None
 
 
+# ---------- anomaly detection & interpretation -----------
+
+
+def _site_utc_offset(name: str, sources: Iterable[SourceConfig],
+                     db: Database) -> int:
+    """Hours east of UTC for a site's local clock. Reads source.timezone
+    (Africa/Nairobi, Africa/Johannesburg, etc.) and computes the current
+    offset via zoneinfo. DST in southern/East Africa is effectively zero,
+    so the "current" offset is the correct one all year."""
+    from zoneinfo import ZoneInfo
+    tz_name = None
+    for s in sources:
+        if s.name == name:
+            tz_name = s.timezone
+            break
+    if tz_name is None:
+        for r in db.list_runtime_sources():
+            if r.name == name and r.deleted_at is None:
+                tz_name = r.timezone
+                break
+    try:
+        return int(datetime.now(ZoneInfo(tz_name or "UTC"))
+                   .utcoffset().total_seconds() // 3600)
+    except Exception:
+        return 0
+
+
+def scan_anomalies_for_window(
+    db: Database, sources: Iterable[SourceConfig],
+    *, lookback_days: int = 14,
+) -> int:
+    """Sweep every (source, date) in the lookback window and record any
+    anomalies the detectors fire.
+
+    Three classes of detector run here:
+
+    1. **first_live_day** (once per source, ever) — the source's first day
+       of detections. Deterministic interpretation, no LLM cost. The
+       lookback window is irrelevant here; we just check the row's
+       existence and create it if missing.
+    2. **down_day** (per (source, date) in lookback) — days with ≥1 h of
+       cumulative downtime. Also deterministic.
+    3. **volume_spike / nocturnal_burst / new_species_wave** — biological
+       anomalies that get a Claude interpretation on the next anomaly_tick.
+
+    Returns the count of new rows inserted."""
+    from datetime import timedelta as _td
+    src_list = list(sources)
+    candidate_sources = _live_source_names(src_list, db)
+    today = datetime.now(UTC).date()
+    new_rows = 0
+    for src_name in candidate_sources:
+        # first_live_day — one row per source, ever. Cheap to attempt every
+        # tick: record_anomaly bails fast on the existing-row case.
+        first = db.detect_first_live(src_name)
+        if first is not None:
+            if db.record_anomaly(src_name, first["date"], first):
+                new_rows += 1
+
+        offset = _site_utc_offset(src_name, src_list, db)
+        for delta in range(1, lookback_days + 1):  # skip today (incomplete)
+            d = today - _td(days=delta)
+
+            # Biological detectors (volume_spike / nocturnal_burst /
+            # new_species_wave) — left for Claude to interpret.
+            for a in db.detect_anomalies_for(
+                src_name, d, tz_utc_offset_hours=offset,
+            ):
+                if db.record_anomaly(src_name, d, a):
+                    new_rows += 1
+
+            # down_day — deterministic interpretation, written at record
+            # time so the worker doesn't burn a Haiku call on it.
+            down = db.detect_down_day(src_name, d)
+            if down is not None:
+                if db.record_anomaly(src_name, d, down):
+                    new_rows += 1
+    return new_rows
+
+
+def _format_anomaly_evidence(row) -> str:
+    """Build the dossier text the LLM sees. Compact JSON-ish key/value
+    layout so it reads naturally in the prompt window."""
+    import json as _json
+    ev = _json.loads(row.evidence_json or "{}")
+    parts = [
+        f"site: {row.source_name}",
+        f"date_utc: {row.date_utc.isoformat()}",
+        f"anomaly_kind: {row.kind}",
+        f"detection_count: {row.detection_count}",
+        f"baseline_count: {row.baseline_count}",
+        f"magnitude: {row.magnitude:.2f}",
+    ]
+    if row.kind == "volume_spike":
+        parts.append("top_species_on_day: " + ", ".join(
+            f"{x['common']} ({x['n']}, max_conf {x['max_conf']:.2f})"
+            for x in ev.get("top_species", [])[:10]
+        ))
+        parts.append("baseline_day_counts: " + ", ".join(
+            str(n) for n in ev.get("baseline_days", [])
+        ))
+    elif row.kind == "nocturnal_burst":
+        h = ev.get("hourly_utc", {})
+        night = ev.get("night_hours_utc", [])
+        parts.append("hourly_utc: " + " ".join(
+            f"{int(k):02d}={h[k]}"
+            for k in sorted(h, key=lambda x: int(x))
+        ))
+        parts.append(f"night_hours_utc: {night}")
+        parts.append("top_species_on_day: " + ", ".join(
+            f"{x['common']} ({x['n']})"
+            for x in ev.get("top_species", [])[:10]
+        ))
+    elif row.kind == "new_species_wave":
+        parts.append(f"novelty_window_days: {ev.get('novelty_window_days')}")
+        parts.append("species_NEW_today: " + ", ".join(
+            f"{x['common']} ({x['n']}, max_conf {x['max_conf']:.2f})"
+            for x in ev.get("new_species", [])
+        ))
+    return "\n".join(parts)
+
+
+def _anomaly_tick(
+    db: Database, cfg: AppConfig,
+    sources: Iterable[SourceConfig], client,
+) -> str | None:
+    """Generate ONE interpretation for the oldest uninterpreted anomaly.
+    Returns the row key string on success.
+
+    First call per worker startup also scans for new anomalies (cheap pure
+    SQL) so the queue is fresh."""
+    pending = db.list_uninterpreted_anomalies(limit=1)
+    if not pending:
+        return None
+    row = pending[0]
+    src_list = list(sources)
+    sites_context = _build_sites_context(_live_source_names(src_list, db))
+    text = _call_claude(
+        system_prompt=anomaly_system_prompt(sites_context),
+        user_text=(
+            "Explain why this day was anomalous at this site.\n\n"
+            + _format_anomaly_evidence(row)
+        ),
+        model=cfg.notes_model,
+        client=client,
+        max_tokens=400,
+    )
+    if not text:
+        log.warning(
+            "notes.empty_response", kind="anomaly",
+            source=row.source_name, date=row.date_utc.isoformat(),
+            anomaly_kind=row.kind,
+        )
+        return None
+    db.set_anomaly_interpretation(
+        row.source_name, row.date_utc, row.kind,
+        interpretation=text,
+        generated_by=cfg.notes_model,
+    )
+    log.info(
+        "anomaly.interpreted",
+        source=row.source_name,
+        date=row.date_utc.isoformat(),
+        kind=row.kind,
+        chars=len(text),
+    )
+    return f"{row.source_name}|{row.date_utc.isoformat()}|{row.kind}"
+
+
 # ---------- worker loop: priority router ----------
 
 
@@ -717,14 +933,39 @@ def _worker_loop(
     # Jitter so the worker doesn't fire the instant the pipeline boots.
     time.sleep(min(60, cfg.notes_tick_seconds))
 
+    # First-pass cheap SQL scan for fresh anomalies — runs once per worker
+    # startup. Subsequent scans piggy-back on the periodic anomaly_tick
+    # below, since the tick itself just pops the oldest uninterpreted row.
+    try:
+        n = scan_anomalies_for_window(db, sources, lookback_days=14)
+        if n:
+            log.info("anomaly.scanned", new_rows=n, window_days=14)
+    except Exception as e:
+        log.warning("anomaly.scan_failed", error=str(e)[:300])
+
+    last_anomaly_scan = time.monotonic()
+
     while True:
         try:
+            # Re-scan for new anomalies once an hour. Pure SQL — cheap.
+            now = time.monotonic()
+            if now - last_anomaly_scan > 3600:
+                try:
+                    n = scan_anomalies_for_window(db, sources, lookback_days=14)
+                    if n:
+                        log.info("anomaly.scanned", new_rows=n)
+                except Exception as e:
+                    log.warning("anomaly.scan_failed", error=str(e)[:300])
+                last_anomaly_scan = now
+
             # Priority order: brief (time-sensitive) → site (rare but
-            # high-value) → species (always something to do). First to
-            # return truthy wins this tick.
+            # high-value) → anomaly interpretation → species (always
+            # something to do). First to return truthy wins this tick.
             did = _daily_brief_tick(db, cfg, sources, client)
             if not did:
                 did = _site_tick(db, cfg, sources, client)
+            if not did:
+                did = _anomaly_tick(db, cfg, sources, client)
             if not did:
                 # Drain both per-species and per-(species,site) backlogs in
                 # parallel: each tick generates ONE of each. They're
