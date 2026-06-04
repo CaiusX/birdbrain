@@ -176,7 +176,10 @@
 {# ---- Hour-drill modal: opens when the clock in a map popup is clicked.
        Big dial on the left, hour-detail side rail on the right. The rail
        swaps via HTMX whenever a wedge is clicked (in either dial). ---- #}
-<div id="hour-drill-modal" class="hidden fixed inset-0 z-50">
+{# z-[1000] lifts the modal above every Leaflet pane (markers 600, tooltips
+   650, popups 700, controls 800) so the world map sits cleanly behind the
+   backdrop instead of poking through it. #}
+<div id="hour-drill-modal" class="hidden fixed inset-0 z-[1000]">
   <div data-hour-drill-backdrop class="absolute inset-0 bg-black/70"></div>
   <div class="absolute inset-0 flex items-center justify-center p-4">
     <div class="relative bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl
@@ -497,6 +500,12 @@
 
   function openDrill(site, hour) {
     if (!site || !site.dial_svg_full) return;
+    // Close the Leaflet popup that triggered this — otherwise it sits
+    // behind the modal backdrop, visible through the dim, and competes
+    // with the drill for attention. The modal replaces the popup.
+    if (typeof map !== 'undefined' && map && map.closePopup) {
+      map.closePopup();
+    }
     drillTitle.textContent = `${site.name} · today's 24-hour soundscape`;
     drillDial.innerHTML = site.dial_svg_full;
     drillModal.classList.remove('hidden');
