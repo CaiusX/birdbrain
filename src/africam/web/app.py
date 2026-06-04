@@ -3506,11 +3506,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # Top clip = highest-confidence row in the bucket with a clip_path.
         top_clip = next((r for r in rows if r.clip_path), None)
 
-        weather = None
-        if cfg and cfg.lat is not None and cfg.lon is not None:
-            data = _open_meteo_hourly(cfg.lat, cfg.lon, 1, tz_name)
-            if data:
-                weather = _weather_at_hour(data, hour) or None
+        # No per-hour weather lookup: every click would block on an
+        # Open-Meteo HTTP call (5–10 s from this Pi as of June 2026), and
+        # the dial already carries the macroscopic day/night/dawn/dusk
+        # shading for the date — the granular per-hour temp rarely changes
+        # the read. The species-heatmap popup at /partials/diurnal-popup
+        # still surfaces weather where it's been load-bearing.
 
         return TEMPLATES.TemplateResponse(
             request,
@@ -3527,7 +3528,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "species_max_n": species_max_n,
                 "site_color": SOURCE_COLORS.get(source, "#10b981"),
                 "top_clip": top_clip,
-                "weather": weather,
             },
         )
 
