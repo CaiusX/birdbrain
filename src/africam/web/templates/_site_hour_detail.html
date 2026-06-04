@@ -1,7 +1,7 @@
 {# Right-rail of the dashboard's hour-drill modal. Loaded as a partial
    from /partials/site-hour-detail?source=<name>&hour=<H>. Self-contained:
    no <html>/<body>, just the panel content. #}
-{% from "_macros.html" import species_link, weather_icon %}
+{% from "_macros.html" import weather_icon %}
 
 <div class="px-5 py-4">
   <div class="flex items-baseline justify-between gap-3 flex-wrap">
@@ -36,19 +36,46 @@
     </div>
   </div>
 
-  {% if top_species %}
+  {% if species_tiles %}
+    {# Squarified treemap of species heard at this hour. Tile area ∝
+       detection count; fill opacity ∝ peak confidence (0.40–0.95) so
+       confidently-IDed species read more vividly than borderline ones.
+       Each tile links through to the species page pre-scoped to this
+       source. Same visual vocabulary as the /species treemap. #}
     <div class="mt-4">
-      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">Top species this hour</div>
-      <ul class="divide-y divide-zinc-800/60">
-        {% for sp in top_species %}
-          <li class="flex items-baseline justify-between gap-2 py-1.5">
-            {{ species_link(sp.common, sp.sci, source=source, cls="text-sm text-zinc-200 hover:text-emerald-300 truncate") }}
-            <span class="text-xs text-zinc-500 tabular-nums shrink-0">
-              ×{{ sp.n }} · conf {{ "%.2f"|format(sp.conf) }}
-            </span>
-          </li>
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5 flex items-baseline justify-between">
+        <span>Species this hour</span>
+        <span class="text-zinc-600 normal-case font-normal">area = count</span>
+      </div>
+      <svg viewBox="0 0 {{ treemap_w }} {{ treemap_h }}"
+           preserveAspectRatio="xMidYMid meet"
+           class="block w-full" style="height: auto;">
+        {% for t in species_tiles %}
+          {% set opacity = 0.40 + 0.55 * (t.conf if t.conf < 1 else 1) %}
+          {% set big = (t.w > 60 and t.h > 22) %}
+          <a href="/species/{{ t.sci | urlencode }}?source={{ source | urlencode }}">
+            <title>{{ t.common }} · ×{{ t.n }} · conf {{ "%.2f"|format(t.conf) }}</title>
+            <rect x="{{ t.x + 0.5 }}" y="{{ t.y + 0.5 }}"
+                  width="{{ t.w - 1 }}" height="{{ t.h - 1 }}"
+                  fill="{{ site_color }}" fill-opacity="{{ '%.2f'|format(opacity) }}"
+                  stroke="#0a0a0a" stroke-width="0.5" stroke-opacity="0.4"/>
+            {% if big %}
+              <text x="{{ t.x + 6 }}" y="{{ t.y + 14 }}"
+                    fill="#fafafa" font-size="11" font-family="ui-sans-serif, system-ui"
+                    font-weight="500" pointer-events="none">{{ t.common }}</text>
+              <text x="{{ t.x + 6 }}" y="{{ t.y + 26 }}"
+                    fill="#fafafa" fill-opacity="0.7"
+                    font-size="10" font-family="ui-sans-serif, system-ui"
+                    pointer-events="none">×{{ t.n }}</text>
+            {% elif t.w > 28 and t.h > 12 %}
+              <text x="{{ t.x + t.w/2 }}" y="{{ t.y + t.h/2 + 3 }}"
+                    text-anchor="middle" fill="#fafafa" font-size="9"
+                    font-family="ui-sans-serif, system-ui"
+                    pointer-events="none">×{{ t.n }}</text>
+            {% endif %}
+          </a>
         {% endfor %}
-      </ul>
+      </svg>
     </div>
   {% else %}
     <div class="mt-4 text-sm text-zinc-500 italic">

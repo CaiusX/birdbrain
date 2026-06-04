@@ -3491,8 +3491,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             slot_label = "yesterday"
         else:
             slot_label = slot_date.strftime("%a %d %b")
-        # Top species at this hour, ranked by detection count then by
-        # peak confidence within the bucket.
+        # Aggregate species heard at this hour. ``conf`` is the max-
+        # confidence detection of that species inside the bucket — used
+        # by the treemap to vary fill opacity, so confidently-IDed species
+        # read more vividly than borderline ones.
         by_species: dict[str, dict] = {}
         for r in rows:
             cur = by_species.setdefault(
@@ -3501,9 +3503,28 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
             cur["n"] += 1
             cur["conf"] = max(cur["conf"], float(r.confidence or 0))
-        top_species = sorted(
-            by_species.values(), key=lambda x: (-x["n"], -x["conf"])
-        )[:6]
+
+        # Squarified treemap layout sized for the modal's right rail.
+        # Viewport ratio is wider-than-tall so labels have horizontal room.
+        species_tiles: list[dict] = []
+        treemap_w, treemap_h = 280, 180
+        if by_species:
+            ranked = sorted(
+                by_species.values(), key=lambda x: (-x["n"], -x["conf"])
+            )
+            sizes_norm = squarify.normalize_sizes(
+                [s["n"] for s in ranked], treemap_w, treemap_h
+            )
+            layout = squarify.squarify(sizes_norm, 0, 0, treemap_w, treemap_h)
+            for sp, rect in zip(ranked, layout, strict=False):
+                species_tiles.append({
+                    "sci": sp["sci"],
+                    "common": sp["common"],
+                    "n": sp["n"],
+                    "conf": sp["conf"],
+                    "x": rect["x"], "y": rect["y"],
+                    "w": rect["dx"], "h": rect["dy"],
+                })
 
         # Top clip = highest-confidence row in the bucket with a clip_path.
         top_clip = next((r for r in rows if r.clip_path), None)
@@ -3525,7 +3546,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "slot_label": slot_label,
                 "n_detections": len(rows),
                 "n_species": len(by_species),
-                "top_species": top_species,
+                "species_tiles": species_tiles,
+                "treemap_w": treemap_w,
+                "treemap_h": treemap_h,
+                "site_color": SOURCE_COLORS.get(source, "#10b981"),
                 "top_clip": top_clip,
                 "weather": weather,
             },
