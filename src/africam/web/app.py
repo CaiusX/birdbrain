@@ -501,10 +501,21 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 # Falls back to the templates' default emerald.
                 "color": SOURCE_COLORS.get(name, "#10b981"),
                 "species_24h": len(sp),
+                # IANA tz so the modal's hour-drill JS can compute "now"
+                # in the site's clock without re-querying the server.
+                "tz": str(tz),
                 # 24h activity clock for this site — used in the click popup
-                # only (the map marker itself is a simple coloured dot).
+                # (the map marker itself is a simple coloured dot). Interactive
+                # so clicking centre or any wedge opens the hour-drill modal.
                 "dial_svg": _radial_dial_svg(
-                    hours_arr, highlight=local_now.hour, bands=bands, compact=True
+                    hours_arr, highlight=local_now.hour, bands=bands,
+                    compact=True, interactive=True,
+                ),
+                # Full-size interactive variant for the hour-drill modal.
+                # Same data, different rendering knobs.
+                "dial_svg_full": _radial_dial_svg(
+                    hours_arr, highlight=local_now.hour, bands=bands,
+                    compact=False, interactive=True,
                 ),
                 "recent": [
                     {
@@ -3425,6 +3436,91 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
         return JSONResponse({"ok": True, "id": detection_id, "label": new_label})
 
+    @app.get("/partials/site-hour-detail", response_class=HTMLResponse)
+    def site_hour_detail_partial(
+        request: Request,
+        source: str = Query(..., min_length=1),
+        hour: int = Query(..., ge=0, le=23),
+    ) -> HTMLResponse:
+        """Hour drill-down for the dashboard's interactive 24-h clock.
+        Returns the right-rail panel for the chosen (source, hour) — what
+        was heard at that hour today in the site's local timezone, weather
+        at that hour, and a play button for the loudest clip from the
+        hour. Mirrors ``/partials/diurnal-popup`` but site-scoped instead
+        of species-scoped."""
+        _, sources_by_name, _ = _all_sources()
+        cfg = sources_by_name.get(source)
+        tz_name = cfg.timezone if cfg else "UTC"
+        tz = _zone_info(tz_name)
+        now_local = datetime.now(tz)
+        # "Today" = the site's local calendar day. Use a 36 h lookback so
+        # late-night hours of the previous local day are still in scope
+        # even when the user clicks in the early morning.
+        since = (now_local - timedelta(hours=36)).astimezone(UTC)
+
+        with db.session() as s:
+            cand = list(s.scalars(
+                select(DetectionRow)
+                .where(DetectionRow.source_name == source)
+                .where(DetectionRow.started_at >= since)
+                .order_by(desc(DetectionRow.confidence))
+            ))
+
+        def _local_hour_of(ts: datetime) -> int:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            return ts.astimezone(tz).hour
+
+        def _local_date_of(ts: datetime) -> date:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            return ts.astimezone(tz).date()
+
+        today_local = now_local.date()
+        rows = [
+            r for r in cand
+            if _local_hour_of(r.started_at) == hour
+            and _local_date_of(r.started_at) == today_local
+        ]
+        # Top species at this hour, ranked by detection count then by
+        # peak confidence within the bucket.
+        by_species: dict[str, dict] = {}
+        for r in rows:
+            cur = by_species.setdefault(
+                r.scientific_name,
+                {"sci": r.scientific_name, "common": r.common_name, "n": 0, "conf": 0.0},
+            )
+            cur["n"] += 1
+            cur["conf"] = max(cur["conf"], float(r.confidence or 0))
+        top_species = sorted(
+            by_species.values(), key=lambda x: (-x["n"], -x["conf"])
+        )[:6]
+
+        # Top clip = highest-confidence row in the bucket with a clip_path.
+        top_clip = next((r for r in rows if r.clip_path), None)
+
+        weather = None
+        if cfg and cfg.lat is not None and cfg.lon is not None:
+            data = _open_meteo_hourly(cfg.lat, cfg.lon, 1, tz_name)
+            if data:
+                weather = _weather_at_hour(data, hour) or None
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "_site_hour_detail.html",
+            {
+                "source": source,
+                "hour": hour,
+                "tz_name": tz_name,
+                "today_local": today_local,
+                "n_detections": len(rows),
+                "n_species": len(by_species),
+                "top_species": top_species,
+                "top_clip": top_clip,
+                "weather": weather,
+            },
+        )
+
     @app.get("/api/detections/{detection_id}/reanalyze")
     def reanalyze(detection_id: int) -> JSONResponse:
         """Re-run BirdNET on a saved clip and return the top candidates.
@@ -3714,6 +3810,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         highlight: int | None = None,
         bands: list[dict] | None = None,
         compact: bool = False,
+        interactive: bool = False,
     ) -> str:
         """Render a 24-hour radial bar dial as inline SVG.
 
@@ -3726,7 +3823,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         ``compact`` drops the night-sky constellation and the hour labels and
         tightens the viewBox — for small map markers where that detail just
-        reads as noise."""
+        reads as noise.
+
+        ``interactive`` adds click-handle hooks for the dashboard hour
+        drill-down modal: every hour wedge (including silent ones) gets
+        ``data-hour`` + ``class="dial-wedge"`` so the JS event delegate can
+        route clicks, and the centre hub is replaced with a clickable
+        ``data-dial-centre`` circle. Off by default so the existing species
+        diurnal popup renders byte-identically."""
         W, H = 220, 220
         cx, cy = W / 2.0, H / 2.0
         r_in, r_out = 26.0, 90.0
@@ -3802,13 +3906,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         )
                     )
 
+        # Inner hub: gains ``data-dial-centre`` + a pointer cursor when the
+        # dial is interactive so the dashboard's hour-drill-down JS can
+        # capture a centre click without needing a separate overlay shape.
+        centre_attr = (
+            ' data-dial-centre="1" style="cursor:pointer"' if interactive else ""
+        )
         parts.extend([
             # Faint outer reference ring at max radius.
             f'<circle cx="{cx}" cy="{cy}" r="{r_out}" '
             f'fill="none" stroke="#27272a" stroke-width="1"/>',
             # Inner hub.
             f'<circle cx="{cx}" cy="{cy}" r="{r_in}" '
-            f'fill="#0a0a0a" stroke="#27272a" stroke-width="1"/>',
+            f'fill="#0a0a0a" stroke="#27272a" stroke-width="1"'
+            f'{centre_attr}/>',
         ])
 
         for h in range(24):
@@ -3822,7 +3933,28 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             x2i, y2i = cx + cos2 * r_in, cy + sin2 * r_in
             x1o, y1o = cx + cos1 * r, cy + sin1 * r
             x2o, y2o = cx + cos2 * r, cy + sin2 * r
+            # Silent hours: when interactive we still need an invisible click
+            # target so every hour from 00–23 is selectable. A 4 px-thick
+            # ring slice at r_in is invisible against the inner hub but big
+            # enough to land a click.
             if hours[h] == 0:
+                if not interactive:
+                    continue
+                r_silent = r_in + 4.0
+                xso1, yso1 = cx + cos1 * r_silent, cy + sin1 * r_silent
+                xso2, yso2 = cx + cos2 * r_silent, cy + sin2 * r_silent
+                d = (
+                    f"M {x1i:.2f} {y1i:.2f} "
+                    f"L {xso1:.2f} {yso1:.2f} "
+                    f"A {r_silent:.2f} {r_silent:.2f} 0 0 1 {xso2:.2f} {yso2:.2f} "
+                    f"L {x2i:.2f} {y2i:.2f} "
+                    f"A {r_in:.2f} {r_in:.2f} 0 0 0 {x1i:.2f} {y1i:.2f} Z"
+                )
+                parts.append(
+                    f'<path d="{d}" fill="transparent" '
+                    f'class="dial-wedge" data-hour="{h}" '
+                    f'style="cursor:pointer"/>'
+                )
                 continue
             fill = _DIAL_DEFAULT_FILL
             opacity = 0.90
@@ -3840,9 +3972,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             title_el = (
                 "" if compact else f"<title>{h:02d}:00 · {hours[h]} detections</title>"
             )
+            interact_attr = (
+                f' class="dial-wedge" data-hour="{h}" style="cursor:pointer"'
+                if interactive else ""
+            )
             parts.append(
                 f'<path d="{d}" fill="{fill}" '
-                f'fill-opacity="{opacity:.2f}"{stroke_attr}>{title_el}</path>'
+                f'fill-opacity="{opacity:.2f}"{stroke_attr}{interact_attr}>'
+                f'{title_el}</path>'
             )
 
         if not compact:

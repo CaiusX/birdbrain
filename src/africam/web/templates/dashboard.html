@@ -173,6 +173,42 @@
 
 {% include "_spectrogram_modal.html" %}
 
+{# ---- Hour-drill modal: opens when the clock in a map popup is clicked.
+       Big dial on the left, hour-detail side rail on the right. The rail
+       swaps via HTMX whenever a wedge is clicked (in either dial). ---- #}
+<div id="hour-drill-modal" class="hidden fixed inset-0 z-50">
+  <div data-hour-drill-backdrop class="absolute inset-0 bg-black/70"></div>
+  <div class="absolute inset-0 flex items-center justify-center p-4">
+    <div class="relative bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl
+                w-full max-w-5xl max-h-[90vh] overflow-auto"
+         data-modal-source="" data-modal-hour="">
+      <button type="button" data-hour-drill-close
+              class="absolute top-3 right-3 text-zinc-400 hover:text-zinc-100
+                     text-xl leading-none px-2 py-0.5 z-10"
+              aria-label="Close">×</button>
+      <div class="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-0">
+        <div class="p-5 flex flex-col">
+          <div class="flex items-baseline justify-between gap-3 flex-wrap mb-3">
+            <h3 id="hour-drill-title"
+                class="text-base font-semibold text-zinc-100"></h3>
+            <span class="text-xs text-zinc-500">click any hour to inspect</span>
+          </div>
+          <div id="hour-drill-dial"
+               class="map-dial mx-auto w-full max-w-[460px] aspect-square">
+          </div>
+        </div>
+        <div id="hour-drill-rail"
+             class="md:border-l border-t md:border-t-0 border-zinc-800
+                    bg-zinc-900/40 min-h-[200px]">
+          <div class="px-5 py-6 text-sm text-zinc-500 italic">
+            Loading…
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   const TILES = {{ tiles_json | tojson }};
   const SITES = {{ sites_activity | tojson }};
@@ -391,6 +427,123 @@
     restoreFilter('top-species',  TOPSP_KEY);
     renderSourceChips();
     refreshDetections();
+  });
+
+  // --- Hour-drill modal ---------------------------------------------------
+  // The dial in the map popup and the bigger dial inside the modal are both
+  // rendered with `interactive=True` in app.py, so every hour wedge carries
+  // a `class="dial-wedge" data-hour="N"` handle and the centre hub carries
+  // `data-dial-centre`. Click delegation routes both to the same opener.
+
+  const SITES_BY_NAME = Object.fromEntries(SITES.map(s => [s.name, s]));
+  const drillModal = document.getElementById('hour-drill-modal');
+  const drillPanel = drillModal.querySelector('[data-modal-source]');
+  const drillDial  = document.getElementById('hour-drill-dial');
+  const drillRail  = document.getElementById('hour-drill-rail');
+  const drillTitle = document.getElementById('hour-drill-title');
+
+  function currentHourFor(site) {
+    if (!site || !site.tz) return new Date().getHours();
+    try {
+      const f = new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit', hour12: false, timeZone: site.tz,
+      });
+      return parseInt(f.format(new Date()), 10) || 0;
+    } catch (_e) { return 0; }
+  }
+
+  function findSiteFromDialEl(el) {
+    // Popup dial: walk up to the leaflet-popup-content-wrapper, then read
+    // its bound site via the popup builder's data marker. Simpler: each
+    // dial element is attached either to a map popup (which has a Leaflet
+    // marker via _source) or to the drill modal itself.
+    const modal = el.closest('#hour-drill-modal');
+    if (modal) {
+      const name = drillPanel.dataset.modalSource;
+      return SITES_BY_NAME[name] || null;
+    }
+    const popupEl = el.closest('.leaflet-popup');
+    if (!popupEl) return null;
+    // Match popup back to its site by name text in the <strong> header.
+    const header = popupEl.querySelector('strong');
+    if (!header) return null;
+    return SITES_BY_NAME[header.textContent.trim()] || null;
+  }
+
+  function refreshFocus(hour) {
+    drillDial.querySelectorAll('.dial-wedge--focus')
+      .forEach(p => p.classList.remove('dial-wedge--focus'));
+    const w = drillDial.querySelector(`.dial-wedge[data-hour="${hour}"]`);
+    if (w) {
+      w.classList.add('dial-wedge--focus');
+      w.setAttribute('stroke', '#10b981');
+      w.setAttribute('stroke-width', '2');
+    }
+  }
+
+  function loadHourRail(source, hour) {
+    drillPanel.dataset.modalSource = source;
+    drillPanel.dataset.modalHour = String(hour);
+    const url = `/partials/site-hour-detail?source=${encodeURIComponent(source)}`
+              + `&hour=${hour}`;
+    fetch(url, { headers: { 'HX-Request': 'true' } })
+      .then(r => r.text())
+      .then(html => { drillRail.innerHTML = html; })
+      .catch(() => {
+        drillRail.innerHTML =
+          '<div class="px-5 py-6 text-sm text-rose-300">Failed to load hour detail.</div>';
+      });
+  }
+
+  function openDrill(site, hour) {
+    if (!site || !site.dial_svg_full) return;
+    drillTitle.textContent = `${site.name} · today's 24-hour soundscape`;
+    drillDial.innerHTML = site.dial_svg_full;
+    drillModal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    refreshFocus(hour);
+    loadHourRail(site.name, hour);
+  }
+
+  function closeDrill() {
+    drillModal.classList.add('hidden');
+    document.body.style.overflow = '';
+    drillDial.innerHTML = '';
+    drillPanel.dataset.modalSource = '';
+    drillPanel.dataset.modalHour = '';
+  }
+
+  // Click delegation: handles both the popup dial (which opens the modal)
+  // and the modal dial (which re-targets the side rail). Catches wedge
+  // clicks and centre-hub clicks separately.
+  document.addEventListener('click', (e) => {
+    const wedge = e.target.closest('.dial-wedge');
+    const centre = e.target.closest('[data-dial-centre]');
+    if (!wedge && !centre) return;
+    const dialEl = e.target.closest('.map-dial');
+    if (!dialEl) return;
+    const site = findSiteFromDialEl(e.target);
+    if (!site) return;
+    const inModal = !!dialEl.closest('#hour-drill-modal');
+    const hour = wedge
+      ? parseInt(wedge.dataset.hour, 10)
+      : currentHourFor(site);
+    if (inModal) {
+      refreshFocus(hour);
+      loadHourRail(site.name, hour);
+    } else {
+      openDrill(site, hour);
+    }
+  });
+
+  drillModal.querySelector('[data-hour-drill-backdrop]')
+    .addEventListener('click', closeDrill);
+  drillModal.querySelector('[data-hour-drill-close]')
+    .addEventListener('click', closeDrill);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !drillModal.classList.contains('hidden')) {
+      closeDrill();
+    }
   });
 </script>
 {% endblock %}
