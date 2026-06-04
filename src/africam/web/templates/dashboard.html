@@ -62,14 +62,18 @@
     <div id="map" class="w-full" style="height: 460px;"></div>
   </div>
 
-  <div class="relative bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
-    {# Muted logo as a background wash — sits on the right edge so the prose
-       reads cleanly along the left, and is fully decorative (aria-hidden). #}
-    <img src="/static/birdbrain-logo.svg" alt="" aria-hidden="true"
-         class="absolute pointer-events-none select-none -right-24 top-1/2 -translate-y-1/2
-                w-[150%] max-w-none opacity-[0.06]" />
-    <div class="relative px-6 py-6 flex flex-col h-full">
-      <h2 class="text-lg font-semibold text-zinc-100 leading-snug">
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
+    <div class="px-6 py-6 flex flex-col h-full">
+      {# Brand lockup: mark + wordmark, the leaf-tip dots in the logo echo the
+         site-coloured dots on the map next door. Subtitle below the rule
+         ties the brand to what the page is doing. #}
+      <div class="flex items-center gap-3">
+        <img src="/static/birdbrain-logo.svg" alt=""
+             class="w-9 h-9 shrink-0" aria-hidden="true">
+        <span class="text-2xl font-semibold tracking-tight text-zinc-100">BirdBrain</span>
+      </div>
+      <div class="mt-4 mb-4 border-t border-zinc-800"></div>
+      <h2 class="text-base font-medium text-zinc-200 leading-snug">
         Listening to {{ sites_activity | length }} African wildlife cameras
       </h2>
       <p class="mt-3 text-sm text-zinc-300 leading-relaxed max-w-md">
