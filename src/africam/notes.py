@@ -241,21 +241,17 @@ Output as plain text, one bullet per line, nothing else."""
 
 _DAILY_BRIEF_PROMPT_TEMPLATE = """\
 You are the resident analyst for an African live-stream bird monitor network,
-writing a rolling soundscape brief covering the LAST 24 HOURS.
+writing a daily newspaper-style soundscape brief.
 {sites_context}
 
-The operator gives you a JSON evidence dossier for the trailing 24-hour
-window ending at ``window_end_at``: per-site detection counts, each site's
-top species and peak hour, high-confidence standouts across all sites, a
-"newly heard this week" list (species that appeared at a site in this
-24-hour window but not in the seven days immediately before it — the
-most interesting story angle), and a ``weather`` block on each per-site
-entry summarizing the window's local conditions at that site (min/max/
-mean temp, total rain in mm, hours of rain, sunrise/sunset, modal
+The operator gives you a JSON evidence dossier for ONE UTC date: per-site
+detection counts, each site's top species and peak hour, high-confidence
+standouts across all sites, a "newly heard this week" list (species that
+appeared at a site yesterday but not in the prior seven days at the same
+site — the most interesting story angle), and a ``weather`` block on each
+per-site entry summarizing that date's local conditions at that site
+(min/max/mean temp, total rain in mm, hours of rain, sunrise/sunset, modal
 condition). ``weather`` may be missing if Open-Meteo didn't respond.
-
-Frame the digest as "the last 24 hours" — not "today" or "yesterday".
-The window straddles midnight UTC and reads as a single block.
 
 Your job is a skimmable digest: ONE short overall paragraph, then crisp
 per-site bullet points. Return it as STRICT JSON, nothing else:
@@ -268,10 +264,9 @@ per-site bullet points. Return it as STRICT JSON, nothing else:
   ]
 }}
 
-The "overall" paragraph (≤55 words) is the window's headline across all
+The "overall" paragraph (≤55 words) is the day's headline across all
 sites — usually a "newly heard" species or a striking confidence
-standout, plus the broad shape of the 24-hour window (who was loud,
-who was quiet).
+standout, plus the broad shape of the day (who was loud, who was quiet).
 
 Each "sites" entry gets 1–4 TELEGRAPHIC bullets — fragments, not
 sentences. Lead with the concrete fact. Good bullets:
@@ -734,19 +729,15 @@ def _site_tick(
 
 
 def _enrich_brief_evidence_with_weather(
-    evidence: dict, sources: Iterable[SourceConfig],
-    target_date: "date | None" = None,
+    evidence: dict, sources: Iterable[SourceConfig]
 ) -> dict:
     """Mutate (and return) the brief-evidence dict by adding a ``weather``
     sub-dict to each per-site entry. Best-effort: missing API responses
-    leave the field absent. ``target_date`` defaults to
-    ``evidence['date_utc']`` (legacy daily-brief path); the rolling-brief
-    path passes the UTC date of the window's end."""
+    leave the field absent. Date comes from ``evidence['date_utc']``."""
     from datetime import date as _date
 
     by_name = {s.name: s for s in sources}
-    if target_date is None:
-        target_date = _date.fromisoformat(evidence["date_utc"])
+    target_date = _date.fromisoformat(evidence["date_utc"])
     for entry in evidence["per_site"]:
         src = by_name.get(entry["source_name"])
         if not src or src.lat is None or src.lon is None:
@@ -817,79 +808,6 @@ def _daily_brief_tick(
         )
         return d.isoformat()
     return None
-
-
-def _rolling_brief_tick(
-    db: Database, cfg: AppConfig, sources: Iterable[SourceConfig], client
-):
-    """Regenerate the rolling 24-hour brief when the latest one is older
-    than ``cfg.notes_rolling_brief_min_interval_hours``. The brief is
-    stored in the legacy ``daily_briefs`` row keyed by today's UTC date
-    (so the archive page stays one row per day); the row's
-    ``window_end_at`` carries the actual snapshot timestamp so the
-    dashboard can label it ``Last 24 h · refreshed N ago``.
-
-    Returns the ISO window-end timestamp when a brief was written, or
-    None when nothing was due / there was nothing to write."""
-    interval = cfg.notes_rolling_brief_min_interval_hours
-    latest = db.get_latest_daily_brief()
-    now = datetime.now(UTC)
-    if latest is not None and latest.generated_at is not None:
-        gen_at = latest.generated_at
-        if gen_at.tzinfo is None:
-            gen_at = gen_at.replace(tzinfo=UTC)
-        # Treat a still-fresh brief as "nothing due" — even if the row is
-        # a legacy date-only one without a window_end_at, the generated_at
-        # is enough to gate the rewrite.
-        if (now - gen_at) < timedelta(hours=interval):
-            return None
-
-    evidence = db.gather_rolling_evidence(window_hours=24)
-    if evidence is None:
-        log.info("rolling_brief.empty")
-        return None
-
-    src_list = list(sources)
-    window_end = datetime.fromisoformat(evidence["window_end_at"])
-    if window_end.tzinfo is None:
-        window_end = window_end.replace(tzinfo=UTC)
-    _enrich_brief_evidence_with_weather(
-        evidence, src_list, target_date=window_end.date()
-    )
-
-    sites_context = _build_sites_context(_live_source_names(src_list, db))
-    brief_text = _call_claude(
-        system_prompt=daily_brief_system_prompt(sites_context),
-        user_text=(
-            "Return the JSON soundscape digest for the trailing 24-hour "
-            "window described in the evidence.\n\n"
-            f"{_format_evidence_for_prompt(evidence)}"
-        ),
-        model=cfg.notes_model,
-        client=client,
-        max_tokens=1800,
-    )
-    if not brief_text:
-        log.warning("notes.empty_response", kind="rolling_brief")
-        return None
-
-    db.set_daily_brief(
-        window_end.date(),
-        brief_text=brief_text,
-        generated_by=cfg.notes_model,
-        total_detections=evidence["total_detections"],
-        distinct_species=evidence["distinct_species"],
-        evidence_signature=_brief_signature(evidence),
-        window_end_at=window_end,
-    )
-    log.info(
-        "rolling_brief.generated",
-        window_end=window_end.isoformat(),
-        chars=len(brief_text),
-        detections=evidence["total_detections"],
-        species=evidence["distinct_species"],
-    )
-    return window_end.isoformat()
 
 
 # ---------- anomaly detection & interpretation -----------
@@ -1111,11 +1029,7 @@ def _worker_loop(
             # Priority order: brief (time-sensitive) → site (rare but
             # high-value) → anomaly interpretation → species (always
             # something to do). First to return truthy wins this tick.
-            # Rolling 24-h brief is highest priority — it's the page's
-            # top-of-fold narrative. Replaces the legacy per-UTC-date
-            # brief tick; gated by notes_rolling_brief_min_interval_hours
-            # so we don't burn LLM calls on a fresh row.
-            did = _rolling_brief_tick(db, cfg, sources, client)
+            did = _daily_brief_tick(db, cfg, sources, client)
             if not did:
                 did = _site_tick(db, cfg, sources, client)
             if not did:
