@@ -211,9 +211,14 @@ class SourceDisableRow(Base):
 
 
 class DailyBriefRow(Base):
-    """One-paragraph cross-site digest of a single UTC date. Generated once
-    after midnight UTC and never regenerated — the day's data is fixed.
-    Surfaces as a banner on the dashboard and an archive list at /briefs."""
+    """One-paragraph cross-site digest. Historically (pre-rolling-window):
+    one per UTC date, generated once after midnight UTC. Now: still one row
+    per UTC date — the PK is preserved so the /briefs archive stays clean
+    — but each row represents the rolling 24-hour window ending at
+    ``window_end_at``. The worker rewrites the row every few hours so the
+    dashboard always reflects the *last* 24 h, not yesterday by calendar.
+    Old rows (window_end_at IS NULL) still render with a date label.
+    """
 
     __tablename__ = "daily_briefs"
 
@@ -225,6 +230,12 @@ class DailyBriefRow(Base):
     total_detections: Mapped[int] = mapped_column(Integer, default=0)
     distinct_species: Mapped[int] = mapped_column(Integer, default=0)
     evidence_signature: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # End of the 24-hour rolling window this brief covers. None for legacy
+    # rows generated under the per-UTC-date scheme (where the window was
+    # implicitly the calendar date).
+    window_end_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class AnomalyEventRow(Base):

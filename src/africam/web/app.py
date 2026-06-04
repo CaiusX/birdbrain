@@ -742,6 +742,24 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         ]
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         latest_brief = db.get_latest_daily_brief()
+        # Friendly "refreshed N ago" label for rolling-window briefs.
+        # Legacy date-only briefs get None and the template falls back
+        # to the "Today's / Yesterday's" wording.
+        brief_age_label: str | None = None
+        if latest_brief is not None and latest_brief.window_end_at is not None:
+            gen_at = latest_brief.generated_at
+            if gen_at is not None and gen_at.tzinfo is None:
+                gen_at = gen_at.replace(tzinfo=UTC)
+            if gen_at is not None:
+                age_s = max(0, int((datetime.now(UTC) - gen_at).total_seconds()))
+                if age_s < 60:
+                    brief_age_label = "just now"
+                elif age_s < 5400:
+                    brief_age_label = f"refreshed {age_s // 60}m ago"
+                elif age_s < 172800:
+                    brief_age_label = f"refreshed {age_s // 3600}h ago"
+                else:
+                    brief_age_label = f"refreshed {age_s // 86400}d ago"
         return TEMPLATES.TemplateResponse(
             request,
             "dashboard.html",
@@ -756,6 +774,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "site_states": _site_states(tiles, sources_by_name),
                 "source_tz": source_tz,
                 "latest_brief": latest_brief,
+                "brief_age_label": brief_age_label,
                 **_note_tag_context(),
             },
         )

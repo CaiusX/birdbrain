@@ -111,6 +111,10 @@ class AppConfig(BaseSettings):
     # the gaps oldest-first. Keep modest — re-fills after multi-day
     # outages but doesn't ask Claude to write briefs about ancient history.
     notes_brief_lookback_days: int = 3
+    # Minimum age (hours) of the latest brief before the rolling-brief
+    # worker regenerates it. The brief always describes a 24-hour rolling
+    # window — this knob just paces how often we rewrite it.
+    notes_rolling_brief_min_interval_hours: int = 6
 
 
 def load_sources(path: Path) -> list[SourceConfig]:

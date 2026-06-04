@@ -105,8 +105,19 @@
 <section class="mb-6 bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4">
   <header class="flex items-baseline justify-between flex-wrap gap-2 mb-2">
     <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">
-      {% if latest_brief.date_utc == (today_utc | default(None)) %}Today's{% else %}Yesterday's{% endif %} soundscape
-      <span class="text-zinc-500 normal-case font-normal ml-2 tabular-nums text-xs">{{ latest_brief.date_utc.strftime('%A, %d %b %Y') }} UTC</span>
+      {# Rolling-window brief — labelled by recency of regeneration. Legacy
+         date-keyed briefs (window_end_at is None) fall back to the original
+         today/yesterday phrasing. #}
+      {% if latest_brief.window_end_at %}
+        Last 24 hours
+        <span class="text-zinc-500 normal-case font-normal ml-2 tabular-nums text-xs">
+          ending {{ latest_brief.window_end_at.strftime('%a %d %b · %H:%M') }} UTC
+          {%- if brief_age_label %} · {{ brief_age_label }}{% endif -%}
+        </span>
+      {% else %}
+        {% if latest_brief.date_utc == (today_utc | default(None)) %}Today's{% else %}Yesterday's{% endif %} soundscape
+        <span class="text-zinc-500 normal-case font-normal ml-2 tabular-nums text-xs">{{ latest_brief.date_utc.strftime('%A, %d %b %Y') }} UTC</span>
+      {% endif %}
     </h2>
     <a href="/briefs" class="text-xs text-emerald-300 hover:text-emerald-200">archive →</a>
   </header>

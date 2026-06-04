@@ -68,6 +68,7 @@ class Database:
             ("species_notes", "range_map_page_url", "TEXT"),
             ("species_notes", "media_fetched_at", "TIMESTAMP"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
+            ("daily_briefs", "window_end_at", "TIMESTAMP"),
         ]
         with self.engine.begin() as conn:
             for table, col, ddl in added:
@@ -1821,6 +1822,160 @@ class Database:
             ],
         }
 
+    def gather_rolling_evidence(self, window_hours: int = 24) -> dict | None:
+        """Same shape as ``gather_daily_evidence`` but the window is the
+        trailing ``window_hours`` ending right now, not a fixed UTC calendar
+        date. The "newly heard this week" comparison uses the 7 days
+        immediately preceding the window so the surface keeps its most
+        valuable story angle.
+
+        Returns None when the window contains no detections (e.g. the
+        pipeline has been down) — the caller skips brief generation."""
+        from sqlalchemy import func
+
+        end = datetime.now(UTC)
+        start = end - timedelta(hours=window_hours)
+        week_start = start - timedelta(days=7)
+
+        with self._Session() as s:
+            base = (
+                select(
+                    func.count(DetectionRow.id),
+                    func.count(func.distinct(DetectionRow.scientific_name)),
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+            )
+            total, distinct = s.execute(base).one()
+            if not total:
+                return None
+
+            per_site_count = dict(s.execute(
+                select(DetectionRow.source_name, func.count(DetectionRow.id))
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .group_by(DetectionRow.source_name)
+            ).all())
+
+            per_site_top = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    func.count(DetectionRow.id),
+                    func.max(DetectionRow.confidence),
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+                .order_by(
+                    DetectionRow.source_name,
+                    func.count(DetectionRow.id).desc(),
+                )
+            ).all()
+
+            peak_rows = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    func.strftime("%H", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .group_by(
+                    DetectionRow.source_name,
+                    func.strftime("%H", DetectionRow.started_at),
+                )
+                .order_by(func.count(DetectionRow.id).desc())
+            ).all()
+            per_site_peak: dict[str, int | None] = {}
+            for src_n, hr_str, _ in peak_rows:
+                if src_n not in per_site_peak and hr_str is not None:
+                    per_site_peak[src_n] = int(hr_str)
+
+            standouts = s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    DetectionRow.source_name,
+                    DetectionRow.confidence,
+                )
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .where(DetectionRow.confidence >= 0.9)
+                .order_by(DetectionRow.confidence.desc())
+                .limit(8)
+            ).all()
+
+            today_pairs = set(s.execute(
+                select(DetectionRow.source_name, DetectionRow.scientific_name)
+                .where(DetectionRow.started_at >= start)
+                .where(DetectionRow.started_at < end)
+                .distinct()
+            ).all())
+            prior_pairs = set(s.execute(
+                select(DetectionRow.source_name, DetectionRow.scientific_name)
+                .where(DetectionRow.started_at >= week_start)
+                .where(DetectionRow.started_at < start)
+                .distinct()
+            ).all())
+            new_pairs = today_pairs - prior_pairs
+
+            common_lookup = {}
+            if new_pairs:
+                sci_names = {sci for _, sci in new_pairs}
+                for sci, com in s.execute(
+                    select(DetectionRow.scientific_name, DetectionRow.common_name)
+                    .where(DetectionRow.scientific_name.in_(sci_names))
+                    .group_by(DetectionRow.scientific_name)
+                ).all():
+                    common_lookup[sci] = com
+
+        per_site_top_by_src: dict[str, list[dict]] = {}
+        for src, sci, com, c, mc in per_site_top:
+            bucket = per_site_top_by_src.setdefault(src, [])
+            if len(bucket) < 3:
+                bucket.append({
+                    "scientific_name": sci,
+                    "common_name": com,
+                    "count": int(c),
+                    "max_confidence": round(float(mc), 3),
+                })
+
+        return {
+            "window_end_at": end.isoformat(),
+            "window_start_at": start.isoformat(),
+            "window_hours": window_hours,
+            "total_detections": int(total),
+            "distinct_species": int(distinct),
+            "per_site": [
+                {
+                    "source_name": src,
+                    "count": int(per_site_count.get(src, 0)),
+                    "peak_hour_utc": per_site_peak.get(src),
+                    "top_species": per_site_top_by_src.get(src, []),
+                }
+                for src in sorted(per_site_count.keys())
+            ],
+            "high_confidence_standouts": [
+                {
+                    "scientific_name": sci,
+                    "common_name": com,
+                    "source_name": src,
+                    "confidence": round(float(conf), 3),
+                }
+                for sci, com, src, conf in standouts
+            ],
+            "newly_heard_this_week": [
+                {
+                    "source_name": src,
+                    "scientific_name": sci,
+                    "common_name": common_lookup.get(sci, ""),
+                }
+                for src, sci in sorted(new_pairs)
+            ],
+        }
+
     def missing_daily_briefs(self, lookback_days: int = 3) -> list[date]:
         """Return UTC dates within the lookback for which a brief is missing
         AND data exists. Excludes today (in-progress). Oldest first so the
@@ -1866,9 +2021,13 @@ class Database:
         total_detections: int,
         distinct_species: int,
         evidence_signature: str,
+        window_end_at: datetime | None = None,
     ) -> None:
         """Insert (or replace) the brief for one UTC date. Idempotent so a
-        manual re-trigger from the shell can overwrite a bad first draft."""
+        manual re-trigger from the shell can overwrite a bad first draft.
+        ``window_end_at`` marks the trailing 24-h window the brief
+        describes (set by the rolling-brief worker); legacy callers pass
+        None and the row reads back as a calendar-date brief."""
         now = datetime.now(UTC)
         with self._Session() as s, s.begin():
             row = s.get(DailyBriefRow, date_utc)
@@ -1881,6 +2040,7 @@ class Database:
             row.total_detections = total_detections
             row.distinct_species = distinct_species
             row.evidence_signature = evidence_signature
+            row.window_end_at = window_end_at
 
     def list_daily_briefs(self, limit: int = 60) -> list[DailyBriefRow]:
         with self._Session() as s:
