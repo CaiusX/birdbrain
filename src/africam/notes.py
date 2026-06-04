@@ -44,17 +44,17 @@ log = get_logger(__name__)
 # Each line ends with the per-site UTC offset in parentheses; the prompt
 # header instructs Claude to use that offset when discussing diurnal rhythm.
 _SITE_DESCRIPTIONS: dict[str, str] = {
-    "Olifants (Naledi)":   "riverine bushveld, Kruger NP (Limpopo, UTC+2)",
-    "Tembe":               "coastal sand forest, KZN / Mozambique border (UTC+2)",
-    "Timbavati":           "Lowveld savanna, private reserve adjoining Kruger (UTC+2)",
-    "Twin Pan":            "Kalahari pan, Nxai Pan area, northern Botswana (UTC+2)",
-    "Safarihoek":          "Etosha Heights escarpment, northern Namibia (UTC+2)",
-    "Tau Game Lodge":      "Madikwe Game Reserve bushveld, NW South Africa (UTC+2)",
-    "Tortilis Camp":       "Amboseli, semi-arid grassland under Kilimanjaro, southern Kenya (UTC+3)",
-    "Mara River":          "Maasai Mara Triangle, riverine savanna, southwestern Kenya (UTC+3)",
-    "Mpala Watering Hole": "Laikipia plateau acacia-Commiphora bushland, ~1800 m, research-station camera, central Kenya (UTC+3)",
-    "Stony Point":         "Coastal African Penguin colony with Cape Cormorants, Betty's Bay, Western Cape (UTC+2)",
-    "Elephant Pan":        "Northern Tuli Block riparian waterhole, Mashatu area, eastern Botswana (UTC+2)",
+    "Olifants (Naledi)":   "24°S, riverine bushveld, Kruger NP (Limpopo, UTC+2) — southern hemisphere",
+    "Tembe":               "27°S, coastal sand forest, KZN / Mozambique border (UTC+2) — southern hemisphere",
+    "Timbavati":           "24°S, Lowveld savanna, private reserve adjoining Kruger (UTC+2) — southern hemisphere",
+    "Twin Pan":            "20°S, Kalahari pan, Nxai Pan area, northern Botswana (UTC+2) — southern hemisphere",
+    "Safarihoek":          "19°S, Etosha Heights escarpment, northern Namibia (UTC+2) — southern hemisphere",
+    "Tau Game Lodge":      "25°S, Madikwe Game Reserve bushveld, NW South Africa (UTC+2) — southern hemisphere",
+    "Tortilis Camp":       "3°S, Amboseli, semi-arid grassland under Kilimanjaro, southern Kenya (UTC+3) — equatorial",
+    "Mara River":          "1°S, Maasai Mara Triangle, riverine savanna, southwestern Kenya (UTC+3) — equatorial",
+    "Mpala Watering Hole": "0° (equator), Laikipia plateau acacia-Commiphora bushland, ~1800 m, research-station camera, central Kenya (UTC+3) — equatorial",
+    "Stony Point":         "34°S, Coastal African Penguin colony with Cape Cormorants, Betty's Bay, Western Cape (UTC+2) — southern hemisphere",
+    "Elephant Pan":        "22°S, Northern Tuli Block riparian waterhole, Mashatu area, eastern Botswana (UTC+2) — southern hemisphere",
 }
 
 # Counting word for the opening line ("watches eight cams"). Falls back to
@@ -300,32 +300,67 @@ that an operator can act on.
 Anomaly kinds you'll see:
   • volume_spike — count of detections this day is ≥3× the prior-week median.
   • nocturnal_burst — night-time (local 18:00–06:00) detections ≥2× daytime,
-    with night count ≥30. Often a nocturnal flight-call signature of migrating
-    passerines and waders. Listen for Bank Swallow, Common Swift, Sedge Warbler,
-    Olivaceous Warbler, Common Snipe, Lesser Kestrel as palearctic migrants;
-    Common Cuckoo, European Bee-eater, White Stork as intra-African migrants.
-    Date matters: late April–May = northbound; September–November = southbound.
+    with night count ≥30. Often a nocturnal flight-call signature.
   • new_species_wave — N species heard on this day that weren't recorded at
     this site in the prior 30 days. Often migration; sometimes a single
     weather front pushing a guild of arrivals.
 
+CRITICAL: GEOGRAPHY DETERMINES THE MIGRATION FRAME.
+Most sites are in the SOUTHERN HEMISPHERE (look at the site's latitude in
+the sites list above — "27°S" means southern). The seasons are flipped:
+December–February is southern SUMMER, June–August is southern WINTER.
+There are two migration systems in play, and they overlap differently
+depending on hemisphere:
+
+(1) Palearctic ↔ Eurasia (relevant at every African site).
+  • Arrive in Africa September–November (escaping Eurasian winter).
+  • Overwinter on territory across Africa December–February.
+  • Depart Africa northbound March–May, returning to Eurasian breeding grounds.
+  • ABSENT FROM AFRICA June–August (they are breeding in Eurasia).
+  • Diagnostic species: White Stork, Common Swift, Bank Swallow, House Martin,
+    Lesser Kestrel, European Bee-eater, Common Cuckoo, Sedge/Olivaceous/
+    Marsh Warbler, Common/Wood Sandpiper, Common Snipe.
+
+(2) Intra-African breeders (relevant mostly at southern-hemisphere sites).
+  • At southern-hemisphere sites (≤ −10°): breeders ARRIVE southbound
+    September–November (austral spring), breed through austral summer
+    (Dec–Mar), then depart NORTHBOUND April–June to escape the cold/dry
+    austral winter, returning to equatorial refugia until next spring.
+  • So at a Southern-Hemisphere site in May–July, the BIRDS ARE FLYING
+    NORTH because southern winter is starting. This is the opposite of the
+    Northern-Hemisphere intuition. Do not call this "spring migration" —
+    it is austral autumn / early winter departure.
+  • Diagnostic departing species at southern sites: Diederik Cuckoo,
+    Klaas's Cuckoo, Woodland Kingfisher, Yellow-billed Kite, Lesser Striped
+    Swallow, White-throated Swallow, European Roller (palearctic, same
+    direction), African Paradise-Flycatcher.
+
+(3) Equatorial sites (Tortilis, Mara River, Mpala — all near 0°).
+  • These are crossroads. Late-April / May palearctic departures pass
+    through northbound on their way home to Eurasia, AND intra-African
+    breeders from the south arrive northbound to summer here. Both
+    movements in the same direction at the same time of year.
+
 Your job:
-  1. State plainly what most likely happened (1 sentence). If the evidence
-     strongly suggests a specific named cause (e.g. "northbound spring
-     palearctic passage"), say so.
-  2. Cite the 1–3 most diagnostic species or hourly cues from the dossier.
-  3. If the evidence is ambiguous or could equally be a microphone artefact
-     / camera-angle change / detector noise, say so honestly. Don't invent
-     specificity that isn't in the data.
+  1. Identify the site's hemisphere from the sites list, then choose the
+     migration system the date+species suggest. Do not blindly say
+     "northbound spring palearctic" — verify the species are palearctic
+     and the month makes sense for that system at this latitude.
+  2. State plainly what most likely happened in 1 sentence with the right
+     direction word ("southbound", "northbound", or "transit") AND the
+     right seasonal word for the hemisphere (e.g. "austral autumn", not
+     "spring", for May at a southern site).
+  3. Cite the 1–3 most diagnostic species or hourly cues from the dossier.
+  4. If the evidence is ambiguous or could equally be a microphone artefact,
+     camera-angle change, insect hatch (nocturnal aerial insectivores often
+     hunt insect hatches and aren't migrating), or detector noise, say so.
+     Don't invent specificity that isn't in the data.
 
 Style:
   • Plain prose. No bullets. 60–120 words total.
   • Start with the inference, not "Based on the evidence...".
   • Use SCIENTIFIC names sparingly — common names are friendlier.
   • Refer to the site by its short name (Tortilis Camp, Tembe, etc.).
-  • If site is known to be a migration crossroads (Tortilis = Amboseli /
-    East African corridor; Tembe = KZN coastal; Mara River = Rift), lean on
-    that geography.
 
 Output the explanation as plain text, nothing else."""
 
