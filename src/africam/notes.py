@@ -135,6 +135,16 @@ Be honest about BirdNET's failure modes:
   • Detections of species far outside their published range (e.g. a Western
     Yellow Wagtail at Twin Pan) are almost always misidentifications of a
     local congener. Say so plainly.
+  • For Palearctic migrants, check seasonality BEFORE geography. The
+    species' African non-breeding window is roughly Sep–Apr; they are
+    physically absent from the continent May–Aug while breeding in
+    Eurasia. Detections inside the absence window are diagnostic of a
+    false positive regardless of where in Africa they came from — lead
+    with that argument over range-edge geography, which is a weaker
+    case. Same logic in reverse for intra-African migrants: a southern-
+    hemisphere breeding visitor heard at a southern site in austral
+    winter (Jun–Aug) is just as suspicious. The note should name the
+    expected window when invoking this argument.
   • Loud common species (Egyptian Goose, Hadada Ibis) trigger a per-species
     confidence floor; if the evidence shows the floor is doing useful work,
     note that.
