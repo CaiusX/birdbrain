@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import species_link, brief_body %}
+{% from "_macros.html" import brief_body %}
 {% block title %}BirdBrain · dashboard{% endblock %}
 
 {% block head_extra %}
@@ -8,11 +8,13 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
-  /* Each map marker is a 24h activity clock (the dial SVG), scaled to the
-     marker box; the SVG's own width/max-width are overridden so it fills. */
-  .leaflet-marker-icon.site-dial { background: transparent; border: none; }
+  /* Dashboard map markers are simple coloured dots (one per site); the
+     activity clockface appears in the click popup. */
+  .leaflet-marker-icon.site-dot { background: transparent; border: none; }
+  .site-dot svg { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); cursor: pointer; }
+  /* The expanded clockface still uses .map-dial inside the popup. */
   .map-dial svg { width: 100% !important; height: 100% !important; max-width: none !important; }
-  .map-dial { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); cursor: pointer; }
+  .map-dial { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); }
 </style>
 {% endblock %}
 
@@ -50,45 +52,18 @@
   </div>
 </section>
 
-{# ---- 2. activity map hero + by-site panel ---- #}
-<section class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-  <div class="lg:col-span-2 bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+{# ---- 2. activity map hero ---- #}
+<section class="mb-6">
+  <p class="text-sm text-zinc-400 mb-3">
+    BirdBrain listens to {{ sites_activity | length }} African wildlife
+    cameras — click a site to explore the last 24 hours of activity.
+  </p>
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
     <div class="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
-      <span class="text-sm uppercase tracking-wider text-zinc-400">Activity · last 24h</span>
-      <span class="text-xs text-zinc-500">clock = hourly activity · size = unique species · click to expand</span>
+      <span class="text-sm uppercase tracking-wider text-zinc-400">Sites</span>
+      <span class="text-xs text-zinc-500">hover a dot for its name · click for activity + recent species</span>
     </div>
     <div id="map" class="w-full" style="height: 460px;"></div>
-  </div>
-
-  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
-    <div class="px-4 py-2 border-b border-zinc-800">
-      <span class="text-sm uppercase tracking-wider text-zinc-400">By site</span>
-      <span class="text-xs text-zinc-500 ml-1">most recent species · 24h</span>
-    </div>
-    <div class="divide-y divide-zinc-800 overflow-y-auto" style="max-height: 426px;">
-      {% for site in sites_activity %}
-        <div class="px-4 py-3">
-          <div class="flex items-baseline justify-between gap-2">
-            <a href="/site/{{ site.name | urlencode }}" class="text-sm font-medium text-zinc-100 hover:text-emerald-300 truncate">{{ site.name }}</a>
-            <span class="text-xs tabular-nums {{ 'text-emerald-300' if site.species_24h else 'text-zinc-600' }} shrink-0">
-              {{ site.species_24h }} <span class="text-zinc-500">sp</span>
-            </span>
-          </div>
-          {% if site.recent %}
-            <div class="mt-1.5 flex flex-wrap gap-1">
-              {% for sp in site.recent %}
-                <span class="inline-flex items-baseline gap-1 px-1.5 py-0.5 rounded bg-zinc-800/60 border border-zinc-700/60 text-xs">
-                  {{ species_link(sp.common, sp.sci, cls="text-zinc-200 hover:text-emerald-300") }}
-                  <span class="text-[10px] text-zinc-500 tabular-nums">{{ ago(sp.age_s) }}</span>
-                </span>
-              {% endfor %}
-            </div>
-          {% else %}
-            <div class="mt-1 text-xs text-zinc-600">no detections in 24h</div>
-          {% endif %}
-        </div>
-      {% endfor %}
-    </div>
   </div>
 </section>
 
@@ -263,7 +238,7 @@
     htmx.ajax('GET', list.getAttribute('hx-get'), {target: list, swap: 'innerHTML'});
   }
 
-  // --- Activity map: bubbles sized by unique species in last 24h ---
+  // --- Activity map: one constant-sized coloured dot per site ---
   const map = L.map('map', { scrollWheelZoom: true });
   lockMap(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -271,47 +246,25 @@
     maxZoom: 18,
   }).addTo(map);
 
-  // Marker AREA scales proportionally with unique-species count (so diameter
-  // ∝ √count) — the cartographic standard for proportional-symbol maps. A
-  // linear diameter scale visually overweights the leader (a 2× count looks
-  // 4× larger). Floored so quiet sites stay clickable, capped so a runaway
-  // site can't dominate; the dial inside shows when they were heard.
-  function dialSize(n) { return Math.min(90, Math.max(32, Math.round(30 + 6 * Math.sqrt(n)))); }
-
-  // Permanent labels default to the right of each marker. Close pairs (e.g.
-  // Olifants + Timbavati, ~40km apart in the SA Lowveld) would collide, so
-  // when a later marker lands within LBL_PAIR_DEG of an already-placed one,
-  // flip its label to the opposite side. Threshold ≈ 65 km is generous for
-  // the typical multi-country fit-bounds zoom; tighten if false positives.
-  const LBL_PAIR_DEG = 0.6;
+  // Constant 14 px dot for every site — colour comes from SOURCE_COLORS
+  // (app.py), wired through site.color. Activity/species count live in
+  // the click popup so the map itself stays calm.
+  const DOT_PX = 14;
   const markers = {};
-  const placed = [];
   SITES.forEach(s => {
-    const size = dialSize(s.species_24h);
-    let direction = 'right';
-    for (const p of placed) {
-      if (Math.abs(s.lat - p.lat) < LBL_PAIR_DEG
-          && Math.abs(s.lon - p.lon) < LBL_PAIR_DEG) {
-        direction = (p.direction === 'right') ? 'left' : 'right';
-        break;
-      }
-    }
-    placed.push({ lat: s.lat, lon: s.lon, direction });
-    const offset = direction === 'right'
-      ? [size / 2 + 2, 0]
-      : [-(size / 2 + 2), 0];
     const icon = L.divIcon({
-      className: 'site-dial',
-      html: `<div class="map-dial" style="width:${size}px;height:${size}px"
-                  title="${escapeHtml(s.name)} · ${s.species_24h} species (24h)">${s.dial_svg}</div>`,
-      iconSize: [size, size],
-      iconAnchor: [size / 2, size / 2],
+      className: 'site-dot',
+      html: `<svg width="${DOT_PX}" height="${DOT_PX}" viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">`
+          + `<circle cx="7" cy="7" r="5.5" fill="${s.color}" stroke="#fafafa" stroke-width="1.5"/>`
+          + `</svg>`,
+      iconSize: [DOT_PX, DOT_PX],
+      iconAnchor: [DOT_PX / 2, DOT_PX / 2],
     });
     const m = L.marker([s.lat, s.lon], { icon }).addTo(map);
-    m.bindTooltip(`${s.name} · ${s.species_24h}`, {
-      permanent: true, direction, offset, className: 'site-label',
+    m.bindTooltip(`${s.name} · ${s.species_24h} species (24h)`, {
+      permanent: false, direction: 'top', offset: [0, -4], className: 'site-label',
     });
-    m.bindPopup(() => buildSitePopup(s), { minWidth: 230, maxWidth: 260 });
+    m.bindPopup(() => buildSitePopup(s), { minWidth: 240, maxWidth: 280 });
     markers[s.name] = m;
   });
 
@@ -321,17 +274,38 @@
     map.setView([-24, 31], 6);
   }
 
+  // ``ago`` in JS for the popup's per-species age tags. Same buckets as the
+  // Jinja macro at the top of the template so server and client agree.
+  function agoJs(s) {
+    if (s == null) return '—';
+    if (s < 90) return `${Math.floor(s)}s`;
+    if (s < 5400) return `${Math.floor(s / 60)}m`;
+    if (s < 172800) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  }
+
   function buildSitePopup(site) {
     const wrap = document.createElement('div');
+    // One species per row so the age tag has room — same shape the dropped
+    // by-site sidebar used to render so nothing is lost in the fold.
     const recent = (site.recent || [])
-      .map(sp => `<a href="/species/${encodeURIComponent(sp.sci)}" style="color:#6ee7b7;">${escapeHtml(sp.common)}</a>`)
-      .join(', ');
+      .map(sp =>
+        `<div style="display:flex;justify-content:space-between;gap:6px;`
+        + `padding:2px 0;font-size:12px;">`
+        + `<a href="/species/${encodeURIComponent(sp.sci)}" style="color:#e4e4e7;">`
+        + escapeHtml(sp.common) + `</a>`
+        + `<span style="color:#71717a;font-variant-numeric:tabular-nums;">`
+        + agoJs(sp.age_s) + `</span>`
+        + `</div>`)
+      .join('');
     wrap.innerHTML =
       `<strong>${escapeHtml(site.name)}</strong>` +
       `<div style="color:#a1a1aa;margin-top:2px;">${site.species_24h} unique species · 24h</div>` +
       `<div class="map-dial" style="width:210px;height:210px;margin:6px auto 0;">${site.dial_svg}</div>` +
-      (recent ? `<div style="margin-top:6px;color:#d4d4d8;">${recent}</div>` : '') +
-      `<div style="margin-top:6px;"><a href="/site/${encodeURIComponent(site.name)}" style="color:#6ee7b7;font-size:12px;">open site page · watch live →</a></div>`;
+      (recent
+        ? `<div style="margin-top:8px;border-top:1px solid #27272a;padding-top:6px;">${recent}</div>`
+        : `<div style="margin-top:8px;color:#52525b;font-size:12px;">no detections in 24h</div>`) +
+      `<div style="margin-top:8px;"><a href="/site/${encodeURIComponent(site.name)}" style="color:#6ee7b7;font-size:12px;">open site page · watch live →</a></div>`;
     return wrap;
   }
 

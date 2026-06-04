@@ -497,9 +497,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "name": name,
                 "lat": site["lat"],
                 "lon": site["lon"],
+                # Per-site palette colour drives the dashboard map dot.
+                # Falls back to the templates' default emerald.
+                "color": SOURCE_COLORS.get(name, "#10b981"),
                 "species_24h": len(sp),
-                # 24h activity clock for this site — a simplified dial sized
-                # by species count on the map, expanded in the click popup.
+                # 24h activity clock for this site — used in the click popup
+                # only (the map marker itself is a simple coloured dot).
                 "dial_svg": _radial_dial_svg(
                     hours_arr, highlight=local_now.hour, bands=bands, compact=True
                 ),
