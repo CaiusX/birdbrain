@@ -362,7 +362,12 @@
     m.bindTooltip(`${s.name} · ${s.species_24h} species (24h)`, {
       permanent: false, direction: 'top', offset: [0, -4], className: 'site-label',
     });
-    m.bindPopup(() => buildSitePopup(s), { minWidth: 240, maxWidth: 280 });
+    // autoPan: false keeps the map locked on the Africa-fit view when the
+    // popup opens. Default Leaflet pans the map to fit the popup, which
+    // makes sites near the edge of the visible area drift out of place.
+    m.bindPopup(() => buildSitePopup(s), {
+      minWidth: 240, maxWidth: 280, autoPan: false,
+    });
     markers[s.name] = m;
   });
 
