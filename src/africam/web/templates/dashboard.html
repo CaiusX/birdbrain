@@ -191,13 +191,22 @@
               aria-label="Close">×</button>
       <div class="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-0">
         <div class="p-5 flex flex-col">
-          <div class="flex items-baseline justify-between gap-3 flex-wrap mb-3">
+          <div class="flex items-baseline justify-between gap-3 flex-wrap mb-1">
             <h3 id="hour-drill-title"
                 class="text-base font-semibold text-zinc-100"></h3>
             <span class="text-xs text-zinc-500">click any hour to inspect</span>
           </div>
+          {# Recent-species strip carries the popup's old preview payload
+             so the modal-direct flow doesn't lose context. #}
+          <div id="hour-drill-recent"
+               class="text-xs text-zinc-400 mb-3 leading-relaxed"></div>
           <div id="hour-drill-dial"
                class="map-dial mx-auto w-full max-w-[460px] aspect-square">
+          </div>
+          <div class="mt-3 text-center">
+            <a id="hour-drill-site-link"
+               class="text-xs text-emerald-300 hover:text-emerald-200"
+               href="#">open site page · watch live →</a>
           </div>
         </div>
         <div id="hour-drill-rail"
@@ -362,12 +371,12 @@
     m.bindTooltip(`${s.name} · ${s.species_24h} species (24h)`, {
       permanent: false, direction: 'top', offset: [0, -4], className: 'site-label',
     });
-    // autoPan: false keeps the map locked on the Africa-fit view when the
-    // popup opens. Default Leaflet pans the map to fit the popup, which
-    // makes sites near the edge of the visible area drift out of place.
-    m.bindPopup(() => buildSitePopup(s), {
-      minWidth: 240, maxWidth: 280, autoPan: false,
-    });
+    // Dot click opens the hour-drill modal directly — no intermediate
+    // popup. Avoids two problems: Leaflet popups near the map's edge get
+    // clipped by the map container (a 460 px box), and enabling autoPan
+    // to fix that drifts the welcome Africa-fit view under the user. The
+    // modal is fullscreen so neither happens.
+    m.on('click', () => openDrill(s, currentHourFor(s)));
     markers[s.name] = m;
   });
 
@@ -386,29 +395,19 @@
     return `${Math.floor(s / 86400)}d`;
   }
 
-  function buildSitePopup(site) {
-    const wrap = document.createElement('div');
-    // One species per row so the age tag has room — same shape the dropped
-    // by-site sidebar used to render so nothing is lost in the fold.
-    const recent = (site.recent || [])
-      .map(sp =>
-        `<div style="display:flex;justify-content:space-between;gap:6px;`
-        + `padding:2px 0;font-size:12px;">`
-        + `<a href="/species/${encodeURIComponent(sp.sci)}" style="color:#e4e4e7;">`
-        + escapeHtml(sp.common) + `</a>`
-        + `<span style="color:#71717a;font-variant-numeric:tabular-nums;">`
-        + agoJs(sp.age_s) + `</span>`
-        + `</div>`)
-      .join('');
-    wrap.innerHTML =
-      `<strong>${escapeHtml(site.name)}</strong>` +
-      `<div style="color:#a1a1aa;margin-top:2px;">${site.species_24h} unique species · 24h</div>` +
-      `<div class="map-dial" style="width:210px;height:210px;margin:6px auto 0;">${site.dial_svg}</div>` +
-      (recent
-        ? `<div style="margin-top:8px;border-top:1px solid #27272a;padding-top:6px;">${recent}</div>`
-        : `<div style="margin-top:8px;color:#52525b;font-size:12px;">no detections in 24h</div>`) +
-      `<div style="margin-top:8px;"><a href="/site/${encodeURIComponent(site.name)}" style="color:#6ee7b7;font-size:12px;">open site page · watch live →</a></div>`;
-    return wrap;
+  // Recent-species summary HTML for the modal's left-pane header strip.
+  // Mirrors the per-row formatting the dropped popup used so the data
+  // dropdown is preserved in the new direct-to-modal flow.
+  function recentSpeciesHtml(site) {
+    if (!site.recent || !site.recent.length) {
+      return '<div style="color:#52525b;font-size:12px;">no detections in 24h</div>';
+    }
+    return site.recent.map(sp =>
+      `<a href="/species/${encodeURIComponent(sp.sci)}" `
+      + `style="color:#e4e4e7;text-decoration:none;">${escapeHtml(sp.common)}</a>`
+      + ` <span style="color:#71717a;font-variant-numeric:tabular-nums;">`
+      + agoJs(sp.age_s) + `</span>`
+    ).join('<span style="color:#3f3f46; margin:0 6px;">·</span>');
   }
 
   function rebindFilter(elemId, storageKey) {
@@ -505,13 +504,17 @@
 
   function openDrill(site, hour) {
     if (!site || !site.dial_svg_full) return;
-    // Close the Leaflet popup that triggered this — otherwise it sits
-    // behind the modal backdrop, visible through the dim, and competes
-    // with the drill for attention. The modal replaces the popup.
+    // Belt-and-braces close any popup, even though dot-click no longer
+    // opens one — leftover from prior interaction or future caller.
     if (typeof map !== 'undefined' && map && map.closePopup) {
       map.closePopup();
     }
-    drillTitle.textContent = `${site.name} · today's 24-hour soundscape`;
+    drillTitle.textContent =
+      `${site.name} · ${site.species_24h} species in 24 h`;
+    document.getElementById('hour-drill-recent').innerHTML =
+      `<span class="text-zinc-500">recent:</span> ` + recentSpeciesHtml(site);
+    document.getElementById('hour-drill-site-link').href =
+      `/site/${encodeURIComponent(site.name)}`;
     drillDial.innerHTML = site.dial_svg_full;
     drillModal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
