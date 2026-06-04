@@ -426,12 +426,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     def _front_activity(
         sources_by_name: dict[str, SourceConfig],
-    ) -> tuple[list[dict], dict]:
+    ) -> tuple[list[dict], dict, list[dict]]:
         """Front-page activity: per mapped site, the count of unique species
         heard in the last 24h (drives the map bubbles) and the most-recently-
         heard distinct species (with age, for the by-site panel + popups).
-        Also returns headline stats. Sites with no recent detections come back
-        with species_24h=0 so they still render (faded) on the map."""
+        Also returns headline stats and a top-2-per-site list of inter-site
+        species-overlap pairs (last 30 days) for the map's connection web."""
         now = datetime.now(UTC)
         since = now - timedelta(hours=24)
         recent_n = 6
@@ -536,7 +536,60 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "cams_total": len(ordered),
             "last_age_s": last_age,
         }
-        return activity, stats
+
+        # Inter-site shared-species web. 30-day window so the lines reflect
+        # ecological / flyway overlap rather than 24h noise. We keep each
+        # site's two strongest links and let pairs dedupe — this caps the
+        # drawing at ~20 lines for an 11-site network, dense enough to read
+        # without smothering the map.
+        thirty_d = now - timedelta(days=30)
+        coords_by_name = {
+            e["name"]: (e["lat"], e["lon"])
+            for e in activity
+            if e["lat"] is not None and e["lon"] is not None
+        }
+        with db.session() as s:
+            dpairs = s.execute(
+                select(DetectionRow.source_name, DetectionRow.scientific_name)
+                .where(DetectionRow.started_at >= thirty_d)
+                .distinct()
+            ).all()
+        sp_by_src: dict[str, set[str]] = {}
+        for src, sci in dpairs:
+            if src in coords_by_name:
+                sp_by_src.setdefault(src, set()).add(sci)
+        # Symmetric counts; key by sorted tuple so each pair is unique.
+        shared: dict[tuple[str, str], int] = {}
+        names = sorted(sp_by_src)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                n = len(sp_by_src[a] & sp_by_src[b])
+                if n > 0:
+                    shared[(a, b)] = n
+        # Per-site top-2 strongest neighbours; pairs union across sites so
+        # mutually-strong neighbours produce one shared edge, not two.
+        keep: set[tuple[str, str]] = set()
+        for name in names:
+            links = [
+                ((a, b), count)
+                for (a, b), count in shared.items()
+                if name in (a, b)
+            ]
+            links.sort(key=lambda x: x[1], reverse=True)
+            for pair, _ in links[:2]:
+                keep.add(pair)
+        pairs: list[dict] = []
+        for (a, b) in sorted(keep):
+            n = shared[(a, b)]
+            la, lo_a = coords_by_name[a]
+            lb, lo_b = coords_by_name[b]
+            pairs.append({
+                "a": a, "b": b, "shared": n,
+                "lat_a": la, "lon_a": lo_a,
+                "lat_b": lb, "lon_b": lo_b,
+            })
+
+        return activity, stats, pairs
 
     def _site_states(tiles: list[LiveTile], sources_by_name: dict[str, SourceConfig]) -> dict[str, dict]:
         out: dict[str, dict] = {}
@@ -664,7 +717,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
             rows = _group_detections(raw, group_minutes * 60)[:50]
 
-        sites_activity, front_stats = _front_activity(sources_by_name)
+        sites_activity, front_stats, site_pairs = _front_activity(sources_by_name)
         tiles_for_js = [
             {
                 "name": t.name,
@@ -687,6 +740,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "tiles_json": tiles_for_js,
                 "sites": sorted(sites.values(), key=lambda s: s.name),
                 "sites_activity": sites_activity,
+                "site_pairs": site_pairs,
                 "front_stats": front_stats,
                 "site_states": _site_states(tiles, sources_by_name),
                 "source_tz": source_tz,

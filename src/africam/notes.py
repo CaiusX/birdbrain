@@ -340,10 +340,20 @@ move with the rains.
     Cuckoo, Black Cuckoo, Woodland Kingfisher, African Paradise-
     Flycatcher, Lesser Striped Swallow, White-throated Swallow.
   • Equatorial sites (Tortilis Camp, Mara River, Mpala — near 0°):
-    these ARE the equatorial refugia. They receive intra-African
-    arrivals from the south in April–June, and Palearctic arrivals
-    from the north in September–November. April–May here is a busy
-    northbound transit period.
+    these ARE the equatorial refugia. Use East African seasonal
+    vocabulary at these sites, NOT austral / Southern-African labels:
+      – long rains: March–May
+      – cool/dry season: June–September
+      – short rains: October–December
+      – warm/dry season: January–February
+    Mara/Amboseli/Laikipia receive intra-African arrivals from
+    Southern Africa in April–June (their breeders heading north as
+    the southern dry season begins), and Palearctic arrivals from
+    the north in September–November as the short rains start.
+    April–May here is a busy northbound transit period at the tail
+    end of the long rains. Do not call late May at Mara "tail end of
+    the austral dry season" — at 1°S that is the tail end of the
+    LONG RAINS.
 
 (3) PALEARCTIC VISITORS — the away system. Only invoke this layer when
 the species AND the timing both fit.

@@ -52,18 +52,48 @@
   </div>
 </section>
 
-{# ---- 2. activity map hero ---- #}
-<section class="mb-6">
-  <p class="text-sm text-zinc-400 mb-3">
-    BirdBrain listens to {{ sites_activity | length }} African wildlife
-    cameras — click a site to explore the last 24 hours of activity.
-  </p>
+{# ---- 2. activity map + intro narrative (with muted logo background) ---- #}
+<section class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
     <div class="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
       <span class="text-sm uppercase tracking-wider text-zinc-400">Sites</span>
-      <span class="text-xs text-zinc-500">hover a dot for its name · click for activity + recent species</span>
+      <span class="text-xs text-zinc-500">hover a dot · lines = shared species (30 d)</span>
     </div>
     <div id="map" class="w-full" style="height: 460px;"></div>
+  </div>
+
+  <div class="relative bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
+    {# Muted logo as a background wash — sits on the right edge so the prose
+       reads cleanly along the left, and is fully decorative (aria-hidden). #}
+    <img src="/static/birdbrain-logo.svg" alt="" aria-hidden="true"
+         class="absolute pointer-events-none select-none -right-24 top-1/2 -translate-y-1/2
+                w-[150%] max-w-none opacity-[0.06]" />
+    <div class="relative px-6 py-6 flex flex-col h-full">
+      <h2 class="text-lg font-semibold text-zinc-100 leading-snug">
+        Listening to {{ sites_activity | length }} African wildlife cameras
+      </h2>
+      <p class="mt-3 text-sm text-zinc-300 leading-relaxed max-w-md">
+        BirdBrain pulls the audio from
+        <a href="https://africam.com/" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">Africam</a>
+        and <a href="https://explore.org/" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">explore.org</a>
+        live cams across Southern and East Africa, runs
+        <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">BirdNET</a>
+        on rolling three-second windows, and logs what it hears.
+      </p>
+      <p class="mt-3 text-sm text-zinc-300 leading-relaxed max-w-md">
+        Each dot on the map is a camera. The threads between them weigh
+        species heard at both sites over the last 30 days — a rough read
+        on which cameras share their soundscape. Click a dot for that
+        site's 24-hour activity clock and most-recently-heard species.
+      </p>
+      <p class="mt-auto pt-4 text-xs text-zinc-500">
+        Hosted on a Raspberry Pi 5. Non-commercial; BirdNET models
+        <a href="/about" class="text-zinc-400 hover:text-zinc-200">CC&nbsp;BY-NC-SA&nbsp;4.0</a>.
+      </p>
+    </div>
   </div>
 </section>
 
@@ -142,6 +172,7 @@
 <script>
   const TILES = {{ tiles_json | tojson }};
   const SITES = {{ sites_activity | tojson }};
+  const SITE_PAIRS = {{ site_pairs | tojson }};
 
   const GROUP_KEY   = 'africam.groupMinutes';
   const LAST_KEY    = 'africam.lastMinutes';
@@ -238,13 +269,37 @@
     htmx.ajax('GET', list.getAttribute('hx-get'), {target: list, swap: 'innerHTML'});
   }
 
-  // --- Activity map: one constant-sized coloured dot per site ---
+  // --- Activity map: one constant-sized coloured dot per site, with the
+  // shared-species web drawn underneath so the dots sit on top of the
+  // connecting threads. ---
   const map = L.map('map', { scrollWheelZoom: true });
   lockMap(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap',
     maxZoom: 18,
   }).addTo(map);
+
+  // Pane stack: lines below the default markerPane so dots sit on top of
+  // their own connecting threads. Z-index 350 is just under 400 (markers).
+  map.createPane('sharedLines');
+  map.getPane('sharedLines').style.zIndex = 350;
+
+  // Shared-species web. Stroke weight scales with the number of species
+  // both sites have heard in the last 30 days; opacity follows weight so
+  // the strongest links read first without going opaque. Pair list is
+  // pre-filtered server-side to each site's top-2 neighbours.
+  const sharedMax = SITE_PAIRS.reduce((m, p) => Math.max(m, p.shared), 1);
+  SITE_PAIRS.forEach(p => {
+    const w = 1 + 3 * (p.shared / sharedMax);   // 1–4 px
+    const op = 0.25 + 0.35 * (p.shared / sharedMax);
+    L.polyline(
+      [[p.lat_a, p.lon_a], [p.lat_b, p.lon_b]],
+      { color: '#10b981', weight: w, opacity: op, pane: 'sharedLines' },
+    ).bindTooltip(
+      `${p.a} ↔ ${p.b} · ${p.shared} shared species (30 d)`,
+      { sticky: true, className: 'site-label' },
+    ).addTo(map);
+  });
 
   // Constant 14 px dot for every site — colour comes from SOURCE_COLORS
   // (app.py), wired through site.color. Activity/species count live in
@@ -268,11 +323,10 @@
     markers[s.name] = m;
   });
 
-  if (SITES.length > 0) {
-    map.fitBounds(L.featureGroup(Object.values(markers)).getBounds().pad(0.3));
-  } else {
-    map.setView([-24, 31], 6);
-  }
+  // Frame Africa proper rather than the site bounding box. Cape Agulhas (~−35°)
+  // to the Atlas / Tunisian rim (~38°), Senegal (~−18°) to the Horn (~52°).
+  // Fits the network into the larger continental context — the welcome view.
+  map.fitBounds([[-35, -18], [38, 52]]);
 
   // ``ago`` in JS for the popup's per-species age tags. Same buckets as the
   // Jinja macro at the top of the template so server and client agree.
