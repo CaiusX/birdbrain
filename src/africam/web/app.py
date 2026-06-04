@@ -3443,20 +3443,19 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         hour: int = Query(..., ge=0, le=23),
     ) -> HTMLResponse:
         """Hour drill-down for the dashboard's interactive 24-h clock.
-        Returns the right-rail panel for the chosen (source, hour) — what
-        was heard at that hour today in the site's local timezone, weather
-        at that hour, and a play button for the loudest clip from the
-        hour. Mirrors ``/partials/diurnal-popup`` but site-scoped instead
-        of species-scoped."""
+        The dial sums detections in the trailing 24 h bucketed by source-
+        local hour, so the rail does the same: any detection within the
+        last ~25 h whose source-local hour matches is in scope. Hours
+        already past today read as today's slot; hours later than now
+        read as yesterday's. The slot label tells the operator which."""
         _, sources_by_name, _ = _all_sources()
         cfg = sources_by_name.get(source)
         tz_name = cfg.timezone if cfg else "UTC"
         tz = _zone_info(tz_name)
         now_local = datetime.now(tz)
-        # "Today" = the site's local calendar day. Use a 36 h lookback so
-        # late-night hours of the previous local day are still in scope
-        # even when the user clicks in the early morning.
-        since = (now_local - timedelta(hours=36)).astimezone(UTC)
+        # ~25 h lookback (24 + a small buffer) so detections right at the
+        # boundary aren't dropped if the worker is mid-write.
+        since = datetime.now(UTC) - timedelta(hours=25)
 
         with db.session() as s:
             cand = list(s.scalars(
@@ -3476,12 +3475,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 ts = ts.replace(tzinfo=UTC)
             return ts.astimezone(tz).date()
 
+        rows = [r for r in cand if _local_hour_of(r.started_at) == hour]
+        # Label the slot by the date of the most recent matching detection.
+        # For hours later than now-local this will typically resolve to
+        # yesterday; for hours already past today, to today. Empty rails
+        # default to "today" / today's date for display.
         today_local = now_local.date()
-        rows = [
-            r for r in cand
-            if _local_hour_of(r.started_at) == hour
-            and _local_date_of(r.started_at) == today_local
-        ]
+        slot_dates = sorted(
+            {_local_date_of(r.started_at) for r in rows}, reverse=True
+        )
+        slot_date = slot_dates[0] if slot_dates else today_local
+        if slot_date == today_local:
+            slot_label = "today"
+        elif slot_date == today_local - timedelta(days=1):
+            slot_label = "yesterday"
+        else:
+            slot_label = slot_date.strftime("%a %d %b")
         # Top species at this hour, ranked by detection count then by
         # peak confidence within the bucket.
         by_species: dict[str, dict] = {}
@@ -3512,7 +3521,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "source": source,
                 "hour": hour,
                 "tz_name": tz_name,
-                "today_local": today_local,
+                "slot_date": slot_date,
+                "slot_label": slot_label,
                 "n_detections": len(rows),
                 "n_species": len(by_species),
                 "top_species": top_species,
