@@ -504,15 +504,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 # IANA tz so the modal's hour-drill JS can compute "now"
                 # in the site's clock without re-querying the server.
                 "tz": str(tz),
-                # 24h activity clock for this site — used in the click popup
-                # (the map marker itself is a simple coloured dot). Interactive
-                # so clicking centre or any wedge opens the hour-drill modal.
-                "dial_svg": _radial_dial_svg(
-                    hours_arr, highlight=local_now.hour, bands=bands,
-                    compact=True, interactive=True,
-                ),
-                # Full-size interactive variant for the hour-drill modal.
-                # Same data, different rendering knobs.
+                # Full 24-h activity clock for the hour-drill modal. The
+                # map markers themselves are simple coloured dots, so no
+                # second "compact" variant is shipped — saves ~70 KB of
+                # inline SVG per dashboard load.
                 "dial_svg_full": _radial_dial_svg(
                     hours_arr, highlight=local_now.hour, bands=bands,
                     compact=False, interactive=True,
