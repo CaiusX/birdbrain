@@ -3284,11 +3284,21 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             cfg = sources_by_name[source]
             if cfg.lat is not None and cfg.lon is not None:
                 tz_name = cfg.timezone or "UTC"
-                data = _open_meteo_hourly(cfg.lat, cfg.lon, weather_days, tz_name)
-                if data:
-                    weather = _weather_at_hour(data, hour) or None
-                if weather is None and data is None:
-                    weather_note = "Open-Meteo lookup failed."
+                # Local archive first — fast, no network. Falls back to a
+                # live Open-Meteo call only when the weather worker hasn't
+                # populated this coord yet (fresh DB, disabled worker, new
+                # site added between ticks).
+                weather = db.weather_hour_summary(
+                    cfg.lat, cfg.lon, hour, since_dt, until_dt, tz_name,
+                )
+                if weather is None:
+                    data = _open_meteo_hourly(
+                        cfg.lat, cfg.lon, weather_days, tz_name,
+                    )
+                    if data:
+                        weather = _weather_at_hour(data, hour) or None
+                    elif data is None:
+                        weather_note = "Open-Meteo lookup failed."
             else:
                 weather_note = "This source has no lat/lon configured."
         else:
@@ -3506,12 +3516,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # Top clip = highest-confidence row in the bucket with a clip_path.
         top_clip = next((r for r in rows if r.clip_path), None)
 
-        # No per-hour weather lookup: every click would block on an
-        # Open-Meteo HTTP call (5–10 s from this Pi as of June 2026), and
-        # the dial already carries the macroscopic day/night/dawn/dusk
-        # shading for the date — the granular per-hour temp rarely changes
-        # the read. The species-heatmap popup at /partials/diurnal-popup
-        # still surfaces weather where it's been load-bearing.
+        # Weather: pure local SQL read against weather_observations (filled
+        # hourly by the background weather worker). Same window the rail
+        # uses — last 25 h — so a click on hour=14 picks the most recent
+        # 14:00 local observation. Returns None when the worker hasn't
+        # populated this coord yet; the template hides the block.
+        weather = None
+        if cfg and cfg.lat is not None and cfg.lon is not None:
+            weather = db.weather_hour_summary(
+                cfg.lat, cfg.lon, hour, since, datetime.now(UTC), tz_name,
+            )
 
         return TEMPLATES.TemplateResponse(
             request,
@@ -3528,6 +3542,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "species_max_n": species_max_n,
                 "site_color": SOURCE_COLORS.get(source, "#10b981"),
                 "top_clip": top_clip,
+                "weather": weather,
             },
         )
 

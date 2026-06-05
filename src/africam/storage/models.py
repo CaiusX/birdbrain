@@ -267,6 +267,42 @@ class AnomalyEventRow(Base):
     )
 
 
+class WeatherObservationRow(Base):
+    """One row per (location, UTC hour) of observed weather.
+
+    Keyed by coordinate (lat/lon scaled to integer thousandths) rather than
+    source name so a single observation covers every source pointed at the
+    same place, and multi-site sources don't fragment history when they
+    move between sites. Filled by the background weather worker on an
+    hourly cadence from Open-Meteo.
+
+    All metric columns are nullable — Open-Meteo can omit any of them per
+    hour, and we prefer to store the partial row than to drop the whole hour.
+    """
+
+    __tablename__ = "weather_observations"
+
+    # Integer-scaled lat/lon (round(value*1000)) — 3dp ≈ 110 m, matches the
+    # in-process cache key in africam.weather and keeps the primary key
+    # exact and easy to index.
+    lat_e3: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lon_e3: Mapped[int] = mapped_column(Integer, primary_key=True)
+    observed_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True
+    )
+    temp_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    humidity_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    precipitation_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wind_kph: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cloud_cover_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wmo_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_weather_time", "observed_at_utc"),
+    )
+
+
 class SourceStateRow(Base):
     """Mutable per-source runtime state. The pipeline reads it on every chunk
     and the web app writes manual overrides to it. Used to coordinate the

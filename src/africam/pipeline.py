@@ -19,6 +19,7 @@ from africam.site_ocr import SiteOcrWatcher
 from africam.site_resolver import SiteResolver
 from africam.sites import Site, load_sites
 from africam.storage import Database, RuntimeSourceRow
+from africam.weather_worker import start_weather_worker
 
 log = get_logger(__name__)
 
@@ -396,6 +397,10 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
     # back into the supervisor loop. Sources passed through so the site-note
     # tick knows which source names are valid candidates.
     start_notes_worker(db, app, static_sources)
+
+    # Background hourly weather archiver. Fills weather_observations for
+    # every (source ∪ site) coord so dashboard reads stay local.
+    start_weather_worker(db, app, static_sources, sites)
 
     try:
         while True:

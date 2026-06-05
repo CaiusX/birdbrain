@@ -1,7 +1,7 @@
 {# Right-rail of the dashboard's hour-drill modal. Loaded as a partial
    from /partials/site-hour-detail?source=<name>&hour=<H>. Self-contained:
    no <html>/<body>, just the panel content. #}
-{% from "_macros.html" import species_link %}
+{% from "_macros.html" import species_link, weather_icon %}
 
 <div class="px-5 py-4">
   <div class="flex items-baseline justify-between gap-3 flex-wrap">
@@ -70,6 +70,20 @@
   {% else %}
     <div class="mt-4 text-sm text-zinc-500 italic">
       No detections at this hour in the last 24 hours.
+    </div>
+  {% endif %}
+
+  {% if weather %}
+    {# Pulled from weather_observations (filled hourly by the weather
+       worker). Pure local SQL — no Open-Meteo on the click path. #}
+    <div class="mt-4 px-3 py-2 rounded border border-zinc-800 bg-zinc-900/60 flex items-center gap-3">
+      <span class="text-zinc-200">{{ weather_icon(weather.icon, size=28) }}</span>
+      <div class="min-w-0">
+        <div class="text-base tabular-nums text-zinc-100 leading-none">
+          {% if weather.temp_mean is not none %}{{ "%.0f"|format(weather.temp_mean) }}°{% else %}—{% endif %}
+        </div>
+        <div class="text-[11px] text-zinc-500 mt-0.5">{{ weather.label or "—" }}</div>
+      </div>
     </div>
   {% endif %}
 

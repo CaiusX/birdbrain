@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Integer, create_engine, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -20,6 +21,7 @@ from africam.storage.models import (
     SourceStateRow,
     SpeciesNoteRow,
     SpeciesSiteNoteRow,
+    WeatherObservationRow,
     WorkerDowntimeRow,
     WorkerHeartbeatRow,
 )
@@ -1893,3 +1895,159 @@ class Database:
             return s.scalar(
                 select(DailyBriefRow).order_by(DailyBriefRow.date_utc.desc()).limit(1)
             )
+
+    # --- Weather archive (filled by the background weather worker) ---
+
+    @staticmethod
+    def _coord_key(lat: float, lon: float) -> tuple[int, int]:
+        return int(round(lat * 1000)), int(round(lon * 1000))
+
+    def upsert_weather_observations(
+        self,
+        lat: float,
+        lon: float,
+        rows: Iterable[dict],
+    ) -> tuple[int, int]:
+        """Bulk-upsert a batch of hourly observations for one coordinate.
+
+        ``rows`` is an iterable of dicts shaped like::
+
+            {
+                "observed_at_utc": datetime (tz-aware),
+                "temp_c": float | None,
+                "humidity_pct": float | None,
+                "precipitation_mm": float | None,
+                "wind_kph": float | None,
+                "cloud_cover_pct": float | None,
+                "wmo_code": int | None,
+            }
+
+        Returns ``(inserted, revised)`` so the worker can log a meaningful
+        tick summary. A revised row is one whose values changed since the
+        last fetch (Open-Meteo refines very recent hours as data arrives).
+        """
+        lat_e3, lon_e3 = self._coord_key(lat, lon)
+        now = datetime.now(UTC)
+        inserted = revised = 0
+        with self._Session() as s, s.begin():
+            for r in rows:
+                obs_at = r["observed_at_utc"]
+                if obs_at.tzinfo is None:
+                    obs_at = obs_at.replace(tzinfo=UTC)
+                pk = (lat_e3, lon_e3, obs_at)
+                existing = s.get(WeatherObservationRow, pk)
+                if existing is None:
+                    s.add(WeatherObservationRow(
+                        lat_e3=lat_e3,
+                        lon_e3=lon_e3,
+                        observed_at_utc=obs_at,
+                        temp_c=r.get("temp_c"),
+                        humidity_pct=r.get("humidity_pct"),
+                        precipitation_mm=r.get("precipitation_mm"),
+                        wind_kph=r.get("wind_kph"),
+                        cloud_cover_pct=r.get("cloud_cover_pct"),
+                        wmo_code=r.get("wmo_code"),
+                        fetched_at=now,
+                    ))
+                    inserted += 1
+                else:
+                    changed = (
+                        existing.temp_c != r.get("temp_c")
+                        or existing.humidity_pct != r.get("humidity_pct")
+                        or existing.precipitation_mm != r.get("precipitation_mm")
+                        or existing.wind_kph != r.get("wind_kph")
+                        or existing.cloud_cover_pct != r.get("cloud_cover_pct")
+                        or existing.wmo_code != r.get("wmo_code")
+                    )
+                    if changed:
+                        existing.temp_c = r.get("temp_c")
+                        existing.humidity_pct = r.get("humidity_pct")
+                        existing.precipitation_mm = r.get("precipitation_mm")
+                        existing.wind_kph = r.get("wind_kph")
+                        existing.cloud_cover_pct = r.get("cloud_cover_pct")
+                        existing.wmo_code = r.get("wmo_code")
+                        existing.fetched_at = now
+                        revised += 1
+        return inserted, revised
+
+    def latest_weather_observation_at(
+        self, lat: float, lon: float
+    ) -> WeatherObservationRow | None:
+        """Most recently observed hour for this coord — used to decide whether
+        a backfill is still needed or a steady-state tick suffices."""
+        lat_e3, lon_e3 = self._coord_key(lat, lon)
+        with self._Session() as s:
+            return s.scalar(
+                select(WeatherObservationRow)
+                .where(WeatherObservationRow.lat_e3 == lat_e3)
+                .where(WeatherObservationRow.lon_e3 == lon_e3)
+                .order_by(WeatherObservationRow.observed_at_utc.desc())
+                .limit(1)
+            )
+
+    def weather_hour_summary(
+        self,
+        lat: float,
+        lon: float,
+        local_hour: int,
+        since: datetime,
+        until: datetime,
+        tz_name: str,
+    ) -> dict | None:
+        """Aggregate stored weather for ``local_hour`` (0-23) in ``tz_name``
+        across [since, until]. Returns the same shape as
+        ``africam.weather.weather_at_hour`` so the existing templates render
+        unchanged: ``{n_samples, temp_mean, wmo_code, icon, label}``.
+        Returns None when no rows match — caller should hide the block.
+        """
+        from africam.weather import wmo_summary
+
+        lat_e3, lon_e3 = self._coord_key(lat, lon)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=UTC)
+        try:
+            tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            tz = UTC  # type: ignore[assignment]
+
+        with self._Session() as s:
+            rows = list(s.scalars(
+                select(WeatherObservationRow)
+                .where(WeatherObservationRow.lat_e3 == lat_e3)
+                .where(WeatherObservationRow.lon_e3 == lon_e3)
+                .where(WeatherObservationRow.observed_at_utc >= since)
+                .where(WeatherObservationRow.observed_at_utc < until)
+            ))
+
+        temps: list[float] = []
+        codes: list[int] = []
+        n = 0
+        for r in rows:
+            ts = r.observed_at_utc
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts.astimezone(tz).hour != local_hour:
+                continue
+            n += 1
+            if r.temp_c is not None:
+                temps.append(r.temp_c)
+            if r.wmo_code is not None:
+                codes.append(r.wmo_code)
+        if n == 0:
+            return None
+        modal: int | None = None
+        if codes:
+            counts: dict[int, int] = {}
+            for c in codes:
+                counts[c] = counts.get(c, 0) + 1
+            modal = max(counts, key=counts.get)
+        icon, label = wmo_summary(modal)
+        return {
+            "n_samples": n,
+            "temp_mean": (sum(temps) / len(temps)) if temps else None,
+            "wmo_code": modal,
+            "icon": icon,
+            "label": label,
+        }

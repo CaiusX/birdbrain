@@ -112,6 +112,17 @@ class AppConfig(BaseSettings):
     # outages but doesn't ask Claude to write briefs about ancient history.
     notes_brief_lookback_days: int = 3
 
+    # Background hourly weather archiver. Walks the union of live sources
+    # and sites.toml every weather_tick_seconds, pulls hourly observations
+    # from Open-Meteo, and upserts them into weather_observations. A fresh
+    # coord gets a backfill (weather_backfill_days, capped by Open-Meteo's
+    # 92-day forecast-endpoint window); subsequent ticks revise only the
+    # last ~48 h. Lets the dashboard read weather as a pure local SQL
+    # lookup instead of blocking UI requests on the upstream API.
+    weather_archive_enabled: bool = True
+    weather_tick_seconds: int = 3600
+    weather_backfill_days: int = 92
+
 
 def load_sources(path: Path) -> list[SourceConfig]:
     if not path.exists():
