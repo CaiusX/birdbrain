@@ -1,81 +1,120 @@
 {% extends "base.html" %}
-{% block title %}Africam · dashboard{% endblock %}
+{% from "_macros.html" import brief_body %}
+{% block title %}BirdBrain · dashboard{% endblock %}
 
 {% block head_extra %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<style>
+  /* Dashboard map markers are simple coloured dots (one per site); the
+     activity clockface appears in the click popup. */
+  .leaflet-marker-icon.site-dot { background: transparent; border: none; }
+  .site-dot svg { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); cursor: pointer; }
+  /* The expanded clockface still uses .map-dial inside the popup. */
+  .map-dial svg { width: 100% !important; height: 100% !important; max-width: none !important; }
+  .map-dial { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); }
+</style>
 {% endblock %}
 
+{%- macro ago(s) -%}
+  {%- if s is none -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h
+  {%- else -%}{{ (s // 86400)|int }}d
+  {%- endif -%}
+{%- endmacro -%}
+
 {% block content %}
-<section class="mb-6">
-  <div class="flex flex-wrap items-center gap-3 mb-4">
-    <label for="active-source" class="text-sm uppercase tracking-wider text-zinc-400">Active source</label>
-    <select id="active-source"
-            class="bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-sm">
-      {% for t in tiles %}
-        <option value="{{ t.name }}">{{ t.name }} · {{ t.kind }}{% if t.multisite %} · multisite{% endif %}</option>
-      {% endfor %}
-      <option value="__all__">— all sources (no video) —</option>
-    </select>
-    <a id="active-open" href="#" target="_blank" rel="noopener"
-       class="text-xs text-zinc-400 hover:text-zinc-200">↗ open original</a>
+{% set st = front_stats %}
+
+{# ---- 1. headline stats ---- #}
+<section class="grid grid-cols-2 md:grid-cols-4 gap-px bg-zinc-800/50 rounded-xl overflow-hidden border border-zinc-800 mb-6">
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">species · 24h</div>
+    <div class="text-2xl font-semibold tabular-nums text-emerald-300">{{ st.species_24h }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">detections · 24h</div>
+    <div class="text-2xl font-semibold tabular-nums">{{ "{:,}".format(st.det_24h) }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">cams live</div>
+    {% set wc = 'text-emerald-300' if st.cams_live == st.cams_total and st.cams_total > 0 else ('text-rose-300' if st.cams_live == 0 else 'text-amber-300') %}
+    <div class="text-2xl font-semibold tabular-nums {{ wc }}">{{ st.cams_live }}/{{ st.cams_total }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">last detection</div>
+    {% set dc = 'text-zinc-600' if st.last_age_s is none else ('text-emerald-300' if st.last_age_s < 900 else ('text-amber-300' if st.last_age_s < 3600 else 'text-rose-300')) %}
+    <div class="text-2xl font-semibold tabular-nums {{ dc }}">{{ ago(st.last_age_s) }}{% if st.last_age_s is not none %}<span class="text-sm text-zinc-500"> ago</span>{% endif %}</div>
+  </div>
+</section>
+
+{# ---- 2. activity map + intro narrative (with muted logo background) ---- #}
+<section class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
+    <div class="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
+      <span class="text-sm uppercase tracking-wider text-zinc-400">Sites</span>
+      <span class="text-xs text-zinc-500">hover a dot · lines = shared species (30 d)</span>
+    </div>
+    <div id="map" class="w-full" style="height: 460px;"></div>
   </div>
 
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-    <div id="video-panel" class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div class="aspect-video bg-black">
-        <iframe id="active-video"
-                class="w-full h-full"
-                src="about:blank"
-                frameborder="0"
-                allow="autoplay; encrypted-media; picture-in-picture"
-                allowfullscreen
-                referrerpolicy="strict-origin-when-cross-origin"></iframe>
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
+    <div class="px-6 py-6 flex flex-col h-full">
+      {# Brand lockup: mark + wordmark, the leaf-tip dots in the logo echo the
+         site-coloured dots on the map next door. Subtitle below the rule
+         ties the brand to what the page is doing. #}
+      <div class="flex items-center gap-3">
+        <img src="/static/birdbrain-logo.svg" alt=""
+             class="w-9 h-9 shrink-0" aria-hidden="true">
+        <span class="text-2xl font-semibold tracking-tight text-zinc-100">BirdBrain</span>
       </div>
-      <div id="active-site-panel"
-           class="border-t border-zinc-800"
-           hx-trigger="every 30s"
-           hx-swap="innerHTML">
-      </div>
-    </div>
-
-    <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div class="px-4 py-2 border-b border-zinc-800 flex items-center justify-between">
-        <span class="text-sm uppercase tracking-wider text-zinc-400">Sites</span>
-        <span class="text-xs text-zinc-500">click a pin to set the active source's site</span>
-      </div>
-      <div id="map" class="w-full" style="height: 360px;"></div>
+      <div class="mt-4 mb-4 border-t border-zinc-800"></div>
+      <h2 class="text-base font-medium text-zinc-200 leading-snug">
+        Listening to {{ sites_activity | length }} African wildlife cameras
+      </h2>
+      <p class="mt-3 text-sm text-zinc-300 leading-relaxed max-w-md">
+        BirdBrain pulls the audio from
+        <a href="https://africam.com/" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">Africam</a>
+        and <a href="https://explore.org/" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">explore.org</a>
+        live cams across Southern and East Africa, runs
+        <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">BirdNET</a>
+        on rolling three-second windows, and logs what it hears.
+      </p>
+      <p class="mt-3 text-sm text-zinc-300 leading-relaxed max-w-md">
+        Each dot on the map is a camera. The threads between them weigh
+        species heard at both sites over the last 30 days — a rough read
+        on which cameras share their soundscape. Click a dot for that
+        site's 24-hour activity clock and most-recently-heard species.
+      </p>
+      <p class="mt-auto pt-4 text-xs text-zinc-500">
+        Hosted on a Raspberry Pi 5. Non-commercial; BirdNET models
+        <a href="/about" class="text-zinc-400 hover:text-zinc-200">CC&nbsp;BY-NC-SA&nbsp;4.0</a>.
+      </p>
     </div>
   </div>
 </section>
 
-<section class="bg-zinc-900 border border-zinc-800 rounded-xl p-5 mb-6">
-  <div class="flex items-baseline justify-between mb-3">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Top species · last hour</h2>
-    <a href="/admin" class="text-xs text-zinc-500 hover:text-zinc-300">manage sources →</a>
-  </div>
-  {% if top_recent %}
-    <ul class="divide-y divide-zinc-800">
-      {% for r in top_recent %}
-        <li class="py-2 flex items-baseline justify-between">
-          <div>
-            <span class="font-medium">{{ r.common_name }}</span>
-            <span class="text-zinc-500 italic text-sm ml-2">{{ r.scientific_name }}</span>
-          </div>
-          <div class="text-sm tabular-nums">
-            <span class="text-zinc-400 mr-3">max {{ "%.2f"|format(r.max_conf) }}</span>
-            <span class="font-semibold">{{ r.n }}</span>
-          </div>
-        </li>
-      {% endfor %}
-    </ul>
-  {% else %}
-    <p class="text-zinc-500 text-sm">No detections in the last hour.</p>
-  {% endif %}
+{% if latest_brief %}
+<section class="mb-6 bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4">
+  <header class="flex items-baseline justify-between flex-wrap gap-2 mb-2">
+    <h2 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">
+      {% if latest_brief.date_utc == (today_utc | default(None)) %}Today's{% else %}Yesterday's{% endif %} soundscape
+      <span class="text-zinc-500 normal-case font-normal ml-2 tabular-nums text-xs">{{ latest_brief.date_utc.strftime('%A, %d %b %Y') }} UTC</span>
+    </h2>
+    <a href="/briefs" class="text-xs text-emerald-300 hover:text-emerald-200">archive →</a>
+  </header>
+  {{ brief_body(latest_brief.brief_text | parse_brief) }}
 </section>
+{% endif %}
 
+{# ---- 3. live detections feed ---- #}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex flex-col gap-2">
     <div class="flex items-center justify-between flex-wrap gap-2">
@@ -83,7 +122,7 @@
         Recent detections · <span id="rows-source-label">all</span>
       </h2>
       <div id="source-chips" class="flex items-center gap-1 flex-wrap text-xs">
-        <span class="text-zinc-500 mr-1">sources</span>
+        <span class="text-zinc-500 mr-1">sites</span>
         <!-- chips rendered by JS from TILES -->
       </div>
     </div>
@@ -134,21 +173,71 @@
 
 {% include "_spectrogram_modal.html" %}
 
+{# ---- Hour-drill modal: opens when the clock in a map popup is clicked.
+       Big dial on the left, hour-detail side rail on the right. The rail
+       swaps via HTMX whenever a wedge is clicked (in either dial). ---- #}
+{# z-[1000] lifts the modal above every Leaflet pane (markers 600, tooltips
+   650, popups 700, controls 800) so the world map sits cleanly behind the
+   backdrop instead of poking through it. #}
+<div id="hour-drill-modal" class="hidden fixed inset-0 z-[1000]">
+  <div data-hour-drill-backdrop class="absolute inset-0 bg-black/70"></div>
+  <div class="absolute inset-0 flex items-center justify-center p-4">
+    <div class="relative bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl
+                w-full max-w-5xl max-h-[90vh] overflow-auto"
+         data-modal-source="" data-modal-hour="">
+      <button type="button" data-hour-drill-close
+              class="absolute top-3 right-3 text-zinc-400 hover:text-zinc-100
+                     text-xl leading-none px-2 py-0.5 z-10"
+              aria-label="Close">×</button>
+      <div class="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-0">
+        <div class="p-5 flex flex-col">
+          <div class="flex items-baseline justify-between gap-3 flex-wrap mb-1">
+            <h3 id="hour-drill-title"
+                class="text-base font-semibold text-zinc-100"></h3>
+            <span class="text-xs text-zinc-500">click any hour to inspect</span>
+          </div>
+          {# Recent-species strip carries the popup's old preview payload
+             so the modal-direct flow doesn't lose context. #}
+          <div id="hour-drill-recent"
+               class="text-xs text-zinc-400 mb-3 leading-relaxed"></div>
+          <div id="hour-drill-dial"
+               class="map-dial mx-auto w-full max-w-[460px] aspect-square">
+          </div>
+          <div class="mt-3 text-center">
+            <a id="hour-drill-site-link"
+               class="text-xs text-emerald-300 hover:text-emerald-200"
+               href="#">open site page · watch live →</a>
+          </div>
+        </div>
+        <div id="hour-drill-rail"
+             class="md:border-l border-t md:border-t-0 border-zinc-800
+                    bg-zinc-900/40 min-h-[200px]">
+          <div class="px-5 py-6 text-sm text-zinc-500 italic">
+            Loading…
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
   const TILES = {{ tiles_json | tojson }};
-  const SITES = {{ sites_json | tojson }};
-  const TILE_BY_NAME = Object.fromEntries(TILES.map(t => [t.name, t]));
+  const SITES = {{ sites_activity | tojson }};
+  const SITE_PAIRS = {{ site_pairs | tojson }};
 
-  const ACTIVE_KEY  = 'africam.activeSource';
   const GROUP_KEY   = 'africam.groupMinutes';
   const LAST_KEY    = 'africam.lastMinutes';
   const TOPSP_KEY   = 'africam.topSpecies';
   const SOURCES_KEY = 'africam.detectionSources';
 
-  // --- Detection-source multi-select chips ---
+  function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
 
-  // localStorage: null = "all sources" (default); otherwise an array of
-  // selected source names. Stored as JSON.
+  // --- Detection-source multi-select chips ---
   function loadSourceFilter() {
     const raw = localStorage.getItem(SOURCES_KEY);
     if (!raw) return null;
@@ -163,13 +252,11 @@
     const all = TILES.map((t) => t.name);
     const f = loadSourceFilter();
     if (f === null) return all;
-    // Drop anything not in the current TILES (a source could have been removed).
     return f.filter((n) => all.includes(n));
   }
 
   function renderSourceChips() {
     const wrap = document.getElementById('source-chips');
-    // Strip everything after the "sources" label.
     while (wrap.children.length > 1) wrap.removeChild(wrap.lastChild);
     const all = TILES.map((t) => t.name);
     const sel = new Set(selectedSources());
@@ -192,7 +279,6 @@
       });
       wrap.appendChild(chip);
     }
-    // "all" reset chip — only useful when the selection differs from default.
     if (sel.size !== all.length) {
       const reset = document.createElement('button');
       reset.type = 'button';
@@ -226,162 +312,103 @@
     const sel = selectedSources();
     const all = TILES.map((t) => t.name);
     let label;
-    if (sel.length === 0)         label = '(no sources)';
-    else if (sel.length === all.length) label = 'all sources';
-    else if (sel.length === 1)    label = sel[0];
-    else                          label = sel.length + ' sources';
+    if (sel.length === 0)               label = '(no sites)';
+    else if (sel.length === all.length) label = 'all sites';
+    else if (sel.length === 1)          label = sel[0];
+    else                                label = sel.length + ' sites';
     document.getElementById('rows-source-label').textContent = label;
     htmx.process(list);
     htmx.ajax('GET', list.getAttribute('hx-get'), {target: list, swap: 'innerHTML'});
   }
 
-  // --- Map setup ---
+  // --- Activity map: one constant-sized coloured dot per site, with the
+  // shared-species web drawn underneath so the dots sit on top of the
+  // connecting threads. ---
   const map = L.map('map', { scrollWheelZoom: true });
+  lockMap(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap',
     maxZoom: 18,
   }).addTo(map);
 
-  const dotIcon = (color) => L.divIcon({
-    className: 'site-pin',
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};` +
-          `border:2px solid #18181b;box-shadow:0 0 0 1px ${color};"></div>`,
-    iconSize: [14, 14],
-    iconAnchor: [7, 7],
-  });
-  const COLOR_DEFAULT = '#71717a';
-  const COLOR_ACTIVE  = '#10b981';
+  // Pane stack: lines below the default markerPane so dots sit on top of
+  // their own connecting threads. Z-index 350 is just under 400 (markers).
+  map.createPane('sharedLines');
+  map.getPane('sharedLines').style.zIndex = 350;
 
+  // Shared-species web. Stroke weight scales with the number of species
+  // both sites have heard in the last 30 days; opacity follows weight so
+  // the strongest links read first without going opaque. Pair list is
+  // pre-filtered server-side to each site's top-2 neighbours.
+  const sharedMax = SITE_PAIRS.reduce((m, p) => Math.max(m, p.shared), 1);
+  SITE_PAIRS.forEach(p => {
+    const w = 1 + 3 * (p.shared / sharedMax);   // 1–4 px
+    const op = 0.25 + 0.35 * (p.shared / sharedMax);
+    L.polyline(
+      [[p.lat_a, p.lon_a], [p.lat_b, p.lon_b]],
+      { color: '#10b981', weight: w, opacity: op, pane: 'sharedLines' },
+    ).bindTooltip(
+      `${p.a} ↔ ${p.b} · ${p.shared} shared species (30 d)`,
+      { sticky: true, className: 'site-label' },
+    ).addTo(map);
+  });
+
+  // Constant 14 px dot for every site — colour comes from SOURCE_COLORS
+  // (app.py), wired through site.color. Activity/species count live in
+  // the click popup so the map itself stays calm.
+  const DOT_PX = 14;
   const markers = {};
   SITES.forEach(s => {
-    const m = L.marker([s.lat, s.lon], { icon: dotIcon(COLOR_DEFAULT) }).addTo(map);
-    m.bindPopup(() => buildSitePopup(s));
-    m.bindTooltip(s.name, {
-      permanent: true,
-      direction: 'right',
-      offset: [10, 0],
-      className: 'site-label',
+    const icon = L.divIcon({
+      className: 'site-dot',
+      html: `<svg width="${DOT_PX}" height="${DOT_PX}" viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">`
+          + `<circle cx="7" cy="7" r="5.5" fill="${s.color}" stroke="#fafafa" stroke-width="1.5"/>`
+          + `</svg>`,
+      iconSize: [DOT_PX, DOT_PX],
+      iconAnchor: [DOT_PX / 2, DOT_PX / 2],
     });
+    const m = L.marker([s.lat, s.lon], { icon }).addTo(map);
+    m.bindTooltip(`${s.name} · ${s.species_24h} species (24h)`, {
+      permanent: false, direction: 'top', offset: [0, -4], className: 'site-label',
+    });
+    // Dot click opens the hour-drill modal directly — no intermediate
+    // popup. Avoids two problems: Leaflet popups near the map's edge get
+    // clipped by the map container (a 460 px box), and enabling autoPan
+    // to fix that drifts the welcome Africa-fit view under the user. The
+    // modal is fullscreen so neither happens.
+    m.on('click', () => openDrill(s, currentHourFor(s)));
     markers[s.name] = m;
   });
 
-  if (SITES.length > 0) {
-    const group = L.featureGroup(Object.values(markers));
-    map.fitBounds(group.getBounds().pad(0.25));
-  } else {
-    map.setView([-24, 31], 6);
+  // Frame Africa proper rather than the site bounding box. Cape Agulhas (~−35°)
+  // to the Atlas / Tunisian rim (~38°), Senegal (~−18°) to the Horn (~52°).
+  // Fits the network into the larger continental context — the welcome view.
+  map.fitBounds([[-35, -18], [38, 52]]);
+
+  // ``ago`` in JS for the popup's per-species age tags. Same buckets as the
+  // Jinja macro at the top of the template so server and client agree.
+  function agoJs(s) {
+    if (s == null) return '—';
+    if (s < 90) return `${Math.floor(s)}s`;
+    if (s < 5400) return `${Math.floor(s / 60)}m`;
+    if (s < 172800) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
   }
 
-  function buildSitePopup(site) {
-    const active = currentActive();
-    const tile = TILE_BY_NAME[active];
-    const wrap = document.createElement('div');
-    wrap.innerHTML = `<strong>${escapeHtml(site.name)}</strong>
-      <div style="color:#71717a;margin-top:2px;">${site.lat.toFixed(3)}, ${site.lon.toFixed(3)}</div>`;
-    if (tile && tile.multisite) {
-      const btn = document.createElement('button');
-      btn.textContent = `set as current for ${active}`;
-      btn.style.cssText =
-        'margin-top:8px;padding:4px 10px;background:#10b981;color:#fff;' +
-        'border:none;border-radius:4px;font-size:12px;cursor:pointer;';
-      btn.onclick = (e) => {
-        e.preventDefault();
-        overrideSite(active, site.name).then(() => map.closePopup());
-      };
-      wrap.appendChild(btn);
-    } else if (tile) {
-      const note = document.createElement('div');
-      note.style.cssText = 'margin-top:8px;color:#a1a1aa;font-size:11px;';
-      note.textContent = `${active} is not a multisite source.`;
-      wrap.appendChild(note);
+  // Recent-species summary HTML for the modal's left-pane header strip.
+  // Mirrors the per-row formatting the dropped popup used so the data
+  // dropdown is preserved in the new direct-to-modal flow.
+  function recentSpeciesHtml(site) {
+    if (!site.recent || !site.recent.length) {
+      return '<div style="color:#52525b;font-size:12px;">no detections in 24h</div>';
     }
-    return wrap;
+    return site.recent.map(sp =>
+      `<a href="/species/${encodeURIComponent(sp.sci)}" `
+      + `style="color:#e4e4e7;text-decoration:none;">${escapeHtml(sp.common)}</a>`
+      + ` <span style="color:#71717a;font-variant-numeric:tabular-nums;">`
+      + agoJs(sp.age_s) + `</span>`
+    ).join('<span style="color:#3f3f46; margin:0 6px;">·</span>');
   }
-
-  async function overrideSite(source, site) {
-    const body = new URLSearchParams({ site, ttl_minutes: '60' });
-    const r = await fetch(`/api/sources/${encodeURIComponent(source)}/site`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-    if (!r.ok) {
-      console.error('override failed', r.status);
-      return;
-    }
-    refreshSitePanel();
-    highlightActiveSite();
-  }
-
-  // --- Active source switching ---
-
-  function currentActive() {
-    return document.getElementById('active-source').value;
-  }
-
-  function setActive(name) {
-    // Video / map / site-panel only. Detection-list filtering lives in the
-    // source chips below the rows header.
-    const dropdown = document.getElementById('active-source');
-    if (dropdown.value !== name) dropdown.value = name;
-    localStorage.setItem(ACTIVE_KEY, name);
-
-    const video = document.getElementById('active-video');
-    const sitePanel = document.getElementById('active-site-panel');
-    const openLink = document.getElementById('active-open');
-
-    if (name === '__all__') {
-      video.src = 'about:blank';
-      sitePanel.innerHTML = '';
-      sitePanel.removeAttribute('hx-get');
-      openLink.href = '#';
-      openLink.style.visibility = 'hidden';
-    } else {
-      const tile = TILE_BY_NAME[name];
-      video.src = tile && tile.video_id
-        ? `https://www.youtube.com/embed/${tile.video_id}?autoplay=1&mute=1&controls=1&rel=0`
-        : 'about:blank';
-      openLink.href = tile ? tile.url : '#';
-      openLink.style.visibility = tile ? 'visible' : 'hidden';
-
-      if (tile && tile.multisite) {
-        sitePanel.setAttribute('hx-get', `/partials/site/${encodeURIComponent(name)}`);
-        htmx.ajax('GET', `/partials/site/${encodeURIComponent(name)}`, {target: sitePanel, swap: 'innerHTML'});
-      } else {
-        sitePanel.innerHTML = '';
-        sitePanel.removeAttribute('hx-get');
-      }
-    }
-    highlightActiveSite();
-  }
-
-  function refreshSitePanel() {
-    const sitePanel = document.getElementById('active-site-panel');
-    const url = sitePanel.getAttribute('hx-get');
-    if (url) htmx.ajax('GET', url, {target: sitePanel, swap: 'innerHTML'});
-  }
-
-  async function highlightActiveSite() {
-    const active = currentActive();
-    Object.values(markers).forEach(m => m.setIcon(dotIcon(COLOR_DEFAULT)));
-    if (active === '__all__' || !TILE_BY_NAME[active]?.multisite) return;
-    try {
-      const r = await fetch(`/api/sources/${encodeURIComponent(active)}/site`);
-      if (!r.ok) return;
-      const data = await r.json();
-      if (data.site && markers[data.site]) {
-        markers[data.site].setIcon(dotIcon(COLOR_ACTIVE));
-      }
-    } catch (e) { /* swallow */ }
-  }
-
-  function escapeHtml(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-  }
-
-  document.getElementById('active-source').addEventListener('change', (e) => setActive(e.target.value));
 
   function rebindFilter(elemId, storageKey) {
     document.getElementById(elemId).addEventListener('change', (e) => {
@@ -407,12 +434,133 @@
     restoreFilter('top-species',  TOPSP_KEY);
     renderSourceChips();
     refreshDetections();
-    const saved = localStorage.getItem(ACTIVE_KEY);
-    const dropdown = document.getElementById('active-source');
-    const valid = saved && dropdown.querySelector(`option[value="${CSS.escape(saved)}"]`);
-    setActive(valid ? saved : dropdown.value);
-    // Keep map highlight fresh in case OCR or another client updates the override.
-    setInterval(highlightActiveSite, 30_000);
+  });
+
+  // --- Hour-drill modal ---------------------------------------------------
+  // The dial in the map popup and the bigger dial inside the modal are both
+  // rendered with `interactive=True` in app.py, so every hour wedge carries
+  // a `class="dial-wedge" data-hour="N"` handle and the centre hub carries
+  // `data-dial-centre`. Click delegation routes both to the same opener.
+
+  const SITES_BY_NAME = Object.fromEntries(SITES.map(s => [s.name, s]));
+  const drillModal = document.getElementById('hour-drill-modal');
+  const drillPanel = drillModal.querySelector('[data-modal-source]');
+  const drillDial  = document.getElementById('hour-drill-dial');
+  const drillRail  = document.getElementById('hour-drill-rail');
+  const drillTitle = document.getElementById('hour-drill-title');
+
+  function currentHourFor(site) {
+    if (!site || !site.tz) return new Date().getHours();
+    try {
+      const f = new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit', hour12: false, timeZone: site.tz,
+      });
+      return parseInt(f.format(new Date()), 10) || 0;
+    } catch (_e) { return 0; }
+  }
+
+  function findSiteFromDialEl(el) {
+    // Popup dial: walk up to the leaflet-popup-content-wrapper, then read
+    // its bound site via the popup builder's data marker. Simpler: each
+    // dial element is attached either to a map popup (which has a Leaflet
+    // marker via _source) or to the drill modal itself.
+    const modal = el.closest('#hour-drill-modal');
+    if (modal) {
+      const name = drillPanel.dataset.modalSource;
+      return SITES_BY_NAME[name] || null;
+    }
+    const popupEl = el.closest('.leaflet-popup');
+    if (!popupEl) return null;
+    // Match popup back to its site by name text in the <strong> header.
+    const header = popupEl.querySelector('strong');
+    if (!header) return null;
+    return SITES_BY_NAME[header.textContent.trim()] || null;
+  }
+
+  function refreshFocus(hour) {
+    drillDial.querySelectorAll('.dial-wedge--focus')
+      .forEach(p => p.classList.remove('dial-wedge--focus'));
+    const w = drillDial.querySelector(`.dial-wedge[data-hour="${hour}"]`);
+    if (w) {
+      w.classList.add('dial-wedge--focus');
+      w.setAttribute('stroke', '#10b981');
+      w.setAttribute('stroke-width', '2');
+    }
+  }
+
+  function loadHourRail(source, hour) {
+    drillPanel.dataset.modalSource = source;
+    drillPanel.dataset.modalHour = String(hour);
+    const url = `/partials/site-hour-detail?source=${encodeURIComponent(source)}`
+              + `&hour=${hour}`;
+    fetch(url, { headers: { 'HX-Request': 'true' } })
+      .then(r => r.text())
+      .then(html => { drillRail.innerHTML = html; })
+      .catch(() => {
+        drillRail.innerHTML =
+          '<div class="px-5 py-6 text-sm text-rose-300">Failed to load hour detail.</div>';
+      });
+  }
+
+  function openDrill(site, hour) {
+    if (!site || !site.dial_svg_full) return;
+    // Belt-and-braces close any popup, even though dot-click no longer
+    // opens one — leftover from prior interaction or future caller.
+    if (typeof map !== 'undefined' && map && map.closePopup) {
+      map.closePopup();
+    }
+    drillTitle.textContent =
+      `${site.name} · ${site.species_24h} species in 24 h`;
+    document.getElementById('hour-drill-recent').innerHTML =
+      `<span class="text-zinc-500">recent:</span> ` + recentSpeciesHtml(site);
+    document.getElementById('hour-drill-site-link').href =
+      `/site/${encodeURIComponent(site.name)}`;
+    drillDial.innerHTML = site.dial_svg_full;
+    drillModal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    refreshFocus(hour);
+    loadHourRail(site.name, hour);
+  }
+
+  function closeDrill() {
+    drillModal.classList.add('hidden');
+    document.body.style.overflow = '';
+    drillDial.innerHTML = '';
+    drillPanel.dataset.modalSource = '';
+    drillPanel.dataset.modalHour = '';
+  }
+
+  // Click delegation: handles both the popup dial (which opens the modal)
+  // and the modal dial (which re-targets the side rail). Catches wedge
+  // clicks and centre-hub clicks separately.
+  document.addEventListener('click', (e) => {
+    const wedge = e.target.closest('.dial-wedge');
+    const centre = e.target.closest('[data-dial-centre]');
+    if (!wedge && !centre) return;
+    const dialEl = e.target.closest('.map-dial');
+    if (!dialEl) return;
+    const site = findSiteFromDialEl(e.target);
+    if (!site) return;
+    const inModal = !!dialEl.closest('#hour-drill-modal');
+    const hour = wedge
+      ? parseInt(wedge.dataset.hour, 10)
+      : currentHourFor(site);
+    if (inModal) {
+      refreshFocus(hour);
+      loadHourRail(site.name, hour);
+    } else {
+      openDrill(site, hour);
+    }
+  });
+
+  drillModal.querySelector('[data-hour-drill-backdrop]')
+    .addEventListener('click', closeDrill);
+  drillModal.querySelector('[data-hour-drill-close]')
+    .addEventListener('click', closeDrill);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !drillModal.classList.contains('hidden')) {
+      closeDrill();
+    }
   });
 </script>
 {% endblock %}

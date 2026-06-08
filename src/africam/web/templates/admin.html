@@ -1,18 +1,44 @@
 {% extends "base.html" %}
-{% block title %}Africam · admin{% endblock %}
+{% block title %}BirdBrain · admin{% endblock %}
+
+{% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+{% endblock %}
 
 {% block content %}
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">System health
+      <span class="text-zinc-500 text-xs ml-1 normal-case">Raspberry Pi</span>
+    </h2>
+  </div>
+  <div id="system-health" class="p-3"
+       hx-get="/partials/health" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "_system_health.html" %}
+  </div>
+</section>
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Admin · sources
+      Sites
       <span class="text-zinc-200 ml-2">{{ running }}/{{ total }}</span>
       <span class="text-zinc-500 text-xs ml-1">running</span>
     </h2>
-    <button hx-get="/partials/admin" hx-target="#admin-table" hx-swap="outerHTML"
-            class="text-xs text-zinc-400 hover:text-zinc-100 px-2 py-0.5 rounded border border-zinc-800 hover:border-zinc-600">
-      ↻ refresh
-    </button>
+    <div class="flex items-center gap-2">
+      <button id="open-add-source"
+              class="text-xs px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium">
+        + add a site
+      </button>
+      <button hx-get="/partials/admin" hx-target="#admin-table" hx-swap="outerHTML"
+              class="text-xs text-zinc-400 hover:text-zinc-100 px-2 py-0.5 rounded border border-zinc-800 hover:border-zinc-600">
+        ↻ refresh
+      </button>
+    </div>
   </div>
 
   {% include "_admin_table.html" %}
@@ -75,4 +101,254 @@
     </form>
   </details>
 </section>
+
+<dialog id="add-source-dialog"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-full max-w-3xl max-h-[92vh] overflow-y-auto backdrop:bg-black/70">
+  <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <div>
+      <h3 class="text-sm font-semibold text-zinc-100 uppercase tracking-wider">Add a site</h3>
+      <p class="text-xs text-zinc-500 mt-0.5">YouTube live stream or RTSP camera · click the map, drag the pin, or type coordinates</p>
+    </div>
+    <button type="button" id="close-add-source"
+            class="text-zinc-500 hover:text-zinc-100 text-lg leading-none px-2 py-1">×</button>
+  </div>
+
+  <form id="add-source-form"
+        hx-post="/api/sources"
+        hx-swap="none"
+        hx-on::after-request="
+          const err = document.getElementById('add-source-error');
+          if (event.detail.successful) {
+            err.classList.add('hidden');
+            this.reset();
+            window.__addSourceMap?.removeMarker();
+            htmx.ajax('GET', '/partials/admin', {target: '#admin-table', swap: 'outerHTML'});
+            document.getElementById('add-source-dialog').close();
+          } else {
+            let msg;
+            try {
+              const body = JSON.parse(event.detail.xhr.responseText || '{}');
+              msg = body.detail || ('HTTP ' + event.detail.xhr.status);
+              if (typeof msg !== 'string') msg = JSON.stringify(msg);
+            } catch (_) { msg = 'HTTP ' + event.detail.xhr.status; }
+            err.textContent = msg;
+            err.classList.remove('hidden');
+          }
+        "
+        class="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-0">
+
+    <!-- Left column: form fields -->
+    <div class="px-5 py-4 space-y-3 lg:border-r border-zinc-800">
+      <label class="block">
+        <span class="text-[10px] uppercase tracking-wider text-zinc-500">Name</span>
+        <input type="text" name="name" required maxlength="64"
+               placeholder="short label, e.g. Twin Pan"
+               class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+      </label>
+
+      <label class="block">
+        <span class="text-[10px] uppercase tracking-wider text-zinc-500">Stream URL</span>
+        <input type="url" name="url" required
+               placeholder="https://www.youtube.com/watch?v=..."
+               class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+      </label>
+
+      <div class="grid grid-cols-2 gap-3">
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">Kind</span>
+          <select name="kind" class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+            <option value="youtube">youtube</option>
+            <option value="rtsp">rtsp</option>
+          </select>
+        </label>
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">Min confidence</span>
+          <input name="min_confidence" type="number" step="0.05" min="0.05" max="0.95"
+                 value="0.3"
+                 class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
+        </label>
+      </div>
+
+      <label class="block">
+        <span class="text-[10px] uppercase tracking-wider text-zinc-500">Timezone</span>
+        <select name="timezone"
+                class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+          {% for grp in tz_options %}
+            <optgroup label="{{ grp.group }}">
+              {% for tz in grp.zones %}
+                <option value="{{ tz }}" {% if tz == default_tz %}selected{% endif %}>{{ tz }}</option>
+              {% endfor %}
+            </optgroup>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="block">
+        <span class="text-[10px] uppercase tracking-wider text-zinc-500">YouTube cookies file <span class="text-zinc-600 normal-case">(optional)</span></span>
+        <input name="cookies_file" type="text"
+               value="data/www.youtube.com_cookies.txt"
+               class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs text-zinc-400">
+      </label>
+
+      <label class="flex items-center gap-2 text-xs text-zinc-400">
+        <input type="checkbox" name="multisite" value="true">
+        multi-site (rotates between cameras — needs OCR to detect the active one)
+      </label>
+
+      <div class="grid grid-cols-2 gap-3">
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">Latitude</span>
+          <input id="lat-input" name="lat" type="number" step="any" min="-90" max="90"
+                 value="{{ default_lat }}"
+                 class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
+        </label>
+        <label class="block">
+          <span class="text-[10px] uppercase tracking-wider text-zinc-500">Longitude</span>
+          <input id="lon-input" name="lon" type="number" step="any" min="-180" max="180"
+                 value="{{ default_lon }}"
+                 class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
+        </label>
+      </div>
+      <p class="text-[11px] text-zinc-500 -mt-1">
+        suggested: centroid of existing sites · click the map, drag the pin, or edit numbers
+      </p>
+    </div>
+
+    <!-- Right column: map picker -->
+    <div class="border-t lg:border-t-0 border-zinc-800">
+      <div id="add-source-map" class="w-full" style="height: 360px;"></div>
+      <p class="px-5 py-2 text-[11px] text-zinc-500 border-t border-zinc-800">
+        click anywhere on the map to drop a pin · drag the pin to fine-tune
+      </p>
+    </div>
+
+    <!-- Footer spans both columns -->
+    <div class="lg:col-span-2 flex items-center justify-end gap-2 px-5 py-3 border-t border-zinc-800">
+      <p id="add-source-error" class="hidden text-xs text-rose-400 mr-auto"></p>
+      <button type="button" id="cancel-add-source"
+              class="px-3 py-1.5 rounded text-xs border border-zinc-800 text-zinc-400 hover:text-zinc-100">cancel</button>
+      <button type="submit"
+              class="px-3 py-1.5 rounded text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium">add site</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+(function () {
+  const EXISTING = {{ existing_sites | tojson }};
+  const dialog = document.getElementById('add-source-dialog');
+  const openBtn = document.getElementById('open-add-source');
+  const closeBtn = document.getElementById('close-add-source');
+  const cancelBtn = document.getElementById('cancel-add-source');
+
+  let map = null;
+  let pickMarker = null;
+  const pickIcon = L.divIcon({
+    className: 'site-pin pick-pin',
+    html: `<div style="width:22px;height:22px;border-radius:50%;background:#10b981;` +
+          `border:3px solid #ffffff;box-shadow:0 0 0 3px #10b98180, 0 2px 8px rgba(0,0,0,0.5);"></div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+  });
+  const existingIcon = L.divIcon({
+    className: 'site-pin',
+    html: `<div style="width:10px;height:10px;border-radius:50%;background:#71717a;` +
+          `border:2px solid #18181b;"></div>`,
+    iconSize: [10, 10],
+    iconAnchor: [5, 5],
+  });
+
+  const latInput = document.getElementById('lat-input');
+  const lonInput = document.getElementById('lon-input');
+
+  function writeInputs(latlng) {
+    if (document.activeElement !== latInput) latInput.value = latlng.lat.toFixed(6);
+    if (document.activeElement !== lonInput) lonInput.value = latlng.lng.toFixed(6);
+  }
+
+  function createPickMarker(latlng) {
+    const m = L.marker(latlng, {
+      icon: pickIcon, draggable: true, zIndexOffset: 1000,
+    }).addTo(map);
+    m.bindTooltip('new site', {
+      permanent: true, direction: 'top', offset: [0, -12], className: 'site-label',
+    });
+    m.on('drag', (e) => writeInputs(e.target.getLatLng()));
+    return m;
+  }
+
+  function dropPin(latlng) {
+    if (pickMarker) pickMarker.setLatLng(latlng);
+    else pickMarker = createPickMarker(latlng);
+    writeInputs(latlng);
+  }
+
+  function syncFromInputs() {
+    if (!map) return;
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+    const ll = L.latLng(lat, lon);
+    if (pickMarker) pickMarker.setLatLng(ll);
+    else pickMarker = createPickMarker(ll);
+    if (!map.getBounds().contains(ll)) map.panTo(ll);
+  }
+
+  // Lazy map init — Leaflet needs the container visible to compute size.
+  // We build it on first dialog open and reuse afterwards.
+  function ensureMap() {
+    if (map) {
+      // Force a size recalculation in case viewport changed since last open.
+      setTimeout(() => map.invalidateSize(), 0);
+      return;
+    }
+    map = L.map('add-source-map', { scrollWheelZoom: true });
+    lockMap(map);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap', maxZoom: 18,
+    }).addTo(map);
+
+    const existingMarkers = EXISTING.map(s =>
+      L.marker([s.lat, s.lon], { icon: existingIcon, interactive: false })
+        .addTo(map)
+        .bindTooltip(s.name, {
+          permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
+        })
+    );
+    if (EXISTING.length > 0) {
+      map.fitBounds(L.featureGroup(existingMarkers).getBounds().pad(0.6));
+    } else {
+      map.setView([-24, 31], 5);
+    }
+
+    map.on('click', (e) => dropPin(e.latlng));
+    latInput.addEventListener('input', syncFromInputs);
+    lonInput.addEventListener('input', syncFromInputs);
+
+    // Drop the suggestion pin from the pre-filled centroid.
+    syncFromInputs();
+  }
+
+  openBtn.addEventListener('click', () => {
+    dialog.showModal();
+    ensureMap();
+  });
+  function closeDialog() {
+    document.getElementById('add-source-error').classList.add('hidden');
+    dialog.close();
+  }
+  closeBtn.addEventListener('click', closeDialog);
+  cancelBtn.addEventListener('click', closeDialog);
+
+  window.__addSourceMap = {
+    removeMarker: () => {
+      if (pickMarker && map) {
+        map.removeLayer(pickMarker);
+        pickMarker = null;
+      }
+    },
+  };
+})();
+</script>
 {% endblock %}

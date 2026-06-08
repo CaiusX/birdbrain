@@ -1,0 +1,115 @@
+{# Pi host-health cards. Inner content only — reused by the admin.html include
+   and the /partials/health htmx swap. Expects `health` (see _health_view). #}
+{% set h = health %}
+{% set ht = h.host %}
+
+{%- macro gb(n) -%}{{ '%.1f'|format(n / 1000000000) }}{%- endmacro -%}
+{%- macro dur(s) -%}
+  {%- if s is none -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h
+  {%- else -%}{{ (s // 86400)|int }}d {{ ((s % 86400) // 3600)|int }}h
+  {%- endif -%}
+{%- endmacro -%}
+{%- macro card(label, value, value_cls, sub) -%}
+  <div class="bg-zinc-900 px-4 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">{{ label }}</div>
+    <div class="text-2xl font-semibold tabular-nums {{ value_cls }}">{{ value }}</div>
+    <div class="text-[11px] text-zinc-500 truncate" title="{{ sub }}">{{ sub }}</div>
+  </div>
+{%- endmacro -%}
+
+{# --- derive throttle state --- #}
+{% set thr = ht.throttled %}
+{% set thr_now = thr and (thr.under_voltage_now or thr.throttled_now or thr.freq_capped_now) %}
+{% set thr_boot = thr and (thr.under_voltage_since_boot or thr.throttled_since_boot or thr.freq_capped_since_boot) %}
+
+{% if thr_now %}
+  <div class="px-4 py-2 bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs rounded-lg mb-3">
+    ⚠ Pi is {{ 'under-voltage' if thr.under_voltage_now else ('throttled' if thr.throttled_now else 'frequency-capped') }} right now — check the power supply.
+  </div>
+{% endif %}
+{% if h.worker_problems %}
+  <div class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs rounded-lg mb-3">
+    {{ h.worker_problems | length }} site{{ '' if h.worker_problems|length == 1 else 's' }} not running:
+    {% for p in h.worker_problems %}
+      <span class="inline-block ml-1" title="{{ p.error or '' }}"><a href="/site/{{ p.name | urlencode }}" class="underline decoration-amber-500/40 hover:text-amber-200">{{ p.name }}</a> <span class="text-amber-200/60">({{ p.status }}{% if p.since_s is not none %}, {{ dur(p.since_s) }} ago{% endif %})</span>{{ ',' if not loop.last }}</span>
+    {% endfor %}
+  </div>
+{% endif %}
+
+<div class="grid grid-cols-2 md:grid-cols-3 gap-px bg-zinc-800/50">
+
+  {# CPU load #}
+  {% if ht.load1 is not none and ht.cpus %}
+    {% set ratio = ht.load1 / ht.cpus %}
+    {% set c = 'text-emerald-300' if ratio < 0.7 else ('text-amber-300' if ratio < 1.0 else 'text-rose-300') %}
+    {{ card('CPU load', '%.2f'|format(ht.load1), c,
+            'of %d cores · %.2f / %.2f (5/15m)'|format(ht.cpus, ht.load5, ht.load15)) }}
+  {% else %}
+    {{ card('CPU load', 'n/a', 'text-zinc-600', '') }}
+  {% endif %}
+
+  {# Inference saturation — one shared, lock-serialized BirdNET detector #}
+  {% set ip = h.infer_pct %}
+  {% set ic = 'text-emerald-300' if ip < 55 else ('text-amber-300' if ip < 80 else 'text-rose-300') %}
+  {{ card('Inference', ip ~ '%', ic,
+          h.workers_running ~ ' / ~' ~ h.infer_max ~ ' cams max · est ' ~ h.infer_ms ~ 'ms/chunk') }}
+
+  {# Memory #}
+  {% if ht.mem_total and ht.mem_available is not none %}
+    {% set used = ht.mem_total - ht.mem_available %}
+    {% set pct = (used / ht.mem_total * 100) | round | int %}
+    {% set c = 'text-emerald-300' if pct < 75 else ('text-amber-300' if pct < 90 else 'text-rose-300') %}
+    {{ card('Memory', pct ~ '%', c,
+            gb(used) ~ ' / ' ~ gb(ht.mem_total) ~ ' GB · ' ~ gb(ht.mem_available) ~ ' free') }}
+  {% else %}
+    {{ card('Memory', 'n/a', 'text-zinc-600', '') }}
+  {% endif %}
+
+  {# Temperature #}
+  {% if ht.temp_c is not none %}
+    {% set c = 'text-emerald-300' if ht.temp_c < 60 else ('text-amber-300' if ht.temp_c < 75 else 'text-rose-300') %}
+    {{ card('SoC temp', '%.0f°C'|format(ht.temp_c), c, 'CPU package') }}
+  {% else %}
+    {{ card('SoC temp', 'n/a', 'text-zinc-600', '') }}
+  {% endif %}
+
+  {# Disk #}
+  {% if h.disk %}
+    {% set pct = (h.disk.used / h.disk.total * 100) | round | int %}
+    {% set c = 'text-emerald-300' if pct < 80 else ('text-amber-300' if pct < 92 else 'text-rose-300') %}
+    {{ card('Disk', pct ~ '%', c,
+            gb(h.disk.free) ~ ' GB free of ' ~ gb(h.disk.total)
+            ~ (' · DB %.0f MB'|format(h.db_bytes / 1000000) if h.db_bytes else '')) }}
+  {% else %}
+    {{ card('Disk', 'n/a', 'text-zinc-600', '') }}
+  {% endif %}
+
+  {# Power / throttle #}
+  {% if thr is none %}
+    {{ card('Power', 'n/a', 'text-zinc-600', 'vcgencmd unavailable') }}
+  {% elif thr_now %}
+    {{ card('Power', 'fault', 'text-rose-300', 'under-voltage / throttled now') }}
+  {% elif thr_boot %}
+    {{ card('Power', 'warn', 'text-amber-300', 'under-voltage since boot') }}
+  {% else %}
+    {{ card('Power', 'OK', 'text-emerald-300', 'no under-voltage / throttling') }}
+  {% endif %}
+
+  {# Uptime #}
+  {{ card('Uptime', dur(ht.uptime_s), 'text-zinc-100', 'since boot') }}
+
+  {# Workers #}
+  {% set wc = 'text-emerald-300' if h.workers_running == h.workers_total and h.workers_total > 0
+              else ('text-rose-300' if h.workers_running == 0 else 'text-amber-300') %}
+  {{ card('Workers', h.workers_running ~ '/' ~ h.workers_total, wc, 'sites running') }}
+
+  {# Last detection (data flowing?) #}
+  {% set a = h.last_det_age_s %}
+  {% set dc = 'text-zinc-600' if a is none else ('text-emerald-300' if a < 900 else ('text-amber-300' if a < 3600 else 'text-rose-300')) %}
+  {{ card('Last detection', dur(a) ~ (' ago' if a is not none else ''), dc, h.det_24h ~ ' in last 24h') }}
+
+</div>
+<div class="text-[10px] text-zinc-600 mt-2 text-right">updated {{ h.now.strftime('%H:%M:%S') }} UTC · refreshes every 30s</div>

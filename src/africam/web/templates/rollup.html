@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Africam · rollup{% endblock %}
+{% from "_macros.html" import species_link %}
+{% block title %}BirdBrain · rollup{% endblock %}
 
 {% block content %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
@@ -26,7 +27,7 @@
     <table class="w-full text-sm">
       <thead class="text-zinc-400 text-xs uppercase tracking-wider">
         <tr class="border-b border-zinc-800">
-          <th class="text-left font-medium px-5 py-2">Source</th>
+          <th class="text-left font-medium px-5 py-2">Site</th>
           <th class="text-right font-medium px-5 py-2">Count</th>
           <th class="text-right font-medium px-5 py-2">Species</th>
           <th class="text-right font-medium px-5 py-2">Mean conf</th>
@@ -37,7 +38,7 @@
         {% for r in rollup_rows %}
           <tr class="hover:bg-zinc-800/40">
             <td class="px-5 py-3 font-medium">
-              <a href="/audition?source={{ r.source }}" class="hover:text-emerald-300">{{ r.source }}</a>
+              <a href="/site/{{ r.source }}" class="hover:text-emerald-300">{{ r.source }}</a>
             </td>
             <td class="px-5 py-3 text-right tabular-nums">{{ r.count }}</td>
             <td class="px-5 py-3 text-right tabular-nums">{{ r.species }}</td>
@@ -65,7 +66,7 @@
   <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
     <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
       <h3 class="text-sm uppercase tracking-wider text-zinc-400">
-        {{ s.source }}
+        <a href="/site/{{ s.source | urlencode }}" class="hover:text-emerald-300">{{ s.source }}</a>
         <span class="text-zinc-500 text-xs ml-1">top {{ s.species | length }} species</span>
       </h3>
       <span class="text-xs text-zinc-500">{{ s.tz | tz_abbr }}</span>
@@ -84,7 +85,7 @@
         <tbody class="divide-y divide-zinc-800">
           {% for sp in s.species %}
             <tr class="hover:bg-zinc-800/40">
-              <td class="px-5 py-2 font-medium">{{ sp.common }}</td>
+              <td class="px-5 py-2 font-medium">{{ species_link(sp.common, sp.scientific, cls="hover:text-emerald-300") }}</td>
               <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ sp.scientific }}</td>
               <td class="px-5 py-2 text-right tabular-nums">{{ sp.count }}</td>
               <td class="px-5 py-2 text-right tabular-nums">
@@ -122,7 +123,7 @@
             <tbody>
               {% for sp in s.species %}
                 <tr>
-                  <td class="pr-3 py-0.5 whitespace-nowrap text-zinc-300">{{ sp.common }}</td>
+                  <td class="pr-3 py-0.5 whitespace-nowrap text-zinc-300">{{ species_link(sp.common, sp.scientific, cls="hover:text-emerald-300") }}</td>
                   {% for c in sp.hours %}
                     {% set alpha = (c / sp.peak_hour) if c > 0 else 0 %}
                     <td class="w-5 h-4 px-0.5 py-0.5 text-center text-zinc-200"

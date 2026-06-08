@@ -43,3 +43,41 @@ lon = 23.53
 min_confidence = 0.15
 cookies_file = "data/www.youtube.com_cookies.txt"
 timezone = "Africa/Gaborone"
+
+[[source]]
+name = "Tau Game Lodge"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=8J9USywkGmw"
+lat = -24.7461
+lon = 26.4034
+# Dry savanna — moderately quiet. Bump down if detection count stays low.
+min_confidence = 0.3
+cookies_file = "data/www.youtube.com_cookies.txt"
+timezone = "Africa/Johannesburg"
+
+[[source]]
+name = "Tortilis Camp"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=XyPU5-pNg5E"
+lat = -2.6543
+lon = 37.2226
+# Kenya — Amboseli, semi-arid savanna at Kilimanjaro's foot. The "dry" half
+# of the Kenya pair. Africam restarts its live broadcasts under new video
+# IDs periodically — if the worker starts erroring "This live stream
+# recording is not available", search YouTube for the current
+# "Live from Tortilis Camp" broadcast and update the URL above.
+min_confidence = 0.3
+cookies_file = "data/www.youtube.com_cookies.txt"
+timezone = "Africa/Nairobi"
+
+[[source]]
+name = "Mara River"
+kind = "youtube"
+url = "https://www.youtube.com/watch?v=ACc7IkdOF-Y"
+lat = -1.387
+lon = 35.014
+# Kenya — Mara Triangle, Fig Tree Crossing. The "wet" half of the Kenya
+# pair — riparian / open water; highest bird density of the new three.
+min_confidence = 0.3
+cookies_file = "data/www.youtube.com_cookies.txt"
+timezone = "Africa/Nairobi"

@@ -1,11 +1,19 @@
 {# expects: rows (list[dict]) #}
+{%- macro dur(s) -%}
+  {%- if s is none or s == 0 -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h {{ ((s % 3600) // 60)|int }}m
+  {%- else -%}{{ (s // 86400)|int }}d
+  {%- endif -%}
+{%- endmacro -%}
 <div id="admin-table"
      hx-get="/partials/admin" hx-target="this" hx-swap="outerHTML"
      hx-trigger="every 15s">
   <table class="w-full text-sm">
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
       <tr class="border-b border-zinc-800">
-        <th class="text-left font-medium px-5 py-2">Source</th>
+        <th class="text-left font-medium px-5 py-2">Site</th>
         <th class="text-left font-medium px-5 py-2">Status</th>
         <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Model knobs</th>
         <th class="text-right font-medium px-5 py-2">Actions</th>
@@ -24,7 +32,7 @@
         {% set badge_cls, badge_label = badge.get(r.status, ('bg-zinc-800 text-zinc-400 border-zinc-700', r.status)) %}
         <tr class="hover:bg-zinc-800/30">
           <td class="px-5 py-3 align-top">
-            <div class="font-medium text-zinc-100">{{ r.name }}</div>
+            <div class="font-medium text-zinc-100"><a href="/site/{{ r.name | urlencode }}" class="hover:text-emerald-300">{{ r.name }}</a></div>
             <div class="text-xs text-zinc-500">
               <code class="text-zinc-400">{{ r.kind }}</code>
               · {{ 'runtime' if r.is_runtime else 'file' }}
@@ -47,6 +55,16 @@
             {% if r.error %}
               <div class="text-xs text-rose-400 mt-1 max-w-md truncate" title="{{ r.error }}">
                 {{ r.error }}
+              </div>
+            {% endif %}
+            {% if r.current_outage_s is not none or r.down_today_s > 0 %}
+              <div class="text-xs mt-1 flex items-baseline gap-2">
+                {% if r.current_outage_s is not none %}
+                  <span class="text-rose-300" title="duration of current outage">down {{ dur(r.current_outage_s) }}</span>
+                {% endif %}
+                {% if r.down_today_s > 0 %}
+                  <span class="text-zinc-500" title="total downtime in the last 24 hours">24h: {{ dur(r.down_today_s) }}</span>
+                {% endif %}
               </div>
             {% endif %}
           </td>
@@ -79,29 +97,25 @@
             </dl>
           </td>
           <td class="px-5 py-3 align-top text-right">
-            {% if r.is_runtime and r.deleted %}
-              <button hx-post="/api/sources/{{ r.name }}/enable"
+            {% if r.deleted %}
+              <button hx-post="/api/sources/{{ r.name | urlencode }}/enable"
                       hx-target="#admin-table" hx-swap="outerHTML"
                       class="px-2 py-1 rounded text-xs border border-emerald-500/60 text-emerald-300 hover:bg-emerald-500/10">
                 ▶ start
               </button>
-            {% elif r.is_runtime %}
-              <button hx-post="/api/sources/{{ r.name }}/disable"
+            {% else %}
+              <button hx-post="/api/sources/{{ r.name | urlencode }}/disable"
                       hx-target="#admin-table" hx-swap="outerHTML"
                       hx-confirm="Stop the worker for {{ r.name }}?"
                       class="px-2 py-1 rounded text-xs border border-amber-500/60 text-amber-300 hover:bg-amber-500/10">
                 ■ stop
               </button>
-            {% else %}
-              <span class="text-xs text-zinc-600" title="Edit sources.toml to change file-managed sources.">
-                file-managed
-              </span>
             {% endif %}
           </td>
         </tr>
       {% endfor %}
       {% if not rows %}
-        <tr><td colspan="4" class="px-5 py-6 text-center text-zinc-500 text-sm">No sources configured.</td></tr>
+        <tr><td colspan="4" class="px-5 py-6 text-center text-zinc-500 text-sm">No sites configured.</td></tr>
       {% endif %}
     </tbody>
   </table>

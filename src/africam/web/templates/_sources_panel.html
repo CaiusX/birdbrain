@@ -6,7 +6,7 @@
     <li class="py-2 flex items-center justify-between gap-2">
       <div class="min-w-0">
         <div class="flex items-center gap-2">
-          <code class="text-zinc-200">{{ t.name }}</code>
+          <a href="/site/{{ t.name | urlencode }}" class="text-zinc-200 hover:text-emerald-300">{{ t.name }}</a>
           <span class="text-xs text-zinc-500 uppercase tracking-wider">{{ t.kind }}</span>
           {% if t.multisite %}
             <span class="text-xs text-amber-400/80 uppercase tracking-wider">multisite</span>
@@ -24,7 +24,7 @@
           hx-delete="/api/sources/{{ t.name }}"
           hx-target="#sources-panel"
           hx-swap="innerHTML"
-          hx-confirm="Remove source '{{ t.name }}'? The pipeline worker will stop within ~15s."
+          hx-confirm="Remove site '{{ t.name }}'? The pipeline worker will stop within ~15s."
           class="text-xs px-2 py-0.5 rounded border border-zinc-700 hover:bg-red-500/20 hover:border-red-500/50 hover:text-red-300">
           remove
         </button>

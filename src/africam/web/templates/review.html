@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}BirdBrain · review · {{ tab }}{% endblock %}
+
+{% block content %}
+{# Carry the review source filter through to species pages and the included
+   detection rows so a species click lands pre-scoped to the same site. #}
+{% set page_source = filters.source %}
+{# Shared header + tab strip. Both bodies live inline below — the
+   spectrogram modal is included once at the bottom of the file. #}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="px-5 pt-3 pb-0 border-b border-zinc-800/60 flex items-center gap-1 text-xs">
+    <a href="/review?tab=detections{% if filters.source %}&source={{ filters.source }}{% endif %}"
+       class="px-3 py-2 -mb-px border-b-2 {% if tab == 'detections' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
+      Per detection{% if tab == 'detections' %}<span class="ml-1 tabular-nums text-zinc-300">{{ rows | length }}</span>{% endif %}
+    </a>
+    <a href="/review?tab=chunks{% if filters.source %}&source={{ filters.source }}{% endif %}"
+       class="px-3 py-2 -mb-px border-b-2 {% if tab == 'chunks' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
+      Multi-species chunks{% if tab == 'chunks' %}<span class="ml-1 tabular-nums text-zinc-300">{{ groups | length }}</span>{% endif %}
+    </a>
+    <span class="ml-auto text-zinc-600 text-[11px] hidden md:inline">
+      {% if tab == 'detections' %}listen → label → keeps it as ground truth
+      {% else %}distinct species calling in the same 3-second window{% endif %}
+    </span>
+  </div>
+
+  {% if tab == 'detections' %}
+  {# ---- Per-detection (formerly /audition) ---- #}
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      <span class="text-zinc-200 ml-1">{{ rows | length }}</span>
+      <span class="text-zinc-500 ml-1 text-xs">
+        of {{ label_counts.unreviewed }} unreviewed
+        · ✓ {{ label_counts.good }}
+        · ✗ {{ label_counts.bad }}
+        · ? {{ label_counts.unsure }}
+      </span>
+    </h2>
+  </div>
+
+  <form method="get" action="/review" class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-7 gap-3 text-xs">
+    <input type="hidden" name="tab" value="detections">
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Site</span>
+      {% include "_source_filter.html" %}
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Species (contains)</span>
+      <input name="species" value="{{ filters.species }}" placeholder="e.g. plover"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Min conf</span>
+      <input name="min_conf" type="number" step="0.05" min="0" max="1" value="{{ filters.min_conf }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Max conf</span>
+      <input name="max_conf" type="number" step="0.05" min="0" max="1" value="{{ filters.max_conf }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Show</span>
+      <select name="label_filter" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [('unreviewed','unreviewed'), ('good','good'), ('bad','bad'), ('unsure','unsure'), ('all','all')] %}
+          <option value="{{ v }}" {% if filters.label_filter == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Note tag</span>
+      <select name="note_tag" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [('any','— any —'), ('reliable','reliable'), ('suspect','suspect'), ('rare','rare'), ('untagged','untagged')] %}
+          <option value="{{ v }}" {% if filters.note_tag == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Order</span>
+      <select name="order" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [('conf_desc','highest conf first'), ('conf_asc','lowest conf first'), ('recent','most recent')] %}
+          <option value="{{ v }}" {% if filters.order == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <input type="hidden" name="limit" value="{{ filters.limit }}">
+    <div class="md:col-span-7 flex justify-end gap-2">
+      <a href="/review?tab=detections" class="px-3 py-1.5 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</a>
+      <button type="submit" class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 font-medium">apply</button>
+    </div>
+  </form>
+
+  {% if rows %}
+    <ul class="divide-y divide-zinc-800">
+      {% for r in rows %}
+        {% include "_audition_row.html" %}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">No detections match these filters.</p>
+  {% endif %}
+
+  {% else %}
+  {# ---- Multi-species chunks (formerly /soundscape) ---- #}
+  {% set _qs_base = ['tab=chunks'] %}
+  {% if filters.source %}{% set _ = _qs_base.append('source=' ~ filters.source) %}{% endif %}
+  {% set _ = _qs_base.append('min_species=' ~ filters.min_species) %}
+  {% set _ = _qs_base.append('order=' ~ filters.order) %}
+  {% set _ = _qs_base.append('limit=' ~ filters.limit) %}
+  {% set _qs_genuine = '/review?' ~ ('&'.join(_qs_base + ['bucket=genuine'])) %}
+  {% set _qs_confusions = '/review?' ~ ('&'.join(_qs_base + ['bucket=confusions'])) %}
+  {% if bucket == 'genuine' %}
+    {% set _title = 'Genuine soundscape' %}
+    {% set _empty = 'No genuine multi-species chunks match these filters. Try the confusions sub-tab — likely hedges still worth a listen.' %}
+  {% else %}
+    {% set _title = 'Probable confusions' %}
+    {% set _empty = 'No probable confusions match these filters.' %}
+  {% endif %}
+
+  <div class="px-5 pt-3 pb-0 border-b border-zinc-800/60 flex items-center gap-1 text-xs">
+    <a href="{{ _qs_genuine }}"
+       class="px-3 py-2 -mb-px border-b-2 {% if bucket == 'genuine' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
+      Genuine
+      <span class="ml-1 tabular-nums {% if bucket == 'genuine' %}text-zinc-300{% else %}text-zinc-600{% endif %}">{{ genuine_count }}</span>
+    </a>
+    <a href="{{ _qs_confusions }}"
+       class="px-3 py-2 -mb-px border-b-2 {% if bucket == 'confusions' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
+      Probable confusions
+      <span class="ml-1 tabular-nums {% if bucket == 'confusions' %}text-zinc-300{% else %}text-zinc-600{% endif %}">{{ confusion_count }}</span>
+    </a>
+    <span class="ml-auto text-zinc-600 text-[11px] hidden md:inline"
+          title="A chunk is a confusion if any two species share a genus, the weakest row is below 0.50 confidence, or the weakest is below half the strongest. Otherwise genuine.">
+      classification rule ⓘ
+    </span>
+  </div>
+
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      {{ _title }}
+      <span class="text-zinc-200 ml-2">{{ groups | length }}</span>
+      <span class="text-zinc-500 ml-1 text-xs">
+        of {{ total_groups }} multi-species chunks (≥ {{ filters.min_species }} species)
+      </span>
+    </h2>
+  </div>
+
+  <form method="get" action="/review"
+        class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
+    <input type="hidden" name="tab" value="chunks">
+    <input type="hidden" name="bucket" value="{{ bucket }}">
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Site</span>
+      {% include "_source_filter.html" %}
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Min species</span>
+      <input name="min_species" type="number" step="1" min="2" max="10"
+             value="{{ filters.min_species }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Order</span>
+      <select name="order" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [
+          ('recent', 'most recent'),
+          ('n_species', 'most species'),
+          ('max_conf', 'highest confidence')
+        ] %}
+          <option value="{{ v }}" {% if filters.order == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Limit</span>
+      <input name="limit" type="number" step="10" min="10" max="200"
+             value="{{ filters.limit }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <div class="flex items-end justify-end gap-2">
+      <a href="/review?tab=chunks&bucket={{ bucket }}" class="px-3 py-1.5 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-100">reset</a>
+      <button type="submit" class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 font-medium">apply</button>
+    </div>
+  </form>
+
+  {% if groups %}
+    <ul class="divide-y divide-zinc-800">
+      {% for g in groups %}
+        {% set head = g.rows[0] %}
+        {% set tz = source_tz.get(head.source_name, 'UTC') %}
+        <li class="px-5 py-3">
+          <div class="flex items-center justify-between text-xs text-zinc-500 mb-2">
+            <span class="truncate">
+              <code class="text-zinc-300">{{ head.source_name }}</code>{% if head.site %} · <span class="text-zinc-300">{{ head.site }}</span>{% endif %}
+              · <span class="tabular-nums text-zinc-400" title="{{ head.started_at | localtime('UTC') }} UTC">
+                  {{ head.started_at | localtime(tz) }} {{ tz | tz_abbr }}
+                </span>
+            </span>
+            <span class="px-1.5 py-0.5 rounded text-[10px] tabular-nums
+                         bg-amber-500/10 text-amber-300 border border-amber-500/30">
+              {{ g.n }} species
+            </span>
+          </div>
+          <ul class="divide-y divide-zinc-800/60 bg-zinc-950/40 border border-zinc-800/60 rounded">
+            {% for r in g.rows %}
+              {% include "_audition_row.html" %}
+            {% endfor %}
+          </ul>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">{{ _empty }}</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+{% include "_spectrogram_modal.html" %}
+{% endblock %}

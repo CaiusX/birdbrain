@@ -1,0 +1,414 @@
+{% extends "base.html" %}
+{% from "_macros.html" import species_link, weather_icon %}
+{% block title %}BirdBrain · {{ name }}{% endblock %}
+
+{% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+{% endblock %}
+
+{% macro spectrogram_button(r) -%}
+  {% set tz = (source_tz | default({})).get(r.source_name, 'UTC') %}
+  <button type="button"
+          data-spectrogram-trigger
+          data-detection-id="{{ r.id }}"
+          data-species="{{ r.common_name }}"
+          data-scientific="{{ r.scientific_name }}"
+          data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
+          data-label="{{ r.label or '' }}"
+          data-suggested="{{ r.suggested_species or '' }}"
+          data-palette="fire"
+          class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
+          style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
+          title="click to play">
+    <img src="/spectrograms/{{ r.id }}.png?p=fire" alt=""
+         class="absolute inset-0 w-full h-full object-cover pointer-events-none" loading="lazy">
+    <span class="absolute inset-0 flex items-center justify-center text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
+      {{ "%.2f"|format(r.confidence) }}
+    </span>
+  </button>
+{%- endmacro %}
+
+{% block content %}
+<a href="/" class="text-xs text-zinc-500 hover:text-zinc-200">← dashboard</a>
+
+{# ---- 1. Site header: name + meta on the left, a small "where in the world"
+       Leaflet map on the right with a dot at this site's coords. The
+       uptime/downtime panel now lives at the very bottom of the page (it's
+       operational metadata, not the first thing a visitor needs). ---- #}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-3">
+  <div class="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-4 px-5 py-4 items-stretch">
+    <div class="min-w-0 flex flex-col justify-center">
+      <h2 class="text-2xl font-semibold text-zinc-100">{{ name }}</h2>
+      {% if src_cfg %}
+        <div class="text-zinc-400 text-sm mt-1">
+          {% if src_cfg.lat is not none and src_cfg.lon is not none %}
+            {{ "%.4f"|format(src_cfg.lat) }}, {{ "%.4f"|format(src_cfg.lon) }} ·
+          {% endif %}
+          {{ src_cfg.kind }} · timezone {{ tz_name }}
+        </div>
+        {# Local "now" line: ticking clock in the site's tz + current weather
+           from Open-Meteo (cached 1h). The clock is initialised server-side
+           so it shows the right value pre-JS, and a tiny script re-renders
+           it every 30 s with Intl.DateTimeFormat so it stays correct on
+           long-open tabs without a page reload. #}
+        <div class="text-zinc-300 text-sm mt-2 flex items-center gap-2 flex-wrap">
+          <span class="tabular-nums font-medium"
+                data-local-clock="{{ tz_name }}">{{ local_now }}</span>
+          <span class="text-zinc-500 text-xs">{{ tz_abbr }}</span>
+          {% if current_weather %}
+            <span class="text-zinc-600">·</span>
+            <span class="text-zinc-300 inline-flex items-center gap-1.5">
+              <span class="text-zinc-200">{{ weather_icon(current_weather.icon, size=20) }}</span>
+              {% if current_weather.temp is not none %}
+                <span class="tabular-nums">{{ "%.0f"|format(current_weather.temp) }}°C</span>
+              {% endif %}
+              {% if current_weather.label %}
+                <span class="text-zinc-500">{{ current_weather.label }}</span>
+              {% endif %}
+            </span>
+            {% if current_weather.wind is not none %}
+              <span class="text-zinc-600">·</span>
+              <span class="text-zinc-500 text-xs tabular-nums">wind {{ "%.0f"|format(current_weather.wind) }} km/h</span>
+            {% endif %}
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+    {% if src_cfg and src_cfg.lat is not none and src_cfg.lon is not none %}
+      <div id="site-mini-map"
+           class="rounded overflow-hidden border border-zinc-800"
+           style="width: 280px; height: 160px;"
+           title="{{ name }} on the world map"></div>
+    {% endif %}
+  </div>
+</section>
+
+{% if src_cfg and src_cfg.lat is not none and src_cfg.lon is not none %}
+<script>
+  // Small "where in the world" map. Locked via lockMap so wheel scroll on
+  // the page passes through; click activates pan/zoom as on the bigger maps.
+  (function () {
+    const map = L.map('site-mini-map', {
+      zoomControl: false, attributionControl: false,
+    });
+    lockMap(map);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap', maxZoom: 18,
+    }).addTo(map);
+    map.setView([{{ src_cfg.lat }}, {{ src_cfg.lon }}], 2);
+    L.circleMarker([{{ src_cfg.lat }}, {{ src_cfg.lon }}], {
+      radius: 8, color: '#fafafa', weight: 2,
+      fillColor: '{{ source_color }}', fillOpacity: 0.9,
+    }).addTo(map);
+  })();
+</script>
+{% endif %}
+
+<script>
+  // Tick the site's local clock so long-open tabs don't show a stale
+  // server-rendered minute. 30 s cadence is more than enough for a
+  // HH:MM display; uses the browser's Intl + the tz stored on the span.
+  (function () {
+    const el = document.querySelector('[data-local-clock]');
+    if (!el) return;
+    const tz = el.getAttribute('data-local-clock');
+    let fmt;
+    try {
+      fmt = new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit', minute: '2-digit',
+        hour12: false, timeZone: tz,
+      });
+    } catch (_e) { return; }
+    function tick() { el.textContent = fmt.format(new Date()); }
+    tick();
+    setInterval(tick, 30000);
+  })();
+</script>
+
+{# ---- 2. Headline stats ---- #}
+<section class="grid grid-cols-2 md:grid-cols-4 gap-px bg-zinc-800/50 rounded-xl overflow-hidden border border-zinc-800 mt-4">
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">total detections</div>
+    <div class="text-2xl font-semibold tabular-nums">{{ "{:,}".format(total) }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">distinct species</div>
+    <div class="text-2xl font-semibold tabular-nums">{{ distinct_species }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">first detection</div>
+    <div class="text-sm tabular-nums mt-2">{{ first_seen | localtime(tz_name, '%Y-%m-%d') if first_seen else '—' }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">last detection</div>
+    <div class="text-sm tabular-nums mt-2">
+      {{ last_seen | localtime(tz_name, '%Y-%m-%d %H:%M') if last_seen else '—' }}
+      {% if last_seen %}<span class="text-xs text-zinc-500 ml-1">{{ tz_name | tz_abbr }}</span>{% endif %}
+    </div>
+  </div>
+</section>
+
+{# ---- 3. Live video (half) + recent unique species (half, scroll) ---- #}
+{% if src_cfg and src_cfg.url %}
+<section class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-stretch">
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
+    <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-2">
+      <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">live video</h3>
+      <a href="{{ src_cfg.url }}" target="_blank" rel="noopener"
+         class="text-xs text-emerald-300 hover:text-emerald-200">open original ↗</a>
+    </div>
+    {% if video_id %}
+      <div class="aspect-video bg-black">
+        <iframe class="w-full h-full"
+                src="https://www.youtube.com/embed/{{ video_id }}?autoplay=0&mute=1&controls=1&rel=0"
+                frameborder="0"
+                allow="autoplay; encrypted-media; picture-in-picture"
+                allowfullscreen
+                referrerpolicy="strict-origin-when-cross-origin"></iframe>
+      </div>
+    {% else %}
+      <p class="px-5 py-6 text-sm text-zinc-500">
+        Not a YouTube stream — open the original feed via the link above.
+      </p>
+    {% endif %}
+    {% if multisite %}
+      <div id="site-panel-{{ name }}"
+           hx-get="/partials/site/{{ name | urlencode }}"
+           hx-trigger="load, every 30s"
+           hx-swap="innerHTML"
+           class="border-t border-zinc-800"></div>
+    {% endif %}
+  </div>
+
+  <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col min-h-0">
+    <div class="px-5 py-3 border-b border-zinc-800">
+      <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">recent species</h3>
+      <span class="text-[11px] text-zinc-500">unique species heard, most recent first ({{ tz_name | tz_abbr }})</span>
+    </div>
+    <div class="overflow-y-auto divide-y divide-zinc-800/80 flex-1" style="max-height: 360px;">
+      {% for sp in recent_unique %}
+        <div class="px-5 py-2 flex items-baseline justify-between gap-3">
+          <div class="min-w-0">
+            {{ species_link(sp.common_name, sp.scientific_name, source=name, cls="text-sm text-zinc-100 hover:text-emerald-300") }}
+            <span class="italic text-zinc-500 text-xs ml-1">{{ sp.scientific_name }}</span>
+          </div>
+          <span class="text-[11px] text-zinc-500 tabular-nums shrink-0"
+                title="{{ sp.last_seen | localtime('UTC') }} UTC">
+            {{ sp.last_seen | localtime(tz_name, '%H:%M') }}
+          </span>
+        </div>
+      {% else %}
+        <p class="px-5 py-6 text-sm text-zinc-500">No detections yet.</p>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{# ---- 4. Site narrative (AI commentary) — moved below the video ---- #}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">site narrative</h3>
+  </div>
+  <div class="px-5 py-4">
+    {% if note and note.note %}
+      <p class="text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ note.note }}</p>
+      {% if note.generated_at %}
+        <div class="text-[10px] uppercase tracking-wider text-zinc-600 mt-3">
+          generated by {{ note.generated_by or '?' }} at {{ note.generated_at.strftime('%Y-%m-%d %H:%M UTC') }}
+          · {{ "{:,}".format(note.detection_count_at_gen or 0) }} detections at gen time
+        </div>
+      {% endif %}
+    {% else %}
+      <p class="text-sm text-zinc-500 italic">No commentary yet — the background notes worker writes one every few minutes when an API key is configured.</p>
+    {% endif %}
+  </div>
+</section>
+
+{# ---- Notable days: SQL-detected anomalies + Claude interpretation ---- #}
+{% if anomalies %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline justify-between gap-3 flex-wrap">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">
+      Notable days
+      <span class="text-zinc-200 ml-2">{{ anomalies | length }}</span>
+      <span class="text-zinc-500 text-xs font-normal normal-case tracking-normal ml-1">
+        last 30 days
+      </span>
+    </h3>
+    <span class="text-[10px] text-zinc-500 normal-case">
+      SQL detector flags · Claude writes the explanation
+    </span>
+  </div>
+  <ul class="divide-y divide-zinc-800/60">
+    {% for a in anomalies %}
+      {%- set badge = {
+        'volume_spike':     ('bg-amber-500/15 text-amber-300 border-amber-500/40',     '↑ volume'),
+        'nocturnal_burst':  ('bg-sky-500/15 text-sky-300 border-sky-500/40',           '☾ nocturnal'),
+        'new_species_wave': ('bg-emerald-500/15 text-emerald-300 border-emerald-500/40','+ new species'),
+        'first_live_day':   ('bg-violet-500/15 text-violet-300 border-violet-500/40',  '★ first live'),
+        'down_day':         ('bg-rose-500/15 text-rose-300 border-rose-500/40',        '● offline'),
+      } -%}
+      {%- set cls, label = badge.get(a.kind, ('bg-zinc-700/30 text-zinc-300 border-zinc-600', a.kind)) -%}
+      <li class="px-5 py-3">
+        <div class="flex items-baseline gap-3 flex-wrap text-xs mb-1.5">
+          <span class="text-zinc-300 font-medium tabular-nums">
+            {{ a.date_utc.strftime('%d %b %Y') if a.date_utc.strftime else a.date_utc }}
+          </span>
+          <span class="px-1.5 py-0 rounded text-[10px] uppercase tracking-wider border {{ cls }}">
+            {{ label }}
+          </span>
+          <span class="text-zinc-500 tabular-nums">
+            {% if a.kind == 'nocturnal_burst' %}
+              {{ a.detection_count }} night · {{ a.baseline_count | int }} day · ratio {{ "%.1f"|format(a.magnitude) }}×
+            {% elif a.kind == 'volume_spike' %}
+              {{ a.detection_count }} det · {{ a.baseline_count | int }}/d baseline · {{ "%.1f"|format(a.magnitude) }}× spike
+            {% elif a.kind == 'new_species_wave' %}
+              {{ a.magnitude | int }} new species · {{ a.detection_count }} det
+            {% elif a.kind == 'first_live_day' %}
+              {{ a.detection_count }} det · {{ a.magnitude | int }} species on day one
+            {% elif a.kind == 'down_day' %}
+              {{ "%.1f"|format(a.magnitude) }} h offline
+            {% endif %}
+          </span>
+        </div>
+        {% if a.interpretation %}
+          <p class="text-sm text-zinc-300 leading-relaxed max-w-3xl">{{ a.interpretation }}</p>
+          {% if a.generated_at %}
+            <div class="text-[10px] text-zinc-600 mt-1.5">
+              {{ a.generated_by or 'AI' }} · {{ a.generated_at.strftime('%Y-%m-%d %H:%M UTC') }}
+            </div>
+          {% endif %}
+        {% else %}
+          <p class="text-sm text-zinc-500 italic">
+            Flagged by the detector — interpretation pending (notes worker will pick it up).
+          </p>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 px-5 py-4">
+  <div class="flex items-baseline justify-between mb-3">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">hourly activity ({{ tz_name }})</h3>
+    <span class="text-[10px] text-zinc-500 tabular-nums">peak: {{ peak_hour }} detections</span>
+  </div>
+  <div class="flex gap-1 h-32">
+    {% for c in hours %}
+      <div class="flex-1 flex flex-col items-center justify-end gap-1">
+        <div class="w-full bg-emerald-500/80 rounded-t"
+             style="height: {{ (c / peak_hour * 100)|round(1) }}%; min-height: 1px;"
+             title="{{ loop.index0 }}:00 — {{ c }} detections"></div>
+        <span class="text-[9px] text-zinc-600 tabular-nums">{{ "%02d"|format(loop.index0) }}</span>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <h3 class="px-5 py-3 border-b border-zinc-800 text-sm font-semibold text-zinc-200 uppercase tracking-wider">top species at this site</h3>
+  <table class="w-full text-sm">
+    <thead class="text-[10px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
+      <tr>
+        <th class="text-left px-5 py-2 font-medium">species</th>
+        <th class="text-right px-5 py-2 font-medium">count</th>
+        <th class="text-right px-5 py-2 font-medium">max conf</th>
+        <th class="text-right px-5 py-2 font-medium">last heard</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for sp in top_species %}
+      <tr class="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+        <td class="px-5 py-2">
+          {{ species_link(sp.common_name, sp.scientific_name, source=name, cls="text-zinc-100 hover:text-emerald-300") }}
+          <span class="italic text-zinc-500 text-xs ml-2">{{ sp.scientific_name }}</span>
+        </td>
+        <td class="px-5 py-2 text-right tabular-nums text-zinc-300">{{ "{:,}".format(sp.n) }}</td>
+        <td class="px-5 py-2 text-right tabular-nums text-zinc-400">{{ "%.2f"|format(sp.max_conf) }}</td>
+        <td class="px-5 py-2 text-right tabular-nums text-zinc-500 text-xs">{{ sp.last_seen.strftime('%m-%d %H:%M') if sp.last_seen else '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <h3 class="px-5 py-3 border-b border-zinc-800 text-sm font-semibold text-zinc-200 uppercase tracking-wider">recent detections</h3>
+  <div class="px-5 py-3 space-y-2">
+    {% for r in recent %}
+      {% set tz = (source_tz | default({})).get(r.source_name, 'UTC') %}
+      <div class="grid grid-cols-[1fr_auto] items-center gap-3">
+        <div class="min-w-0">
+          {{ species_link(r.common_name, r.scientific_name, source=name, cls="text-sm text-zinc-200 hover:text-emerald-300") }}
+          <span class="text-xs text-zinc-500 ml-2 tabular-nums">{{ r.started_at | localtime(tz) }}</span>
+        </div>
+        <div class="w-32">{{ spectrogram_button(r) }}</div>
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+{# ---- Uptime / downtime — moved to the bottom: it's operational data,
+       not what a visitor opens this page to see first. ---- #}
+{%- macro dur(s) -%}
+  {%- if s is none or s == 0 -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h {{ ((s % 3600) // 60)|int }}m
+  {%- else -%}{{ (s // 86400)|int }}d {{ ((s % 86400) // 3600)|int }}h
+  {%- endif -%}
+{%- endmacro -%}
+{% set d = downtime %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline justify-between flex-wrap gap-2">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Uptime</h3>
+    <div class="text-xs tabular-nums">
+      <span class="text-zinc-500">last 24h</span>
+      <span class="{{ 'text-rose-300' if d.down_24h_s > 3600 else ('text-amber-300' if d.down_24h_s > 0 else 'text-emerald-300') }} ml-1">
+        {% if d.down_24h_s == 0 %}no downtime{% else %}{{ dur(d.down_24h_s) }} down{% endif %}
+      </span>
+      <span class="text-zinc-700 mx-2">·</span>
+      <span class="text-zinc-500">7d</span>
+      <span class="{{ 'text-rose-300' if d.down_7d_s > 14400 else ('text-amber-300' if d.down_7d_s > 0 else 'text-emerald-300') }} ml-1">
+        {% if d.down_7d_s == 0 %}no downtime{% else %}{{ dur(d.down_7d_s) }} down{% endif %}
+      </span>
+    </div>
+  </div>
+  {% if d.current_outage_s is not none %}
+    <div class="px-5 py-3 bg-rose-500/5 border-b border-rose-500/20 text-sm">
+      <span class="text-rose-300 font-medium">● currently down</span>
+      <span class="text-zinc-400 ml-2">for {{ dur(d.current_outage_s) }}</span>
+      {% if d.current_reason %}
+        <div class="text-xs text-rose-400/80 mt-1 max-w-3xl truncate" title="{{ d.current_reason }}">
+          {{ d.current_reason }}
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% if d.recent %}
+    <ul class="divide-y divide-zinc-800/60">
+      {% for o in d.recent %}
+        {% set duration_s = ((o.ended_at - o.started_at).total_seconds()) | int %}
+        <li class="px-5 py-2 flex items-baseline justify-between gap-3 text-xs">
+          <div class="min-w-0 flex-1">
+            <span class="text-zinc-400 tabular-nums">{{ o.started_at | localtime(tz_name, '%Y-%m-%d %H:%M') }}</span>
+            <span class="text-zinc-600 mx-1">→</span>
+            <span class="text-zinc-400 tabular-nums">{{ o.ended_at | localtime(tz_name, '%H:%M') }}</span>
+            {% if o.reason %}
+              <span class="text-zinc-600 ml-2 truncate inline-block max-w-md align-bottom" title="{{ o.reason }}">{{ o.reason }}</span>
+            {% endif %}
+          </div>
+          <span class="text-zinc-500 tabular-nums shrink-0">{{ dur(duration_s) }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% elif d.current_outage_s is none %}
+    <p class="px-5 py-4 text-xs text-zinc-500">No recorded outages.</p>
+  {% endif %}
+</section>
+{% endblock %}

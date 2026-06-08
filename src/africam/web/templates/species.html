@@ -1,138 +1,386 @@
 {% extends "base.html" %}
-{% block title %}Africam · species{% endblock %}
+{% from "_macros.html" import species_link %}
+{% block title %}BirdBrain · species{% endblock %}
 
 {% block content %}
+{# Opt the treemap pages into the View Transitions API. Browsers that
+   support cross-document transitions (Chrome/Edge stable, Safari TP, Firefox
+   behind a flag as of 2026) will cross-fade the SVG between the all-sites
+   and single-site renderings. Other browsers just do an instant swap. #}
+<style>
+  @view-transition { navigation: auto; }
+  ::view-transition-old(species-treemap),
+  ::view-transition-new(species-treemap) {
+    animation-duration: 320ms;
+  }
+  /* Zoom-in header strip — visible affordance for the click-through zoom. */
+  .zoom-in-target { cursor: zoom-in; }
+  .zoom-in-target:hover .zoom-header { fill-opacity: 0.85; }
+  .zoom-in-target:focus { outline: none; }
+  .zoom-in-target:focus .zoom-header { fill-opacity: 0.85; }
+</style>
+{# --- IUCN dot palette (matches the iucn_badge macro's colour scheme) --- #}
+{% set IUCN_COLOR = {
+  'LC': '#71717a', 'NT': '#10b981', 'VU': '#f59e0b',
+  'EN': '#f97316', 'CR': '#f43f5e', 'EW': '#9f1239',
+  'EX': '#52525b', 'DD': '#71717a', 'NE': '#52525b',
+} %}
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
-  <div class="px-5 py-3 border-b border-zinc-800 flex flex-col gap-2">
-    <div class="flex items-center justify-between flex-wrap gap-2">
-      <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-        Species detected ·
-        <span id="species-count" class="text-zinc-200">{{ species_list | length }}</span><!--
-       --><span id="species-count-total" class="text-zinc-500 text-xs ml-1 hidden"></span>
-      </h2>
-      {% set base = '/species?sort=' %}
-      <div class="flex gap-2 text-xs">
-        <span class="text-zinc-500">sort:</span>
-        {% for key, label in [('last_seen','last seen'), ('first_seen','first seen'), ('count','count'), ('max_conf','max conf'), ('name','name')] %}
-          {% if sort == key %}
-            <span class="px-2 py-0.5 rounded bg-zinc-700 text-zinc-100">{{ label }}</span>
-          {% else %}
-            <a href="{{ base }}{{ key }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">{{ label }}</a>
-          {% endif %}
-        {% endfor %}
-      </div>
+  {# --- Filter bar --- #}
+  <div class="px-5 py-3 border-b border-zinc-800 flex flex-wrap items-center gap-x-5 gap-y-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Species detected · <span class="text-zinc-200">{{ total_species }}</span>
+      <span class="text-zinc-500 text-xs normal-case ml-2">{{ "{:,}".format(total_detections) }} detections</span>
+    </h2>
+    {# Treemap key — moved up from a footer caption so the area under the
+       chart stays clean. #}
+    <span class="text-[10px] text-zinc-600 normal-case tracking-normal hidden md:inline">
+      tile colour = site · opacity = recency · corner dot = IUCN status
+    </span>
+
+    {# Time-window pills #}
+    <div class="flex items-center gap-1 text-xs">
+      <span class="text-zinc-500 mr-1">window:</span>
+      {% for key, label in [('24h','24h'), ('7d','7d'), ('all','all time')] %}
+        {% set href = '/species?since=' ~ key %}
+        {% for s in source_filter %}{% set href = href ~ '&source=' ~ (s | urlencode) %}{% endfor %}
+        {% if q %}{% set href = href ~ '&q=' ~ (q | urlencode) %}{% endif %}
+        {% if since == key %}
+          <span class="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/40">{{ label }}</span>
+        {% else %}
+          <a href="{{ href }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 border border-zinc-700/60">{{ label }}</a>
+        {% endif %}
+      {% endfor %}
     </div>
-    <input id="species-search" type="search"
-           placeholder="filter by name, sci-name or source (e.g. cisticola, francolin, Tembe)"
-           autocomplete="off" spellcheck="false"
-           class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600">
+
+    {# Source chips #}
+    <div class="flex items-center gap-1 flex-wrap text-xs">
+      <span class="text-zinc-500 mr-1">sites:</span>
+      {% for src in all_source_names %}
+        {% set on = src in source_filter or not source_filter %}
+        {% set new_filter = source_filter | reject('equalto', src) | list if src in source_filter else (source_filter + [src] if source_filter else []) %}
+        {% set href = '/species?since=' ~ since %}
+        {% for s in new_filter %}{% set href = href ~ '&source=' ~ (s | urlencode) %}{% endfor %}
+        {% if q %}{% set href = href ~ '&q=' ~ (q | urlencode) %}{% endif %}
+        <a href="{{ href }}"
+           class="px-2 py-0.5 rounded border transition-colors
+                  {% if not source_filter or src in source_filter %}bg-emerald-500/15 border-emerald-500/40 text-emerald-300{% else %}border-zinc-700 text-zinc-500 hover:text-zinc-300{% endif %}">{{ src }}</a>
+      {% endfor %}
+      {% if source_filter %}
+        <a href="/species?since={{ since }}{% if q %}&q={{ q | urlencode }}{% endif %}"
+           class="px-2 py-0.5 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-100 text-xs">all</a>
+      {% endif %}
+    </div>
+
+    {# Search highlight #}
+    <label class="flex items-center gap-2 text-xs ml-auto">
+      <span class="text-zinc-500">filter:</span>
+      <input id="species-search" type="text" value="{{ q }}"
+             placeholder="bulbul, plover, …"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 w-44 text-zinc-100">
+    </label>
   </div>
 
-  {% if species_list %}
-    <table class="w-full text-sm">
-      <thead class="text-zinc-400 text-xs uppercase tracking-wider">
-        <tr class="border-b border-zinc-800">
-          <th class="text-left font-medium px-5 py-2">Species</th>
-          <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Scientific</th>
-          <th class="text-right font-medium px-5 py-2">Count</th>
-          <th class="text-right font-medium px-5 py-2">Max conf</th>
-          <th class="text-left font-medium px-5 py-2 hidden lg:table-cell">First seen</th>
-          <th class="text-left font-medium px-5 py-2">Last seen</th>
-          <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Sources</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-zinc-800">
-        {% for s in species_list %}
-          {# Use the first source's timezone for display — most species come from a single source. #}
-          {% set tz = source_tz.get(s.sources[0], 'UTC') if s.sources else 'UTC' %}
-          <tr class="hover:bg-zinc-800/40">
-            <td class="px-5 py-2 font-medium">
-              <a href="/species/{{ s.scientific_name | urlencode }}"
-                 class="hover:text-emerald-300">{{ s.common_name }}</a>
-            </td>
-            <td class="px-5 py-2 italic text-zinc-400 hidden md:table-cell">{{ s.scientific_name }}</td>
-            <td class="px-5 py-2 text-right tabular-nums">{{ s.n }}</td>
-            <td class="px-5 py-2 text-right tabular-nums">
-              <span class="inline-block w-16 conf-bar rounded px-2 py-0.5 text-xs"
-                    style="--w: {{ (s.max_conf * 100)|round(0)|int }}%;">
-                {{ "%.2f"|format(s.max_conf) }}
-              </span>
-            </td>
-            <td class="px-5 py-2 tabular-nums text-zinc-400 hidden lg:table-cell"
-                title="{{ s.first_seen | localtime('UTC') }} UTC">
-              {{ s.first_seen | localtime(tz) }}
-              <span class="text-xs text-zinc-600 ml-1">{{ tz | tz_abbr }}</span>
-            </td>
-            <td class="px-5 py-2 tabular-nums text-zinc-400"
-                title="{{ s.last_seen | localtime('UTC') }} UTC">
-              {{ s.last_seen | localtime(tz) }}
-              <span class="text-xs text-zinc-600 ml-1">{{ tz | tz_abbr }}</span>
-            </td>
-            <td class="px-5 py-2 hidden md:table-cell">
-              <div class="flex flex-wrap gap-1">
-                {% for src in s.sources %}
-                  <code class="text-xs text-zinc-300 bg-zinc-800/60 rounded px-1.5 py-0.5">{{ src }}</code>
-                {% endfor %}
-              </div>
-            </td>
-          </tr>
+  {# --- Breadcrumb / zoom path. Up to three levels:
+       1. all sites (top of the tree)
+       2. single site (?source=X)
+       3. rarest at site (?source=X&tail=1)
+  --- #}
+  {% if outer_rects %}
+    <div class="px-5 py-2 border-b border-zinc-800 flex items-center gap-2 text-xs flex-wrap">
+      {% if zoomed %}
+        {% set back_all = '/species?since=' ~ since %}
+        {% if q %}{% set back_all = back_all ~ '&q=' ~ (q | urlencode) %}{% endif %}
+        <a href="{{ back_all }}"
+           class="px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500 inline-flex items-center gap-1">
+          ← all sites
+        </a>
+        <span class="text-zinc-600">›</span>
+        {% if tail_active %}
+          {# Level-2: site is a back link, "rarest" is the current node. #}
+          {% set back_site = '/species?source=' ~ (zoomed_source | urlencode) ~ '&since=' ~ since %}
+          <a href="{{ back_site }}"
+             class="px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500">
+            ← {{ zoomed_source }}
+          </a>
+          <span class="text-zinc-600">›</span>
+          <span class="text-zinc-100 font-medium">rarest</span>
+          <span class="text-zinc-500">·
+            {{ tiles | length }} species at ≤ {{ tail_threshold }} det ·
+            {{ hidden_loud | length }} louder species hidden
+          </span>
+        {% else %}
+          <span class="text-zinc-100 font-medium">{{ zoomed_source }}</span>
+          <span class="text-zinc-500">·
+            {{ tiles | length }} species ·
+            {{ "{:,}".format(total_detections) }} detections
+          </span>
+        {% endif %}
+      {% else %}
+        <span class="text-zinc-400">all sites</span>
+        <span class="text-zinc-600">·
+          <span class="text-emerald-400">click the coloured header bar</span>
+          on any site (or its name in the legend below) to zoom in
+        </span>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {# --- Treemap --- #}
+  {% if tiles %}
+    <div class="p-4">
+      <svg id="species-treemap" viewBox="0 0 {{ viewport.w }} {{ viewport.h }}"
+           preserveAspectRatio="xMidYMid meet"
+           class="w-full block" style="max-height: 72vh; view-transition-name: species-treemap;">
+        {# Source frames + header labels (drawn first, behind leaves).
+           When NOT zoomed, the whole source rectangle is a click target —
+           anything not covered by a leaf (header strip, tile gaps) zooms in
+           to ?source=<name>. When zoomed, the frame is a plain visual and
+           zoom-out happens via the breadcrumb. #}
+        {% for o in outer_rects %}
+          {% set sc = source_colors.get(o.name, '#10b981') %}
+          {# Frame of the source rect (just stroke). #}
+          <rect x="{{ o.x }}" y="{{ o.y }}" width="{{ o.w }}" height="{{ o.h }}"
+                fill="none" stroke="#3f3f46" stroke-width="1"/>
+          {% if not zoomed %}
+            {# Tinted header strip — the visible "zoom into <site>" button.
+               It's drawn over the top 18 px of the source rect (above the
+               species leaves, since leaves are inset by source_pad_top).
+               Wrapping <a> + pointer-events="all" makes the whole strip a
+               click target, not just the text. #}
+            <a href="/species?source={{ o.name | urlencode }}{% if since != 'all' %}&since={{ since }}{% endif %}"
+               class="zoom-in-target">
+              <title>Zoom into {{ o.name }} ({{ "{:,}".format(o.count) }} detections)</title>
+              <rect class="zoom-header"
+                    x="{{ o.x + 0.5 }}" y="{{ o.y + 0.5 }}"
+                    width="{{ o.w - 1 }}" height="17"
+                    fill="{{ sc }}" fill-opacity="0.45"
+                    pointer-events="all" style="cursor: zoom-in;"/>
+              {% if o.w > 80 %}
+                <text x="{{ o.x + 6 }}" y="{{ o.y + 13 }}"
+                      fill="#fafafa" font-size="11" font-family="ui-sans-serif, system-ui"
+                      font-weight="700" pointer-events="none"
+                      style="text-transform:uppercase; letter-spacing:0.05em;">
+                  {{ o.name }}
+                  <tspan fill="#fafafa" fill-opacity="0.7" font-weight="400">·
+                    {{ "{:,}".format(o.count) }} det</tspan>
+                </text>
+                <text x="{{ o.x + o.w - 6 }}" y="{{ o.y + 13 }}"
+                      text-anchor="end" fill="#fafafa" font-size="11"
+                      font-weight="700" pointer-events="none"
+                      font-family="ui-sans-serif, system-ui">
+                  zoom in ↗
+                </text>
+              {% endif %}
+            </a>
+          {% else %}
+            {# Zoomed-in: header is non-interactive, just a label. #}
+            <rect x="{{ o.x + 0.5 }}" y="{{ o.y + 0.5 }}"
+                  width="{{ o.w - 1 }}" height="17"
+                  fill="{{ sc }}" fill-opacity="0.30"/>
+            {% if o.w > 80 %}
+              <text x="{{ o.x + 6 }}" y="{{ o.y + 13 }}"
+                    fill="#fafafa" font-size="11" font-family="ui-sans-serif, system-ui"
+                    font-weight="700"
+                    style="text-transform:uppercase; letter-spacing:0.05em;">
+                {{ o.name }}
+                <tspan fill="#fafafa" fill-opacity="0.7" font-weight="400">·
+                  {{ "{:,}".format(o.count) }} det</tspan>
+              </text>
+            {% endif %}
+          {% endif %}
         {% endfor %}
-      </tbody>
-    </table>
-    <p id="species-empty"
-       class="hidden text-zinc-500 text-sm px-5 py-6">
-      No species match this filter.
-    </p>
+
+        {# Species leaves #}
+        {% for t in tiles %}
+          {# Opacity by recency — newer is more opaque #}
+          {% if t.age_s is none %}
+            {% set opacity = 0.18 %}
+          {% elif t.age_s < 3600 %}
+            {% set opacity = 0.78 %}
+          {% elif t.age_s < 86400 %}
+            {% set opacity = 0.58 %}
+          {% elif t.age_s < 604800 %}
+            {% set opacity = 0.36 %}
+          {% else %}
+            {% set opacity = 0.22 %}
+          {% endif %}
+          {% set big = (t.w > 60 and t.h > 18) %}
+          {% set huge = (t.w > 110 and t.h > 36) %}
+          {% if t.is_other %}
+            <g class="leaf" data-common="{{ t.common | lower }}" data-sci="">
+              <rect x="{{ t.x + 0.5 }}" y="{{ t.y + 0.5 }}" width="{{ t.w - 1 }}" height="{{ t.h - 1 }}"
+                    fill="#27272a" stroke="#3f3f46" stroke-width="0.5"/>
+              {% if big %}
+                <text x="{{ t.x + t.w/2 }}" y="{{ t.y + t.h/2 + 4 }}"
+                      text-anchor="middle" fill="#71717a" font-size="11"
+                      font-family="ui-sans-serif, system-ui">{{ t.common }}</text>
+              {% endif %}
+              <title>{{ t.common }} at {{ t.source }} · {{ "{:,}".format(t.n) }} detections</title>
+            </g>
+          {% else %}
+            <a class="leaf" href="/species/{{ t.scientific | urlencode }}?source={{ t.source | urlencode }}"
+               data-common="{{ t.common | lower }}" data-sci="{{ t.scientific | lower }}">
+              {% set tile_color = source_colors.get(t.source, '#10b981') %}
+              <rect x="{{ t.x + 0.5 }}" y="{{ t.y + 0.5 }}" width="{{ t.w - 1 }}" height="{{ t.h - 1 }}"
+                    fill="{{ tile_color }}" fill-opacity="{{ opacity }}"
+                    stroke="#0a0a0a" stroke-width="0.5" stroke-opacity="0.4"/>
+              {% if huge %}
+                <text x="{{ t.x + 6 }}" y="{{ t.y + 16 }}"
+                      fill="#f4f4f5" font-size="12" font-family="ui-sans-serif, system-ui"
+                      font-weight="500">{{ t.common }}</text>
+                <text x="{{ t.x + 6 }}" y="{{ t.y + 30 }}"
+                      fill="#a1a1aa" font-size="10" font-family="ui-sans-serif, system-ui">
+                  {{ "{:,}".format(t.n) }}</text>
+              {% elif big %}
+                <text x="{{ t.x + t.w/2 }}" y="{{ t.y + t.h/2 + 4 }}"
+                      text-anchor="middle" fill="#f4f4f5" font-size="10"
+                      font-family="ui-sans-serif, system-ui">{{ t.common }}</text>
+              {% endif %}
+              {% if t.iucn and t.w > 28 and t.h > 16 %}
+                <circle cx="{{ t.x + t.w - 6 }}" cy="{{ t.y + 6 }}" r="3"
+                        fill="{{ IUCN_COLOR.get(t.iucn, '#71717a') }}"
+                        stroke="#0a0a0a" stroke-width="0.5"/>
+              {% endif %}
+              <title>{{ t.common }} ({{ t.scientific }})
+at {{ t.source }} · {{ "{:,}".format(t.n) }} detections · max conf {{ "%.2f"|format(t.max_conf) }}{% if t.iucn %} · IUCN {{ t.iucn }}{% endif %}</title>
+            </a>
+          {% endif %}
+        {% endfor %}
+      </svg>
+
+      {# Bottom-right action row. At zoomed-out level we just nudge the user
+         to keep going if anything's still collapsed; at level 1 (single
+         site) the prominent "zoom into rarest" button sits here. The row
+         is empty (and therefore invisible) at level 2 / no-zoom. #}
+      <div class="mt-3 flex justify-end items-center gap-3 min-h-[1.5rem]">
+        {% if not zoomed %}
+          <span class="text-[10px] text-zinc-600">
+            tiles too small to draw are collapsed into <em>+N more</em> — zoom in to see them all
+          </span>
+        {% endif %}
+        {% if zoomed and long_tail and not tail_active %}
+          {% set tail_href = '/species?source=' ~ (zoomed_source | urlencode) ~ '&tail=1&since=' ~ since %}
+          <a href="{{ tail_href }}"
+             class="text-sm px-4 py-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200 inline-flex items-center gap-2">
+            <span>zoom into rarest</span>
+            <span class="text-emerald-400">↗</span>
+          </a>
+        {% endif %}
+      </div>
+    </div>
+
+    {# --- Bottom panel.
+         - Level 1 (zoomed, no tail): rarest species + button to zoom further
+           into the long tail.
+         - Level 2 (tail_active): list the LOUD species we hid, so the user
+           has a quick path back to the dominants. --- #}
+    {% if tail_active and hidden_loud %}
+      <div class="border-t border-zinc-800 px-5 py-4">
+        <div class="flex items-baseline justify-between mb-3 gap-3 flex-wrap">
+          <h3 class="text-xs uppercase tracking-wider text-zinc-400">
+            Louder species hidden from this view
+            <span class="text-zinc-600 normal-case tracking-normal ml-1">
+              (above the {{ tail_threshold }}-detection median)
+            </span>
+          </h3>
+          {% set back_site = '/species?source=' ~ (zoomed_source | urlencode) ~ '&since=' ~ since %}
+          <a href="{{ back_site }}"
+             class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500">
+            ← back to all species
+          </a>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1 text-sm">
+          {% for sp in hidden_loud %}
+            <div class="flex items-baseline justify-between gap-3 truncate">
+              <a href="/species/{{ sp.scientific | urlencode }}?source={{ zoomed_source | urlencode }}"
+                 class="text-zinc-200 hover:text-emerald-300 truncate">
+                {{ sp.common }}
+              </a>
+              <span class="text-zinc-500 text-xs tabular-nums shrink-0">
+                {{ "{:,}".format(sp.n) }} det
+              </span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% elif zoomed and long_tail %}
+      <div class="border-t border-zinc-800 px-5 py-4">
+        <div class="mb-3">
+          <h3 class="text-xs uppercase tracking-wider text-zinc-400">
+            Rarest at <span class="text-zinc-200">{{ zoomed_source }}</span>
+            <span class="text-zinc-600 normal-case tracking-normal ml-1">
+              · bottom {{ long_tail | length }} by detection count
+            </span>
+          </h3>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1 text-sm">
+          {% for sp in long_tail %}
+            <div class="flex items-baseline justify-between gap-3 truncate">
+              <a href="/species/{{ sp.scientific | urlencode }}?source={{ zoomed_source | urlencode }}"
+                 class="text-zinc-200 hover:text-emerald-300 truncate">
+                {{ sp.common }}
+              </a>
+              <span class="text-zinc-500 text-xs tabular-nums shrink-0">
+                {{ sp.n }} det{% if sp.max_conf %} · {{ "%.2f"|format(sp.max_conf) }}{% endif %}
+              </span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
   {% else %}
-    <p class="text-zinc-500 text-sm px-5 py-6">
-      No detections yet. Once the pipeline produces some, species will appear here.
+    <p class="text-zinc-500 text-sm px-5 py-10 text-center">
+      No species in this window. Widen the time range or clear site filters.
     </p>
+  {% endif %}
+
+  {# --- Alphabetical fallback (mobile / search index) --- #}
+  {% if all_species %}
+    <details class="border-t border-zinc-800">
+      <summary class="px-5 py-3 cursor-pointer text-xs uppercase tracking-wider text-zinc-500 hover:text-zinc-300">
+        Alphabetical list ({{ all_species | length }})
+      </summary>
+      <div class="px-5 py-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-1 text-sm">
+        {% for sci, common in all_species %}
+          <div class="alpha-row truncate" data-common="{{ common | lower }}" data-sci="{{ sci | lower }}">
+            {{ species_link(common, sci, cls="text-zinc-200 hover:text-emerald-300") }}
+            <span class="italic text-zinc-500 text-xs ml-1">{{ sci }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    </details>
   {% endif %}
 </section>
 
 <script>
-(function () {
-  const input  = document.getElementById('species-search');
-  const tbody  = document.querySelector('section table tbody');
-  if (!input || !tbody) return;
-  const rows   = Array.from(tbody.querySelectorAll('tr'));
-  const empty  = document.getElementById('species-empty');
-  const count  = document.getElementById('species-count');
-  const totalEl = document.getElementById('species-count-total');
-  const total  = rows.length;
-
-  // Cache lower-cased text once per row — typing is hot path.
-  const rowText = rows.map((r) => r.textContent.toLowerCase());
-
-  function apply() {
-    const q = input.value.trim().toLowerCase();
-    let visible = 0;
-    rows.forEach((r, i) => {
-      const show = !q || rowText[i].includes(q);
-      r.style.display = show ? '' : 'none';
-      if (show) visible++;
-    });
-    count.textContent = visible;
-    if (q) {
-      totalEl.textContent = 'of ' + total;
-      totalEl.classList.remove('hidden');
-    } else {
-      totalEl.classList.add('hidden');
+  // Client-side search filter: dim non-matching tiles + alphabetical rows.
+  (function () {
+    const box = document.getElementById('species-search');
+    const tiles = document.querySelectorAll('#species-treemap .leaf');
+    const rows = document.querySelectorAll('.alpha-row');
+    function apply(q) {
+      q = (q || '').trim().toLowerCase();
+      tiles.forEach(el => {
+        const c = el.getAttribute('data-common') || '';
+        const s = el.getAttribute('data-sci') || '';
+        const hit = !q || c.includes(q) || s.includes(q);
+        el.style.opacity = hit ? '' : '0.15';
+        el.style.pointerEvents = hit ? '' : 'none';
+      });
+      rows.forEach(el => {
+        const c = el.getAttribute('data-common') || '';
+        const s = el.getAttribute('data-sci') || '';
+        const hit = !q || c.includes(q) || s.includes(q);
+        el.style.display = hit ? '' : 'none';
+      });
     }
-    empty.classList.toggle('hidden', visible !== 0);
-  }
-
-  input.addEventListener('input', apply);
-  // "/" focuses the search like in many web apps. Bail if user is already
-  // typing into another input so we don't hijack keystrokes.
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
-    const active = document.activeElement;
-    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
-    e.preventDefault();
-    input.focus();
-    input.select();
-  });
-})();
+    if (box) {
+      box.addEventListener('input', e => apply(e.target.value));
+      // Re-apply on load in case browser restored a value.
+      apply(box.value);
+    }
+  })();
 </script>
 {% endblock %}

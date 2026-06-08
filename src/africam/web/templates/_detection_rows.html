@@ -3,23 +3,13 @@
    Expects: rows (list of {"r": DetectionRow, "n": int, "latest": datetime}),
    source_tz; optionally note_tag_by_sci, palette_for_tag, default_palette,
    status_by_sci. #}
-{% set _iucn_class = {
-  "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
-  "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),
-  "VU": ("bg-amber-700/30 text-amber-300 border-amber-600/40", "Vulnerable"),
-  "EN": ("bg-orange-700/30 text-orange-300 border-orange-600/40", "Endangered"),
-  "CR": ("bg-rose-700/30 text-rose-300 border-rose-600/40", "Critically Endangered"),
-  "EW": ("bg-rose-900/40 text-rose-400 border-rose-700/50", "Extinct in the Wild"),
-  "EX": ("bg-zinc-900 text-zinc-500 border-zinc-700", "Extinct"),
-  "DD": ("bg-zinc-700/30 text-zinc-400 border-zinc-600/40", "Data Deficient"),
-  "NE": ("bg-zinc-800 text-zinc-500 border-zinc-700", "Not Evaluated"),
-} %}
+{% from "_macros.html" import iucn_badge, species_link %}
 {% if rows %}
   <table class="w-full text-sm">
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
       <tr class="border-b border-zinc-800">
         <th class="text-left font-medium px-5 py-2">Time (local)</th>
-        <th class="text-left font-medium px-5 py-2">Source</th>
+        <th class="text-left font-medium px-5 py-2">Site</th>
         <th class="text-left font-medium px-5 py-2">Species</th>
         <th class="text-right font-medium px-5 py-2">Confidence · clip</th>
         <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Label</th>
@@ -43,7 +33,7 @@
             {% endif %}
           </td>
           <td class="px-5 py-2">
-            <code class="text-zinc-300">{{ r.source_name }}</code>
+            <a href="/site/{{ r.source_name | urlencode }}" class="text-zinc-300 hover:text-emerald-300">{{ r.source_name }}</a>
             {% if r.site %}
               <span class="text-zinc-500"> · </span>
               <span class="text-zinc-200" title="{% if r.latitude is not none and r.longitude is not none %}{{ '%.3f'|format(r.latitude) }}, {{ '%.3f'|format(r.longitude) }}{% endif %}">{{ r.site }}</span>
@@ -51,13 +41,8 @@
           </td>
           <td class="px-5 py-2">
             <div class="font-medium flex items-center gap-1.5 flex-wrap">
-              <span>{{ r.common_name }}</span>
-              {% set status = (status_by_sci or {}).get(r.scientific_name) %}
-              {% if status and status in _iucn_class %}
-                {% set _cls, _label = _iucn_class[status] %}
-                <span class="px-1 py-0 rounded text-[10px] font-medium tabular-nums border {{ _cls }}"
-                      title="IUCN · {{ _label }}">{{ status }}</span>
-              {% endif %}
+              {{ species_link(r.common_name, r.scientific_name, source=page_source, cls="hover:text-emerald-300") }}
+              {{ iucn_badge((status_by_sci or {}).get(r.scientific_name)) }}
             </div>
             <div class="italic text-zinc-500 text-xs hidden lg:block">{{ r.scientific_name }}</div>
           </td>

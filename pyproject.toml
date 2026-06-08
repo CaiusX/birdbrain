@@ -11,7 +11,7 @@ dependencies = [
     "librosa>=0.10",
     "resampy>=0.4",
     "numpy>=1.26,<2.0",
-    "yt-dlp>=2024.10.7",
+    "yt-dlp[default]>=2024.10.7",
     "sqlalchemy>=2.0",
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
@@ -31,6 +31,11 @@ dependencies = [
     # binary. OCR is gated by config + a runtime check, so the binary is
     # optional — the resolver falls back to manual mode if it's missing.
     "pytesseract>=0.3.10",
+    # Background species-note generator. Worker stays dormant if
+    # ANTHROPIC_API_KEY isn't set, so the dep loads but doesn't run for
+    # users who haven't opted in.
+    "anthropic>=0.71",
+    "squarify>=0.4",
 ]
 
 [project.scripts]

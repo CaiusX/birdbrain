@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -13,16 +15,44 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+
+@functools.lru_cache(maxsize=64)
+def _zone_info(tz_name: str) -> ZoneInfo:
+    """Resolve an IANA timezone name to a ZoneInfo, falling back to UTC for
+    unknown names. Cached because most call sites loop over many rows that
+    share a small set of timezones (typically just Africa/Johannesburg)."""
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+import squarify
+import structlog
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, case, desc, func, or_, select
 
+from africam import weather as weather_module
 from africam.config import AppConfig, SourceConfig, load_sources
+from africam.host import host_metrics
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
-from africam.storage import Database, DetectionRow, SpeciesNoteRow, WorkerHeartbeatRow
+from africam.storage import (
+    DailyBriefRow,
+    Database,
+    DetectionRow,
+    SiteNoteRow,
+    SpeciesNoteRow,
+    WorkerHeartbeatRow,
+)
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -53,8 +83,113 @@ def _tz_abbr(tz_name: str | None) -> str:
         return tz_name
 
 
+def _salvage_truncated_json(raw: str) -> dict | None:
+    """When the model's JSON output was cut off mid-array (max_tokens hit),
+    walk back from the end to the last }, ] or "," and synthesise the closing
+    brackets/braces. String-aware so a } inside a string literal doesn't
+    confuse the counter. Returns the parsed dict on success, None otherwise."""
+    n = len(raw)
+    # Don't try harder than ~600 chars back; truncation is normally at the
+    # very end of a long output.
+    for end in range(n - 1, max(0, n - 600), -1):
+        if raw[end] not in "},]":
+            continue
+        candidate = raw[: end + 1]
+        depth_curly = depth_square = 0
+        in_str = esc = False
+        bad = False
+        for c in candidate:
+            if esc:
+                esc = False
+                continue
+            if in_str:
+                if c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth_curly += 1
+            elif c == "}":
+                depth_curly -= 1
+            elif c == "[":
+                depth_square += 1
+            elif c == "]":
+                depth_square -= 1
+            if depth_curly < 0 or depth_square < 0:
+                bad = True
+                break
+        if bad or in_str:
+            continue
+        # Trim a dangling comma that a truncated array almost always leaves.
+        trimmed = candidate.rstrip()
+        if trimmed.endswith(","):
+            trimmed = trimmed[:-1]
+        suffix = "]" * depth_square + "}" * depth_curly
+        try:
+            data = json.loads(trimmed + suffix)
+        except (ValueError, TypeError):
+            continue
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _parse_brief(text: str | None) -> dict:
+    """Parse a daily brief into {overall, sites:[{site, bullets}]}. New briefs
+    are JSON (optionally fenced); legacy briefs are a plain paragraph, returned
+    as the overall text with no per-site sections. Truncated JSON (model hit
+    max_tokens) is salvaged by closing trailing brackets."""
+    if not text:
+        return {"overall": "", "sites": []}
+    raw = text.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.S | re.I)
+    if fence:
+        raw = fence.group(1).strip()
+    elif raw.startswith("```"):
+        # Opening fence with no closing one — truncation cut it off. Strip
+        # the opening and proceed against the body.
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, count=1)
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        data = _salvage_truncated_json(raw)
+    if not isinstance(data, dict):
+        return {"overall": text.strip(), "sites": []}
+    sites: list[dict] = []
+    for s in data.get("sites") or []:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("site") or "").strip()
+        bullets = [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()]
+        if name and bullets:
+            sites.append({"site": name, "bullets": bullets})
+    return {"overall": str(data.get("overall") or "").strip(), "sites": sites}
+
+
 TEMPLATES.env.filters["localtime"] = _localtime
 TEMPLATES.env.filters["tz_abbr"] = _tz_abbr
+TEMPLATES.env.filters["parse_brief"] = _parse_brief
+
+
+# Per-source colour palette for the /species treemap. Hand-picked to evoke
+# each site's biome rather than scraped from a logo (africam.com doesn't
+# carry distinct per-lodge logos — checked). Any source not in this dict
+# falls back to the template's default emerald.
+SOURCE_COLORS: dict[str, str] = {
+    "Tembe":               "#059669",  # KZN coastal sand forest — emerald-600
+    "Olifants (Naledi)":   "#84cc16",  # Greater Kruger bushveld — lime-500
+    "Timbavati":           "#b91c1c",  # Lowveld red soils       — red-700
+    "Twin Pan":            "#a8a29e",  # Botswana pan / grass    — stone-400
+    "Safarihoek":          "#ea580c",  # Etosha Heights, arid    — orange-600
+    "Tau Game Lodge":      "#b45309",  # Madikwe bushveld        — amber-700
+    "Tortilis Camp":       "#eab308",  # Amboseli golden grass   — yellow-500
+    "Mara River":          "#0891b2",  # Mara Triangle, riverine — cyan-600
+    "Mpala Watering Hole": "#4d7c0f",  # Laikipia acacia plateau — lime-700
+    "Stony Point":         "#1d4ed8",  # Coastal Atlantic colony — blue-700
+    "Elephant Pan":        "#7c2d12",  # Tuli rusty riparian     — orange-900
+}
 
 
 def _solar_event_utc_hours(d: date, lat: float, lon: float,
@@ -109,23 +244,30 @@ def _solar_bands(d: date, lat: float, lon: float, tz: ZoneInfo) -> list[dict]:
     + end-of-day). Returns ``[]`` if any solar event can't be computed."""
     sr = _solar_local_hour(d, lat, lon, tz, -0.833, morning=True)   # sunrise
     ss = _solar_local_hour(d, lat, lon, tz, -0.833, morning=False)  # sunset
-    cd_morning = _solar_local_hour(d, lat, lon, tz, -6.0, morning=True)   # civil dawn
-    cd_evening = _solar_local_hour(d, lat, lon, tz, -6.0, morning=False)  # civil dusk
-    if None in (sr, ss, cd_morning, cd_evening):
+    # Nautical twilight (sun at -12°) for the outer dawn/dusk edge — civil
+    # (-6°) is only ~25 min wide in the tropics, which the glow band eats
+    # almost entirely. Nautical gives the rose tint a visible footprint.
+    nt_morning = _solar_local_hour(d, lat, lon, tz, -12.0, morning=True)
+    nt_evening = _solar_local_hour(d, lat, lon, tz, -12.0, morning=False)
+    if None in (sr, ss, nt_morning, nt_evening):
         return []
-    # ~15 min strips bracket sunrise/sunset so the "moment" gets its own band.
-    strip = 0.25
+    # Sunrise/sunset bands sit on the *night side* of the sun event: the
+    # orange horizon glow only happens while the sun is at/below the horizon.
+    # Once the sun is up it's day, not "sunrise". Dawn/dusk fill the rest of
+    # nautical twilight (sun -12° to glow band) with a cooler rose tint.
+    glow = 0.33  # ~20 min — the narrow band where the horizon goes peak orange
     bands = [
         # night wraps: two rects
-        {"name": "night", "start": 0.0, "end": cd_morning},
-        {"name": "dawn",     "start": cd_morning,  "end": sr - strip},
-        {"name": "sunrise",  "start": sr - strip,  "end": sr + strip},
-        {"name": "day",      "start": sr + strip,  "end": ss - strip},
-        {"name": "sunset",   "start": ss - strip,  "end": ss + strip},
-        {"name": "dusk",     "start": ss + strip,  "end": cd_evening},
-        {"name": "night", "start": cd_evening, "end": 24.0},
+        {"name": "night",   "start": 0.0, "end": nt_morning},
+        {"name": "dawn",    "start": nt_morning,    "end": sr - glow},
+        {"name": "sunrise", "start": sr - glow,     "end": sr},
+        {"name": "day",     "start": sr,            "end": ss},
+        {"name": "sunset",  "start": ss,            "end": ss + glow},
+        {"name": "dusk",    "start": ss + glow,     "end": nt_evening},
+        {"name": "night",   "start": nt_evening, "end": 24.0},
     ]
-    # Drop zero/negative-width bands (e.g. if dawn strip overlaps sunrise).
+    # Drop zero/negative-width bands. Near the equator the glow band can be
+    # wider than the twilight period, which would push dawn/dusk negative.
     return [b for b in bands if b["end"] > b["start"]]
 
 # Captures the 11-char YouTube video id from /watch?v=, youtu.be/ or /embed/ URLs.
@@ -179,6 +321,8 @@ def _build_tiles(sources: list[SourceConfig]) -> list[LiveTile]:
 _reanalyze_lock = threading.Lock()
 _reanalyze_state: dict = {"detector": None}
 
+log = structlog.get_logger("africam.web")
+
 
 def _get_reanalyze_detector():
     if _reanalyze_state["detector"] is None:
@@ -200,11 +344,32 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         static_sources = []
     sites: dict[str, Site] = load_sites(cfg.sites_file)
 
-    app = FastAPI(title="Africam Bird Recognition", version="0.1.0")
+    app = FastAPI(title="BirdBrain", version="0.1.0")
     app.state.db = db
     app.state.clips_root = clips_root
     app.state.sites = sites
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+
+    # Public-tunnel gate: Cloudflare attaches CF-Connecting-IP on every proxied
+    # request, so its presence identifies traffic that came in via the public
+    # birds.vcexl.com tunnel (vs LAN/localhost on the Pi). For public visitors
+    # we hide /admin and refuse all mutating verbs — keeps the dashboard
+    # read-only without putting a login in front of the whole site.
+    _PUBLIC_BLOCKED_PREFIXES = ("/admin",)
+    _PUBLIC_BLOCKED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+
+    @app.middleware("http")
+    async def restrict_public(request: Request, call_next):
+        is_public = request.headers.get("cf-connecting-ip") is not None
+        request.state.is_public = is_public
+        if is_public:
+            path = request.url.path
+            if (
+                request.method in _PUBLIC_BLOCKED_METHODS
+                or any(path.startswith(p) for p in _PUBLIC_BLOCKED_PREFIXES)
+            ):
+                return Response(status_code=404)
+        return await call_next(request)
 
     def _runtime_to_cfg(row) -> SourceConfig:
         from africam.config import OcrConfig
@@ -223,10 +388,17 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         )
 
     def _all_sources() -> tuple[list[SourceConfig], dict[str, SourceConfig], list[LiveTile]]:
-        """Static (toml) + runtime (DB) sources merged; runtime wins on name clash."""
-        merged: dict[str, SourceConfig] = {s.name: s for s in static_sources}
+        """Static (toml) + runtime (DB) sources merged; runtime wins on name
+        clash. Admin-disabled sources are dropped from the active roster — the
+        supervisor's next 15-s tick then stops the worker."""
+        disabled = db.list_disabled_source_names()
+        merged: dict[str, SourceConfig] = {
+            s.name: s for s in static_sources if s.name not in disabled
+        }
         runtime_names: set[str] = set()
         for row in db.list_runtime_sources():
+            if row.name in disabled:
+                continue
             merged[row.name] = _runtime_to_cfg(row)
             runtime_names.add(row.name)
         ordered = list(merged.values())
@@ -234,6 +406,196 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         for t in tiles:
             t.is_runtime = t.name in runtime_names  # type: ignore[attr-defined]
         return ordered, merged, tiles
+
+    def _map_sites(sources_by_name: dict[str, SourceConfig]) -> list[dict]:
+        """Map pins: sites.toml entries (for multi-site OCR resolution) plus any
+        single-site source that carries its own lat/lon (most do — runtime
+        sources added via /admin always do). Sites.toml wins on name clash so
+        the OCR aliases stay authoritative."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for site in sorted(sites.values(), key=lambda x: x.name):
+            out.append({"name": site.name, "lat": site.lat, "lon": site.lon})
+            seen.add(site.name)
+        for src in sorted(sources_by_name.values(), key=lambda x: x.name):
+            if src.name in seen or src.lat is None or src.lon is None:
+                continue
+            out.append({"name": src.name, "lat": src.lat, "lon": src.lon})
+            seen.add(src.name)
+        return out
+
+    def _front_activity(
+        sources_by_name: dict[str, SourceConfig],
+    ) -> tuple[list[dict], dict, list[dict]]:
+        """Front-page activity: per mapped site, the count of unique species
+        heard in the last 24h (drives the map bubbles) and the most-recently-
+        heard distinct species (with age, for the by-site panel + popups).
+        Also returns headline stats and a top-2-per-site list of inter-site
+        species-overlap pairs (last 30 days) for the map's connection web."""
+        now = datetime.now(UTC)
+        since = now - timedelta(hours=24)
+        recent_n = 6
+        with db.session() as s:
+            grouped = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    DetectionRow.scientific_name,
+                    func.max(DetectionRow.common_name),
+                    func.max(DetectionRow.started_at),
+                )
+                .where(DetectionRow.started_at >= since)
+                .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+            ).all()
+            ts_rows = s.execute(
+                select(DetectionRow.source_name, DetectionRow.started_at)
+                .where(DetectionRow.started_at >= since)
+            ).all()
+            last_det = s.execute(select(func.max(DetectionRow.started_at))).scalar()
+
+        # tz per source (cached) — drives source-local hour bucketing + bands.
+        tz_cache: dict[str, ZoneInfo] = {}
+
+        def _site_tz(name: str) -> ZoneInfo:
+            if name not in tz_cache:
+                cfg = sources_by_name.get(name)
+                tz_cache[name] = _zone_info(cfg.timezone if cfg else "UTC")
+            return tz_cache[name]
+
+        # Per-source 24h hour-of-day histogram (in the source's local time).
+        per_hours: dict[str, list[int]] = {}
+        for src, ts in ts_rows:
+            aware = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+            per_hours.setdefault(src, [0] * 24)[aware.astimezone(_site_tz(src)).hour] += 1
+        det_24h = len(ts_rows)
+
+        per_source: dict[str, list[dict]] = {}
+        species_seen: set[str] = set()
+        for src, sci, common, last_seen in grouped:
+            species_seen.add(sci)
+            seen_at = last_seen if last_seen.tzinfo else last_seen.replace(tzinfo=UTC)
+            per_source.setdefault(src, []).append(
+                {"sci": sci, "common": common, "last_seen": seen_at}
+            )
+
+        activity: list[dict] = []
+        for site in _map_sites(sources_by_name):
+            name = site["name"]
+            sp = sorted(
+                per_source.get(name, []),
+                key=lambda x: x["last_seen"],
+                reverse=True,
+            )
+            hours_arr = per_hours.get(name, [0] * 24)
+            tz = _site_tz(name)
+            local_now = now.astimezone(tz)
+            bands = (
+                _solar_bands(local_now.date(), site["lat"], site["lon"], tz)
+                if site["lat"] is not None and site["lon"] is not None
+                else []
+            )
+            activity.append({
+                "name": name,
+                "lat": site["lat"],
+                "lon": site["lon"],
+                # Per-site palette colour drives the dashboard map dot.
+                # Falls back to the templates' default emerald.
+                "color": SOURCE_COLORS.get(name, "#10b981"),
+                "species_24h": len(sp),
+                # IANA tz so the modal's hour-drill JS can compute "now"
+                # in the site's clock without re-querying the server.
+                "tz": str(tz),
+                # Full 24-h activity clock for the hour-drill modal. The
+                # map markers themselves are simple coloured dots, so no
+                # second "compact" variant is shipped — saves ~70 KB of
+                # inline SVG per dashboard load.
+                "dial_svg_full": _radial_dial_svg(
+                    hours_arr, highlight=local_now.hour, bands=bands,
+                    compact=False, interactive=True,
+                ),
+                "recent": [
+                    {
+                        "sci": x["sci"],
+                        "common": x["common"],
+                        "age_s": max(0, int((now - x["last_seen"]).total_seconds())),
+                    }
+                    for x in sp[:recent_n]
+                ],
+            })
+
+        last_age = None
+        if last_det is not None:
+            if last_det.tzinfo is None:
+                last_det = last_det.replace(tzinfo=UTC)
+            last_age = max(0, int((now - last_det).total_seconds()))
+
+        heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        ordered = list(sources_by_name.values())
+        cams_live = sum(
+            1
+            for c in ordered
+            if _hb_status(heartbeats.get(c.name), now)[0] == "running"
+        )
+        stats = {
+            "species_24h": len(species_seen),
+            "det_24h": det_24h,
+            "cams_live": cams_live,
+            "cams_total": len(ordered),
+            "last_age_s": last_age,
+        }
+
+        # Inter-site shared-species web. 30-day window so the lines reflect
+        # ecological / flyway overlap rather than 24h noise. We keep each
+        # site's two strongest links and let pairs dedupe — this caps the
+        # drawing at ~20 lines for an 11-site network, dense enough to read
+        # without smothering the map.
+        thirty_d = now - timedelta(days=30)
+        coords_by_name = {
+            e["name"]: (e["lat"], e["lon"])
+            for e in activity
+            if e["lat"] is not None and e["lon"] is not None
+        }
+        with db.session() as s:
+            dpairs = s.execute(
+                select(DetectionRow.source_name, DetectionRow.scientific_name)
+                .where(DetectionRow.started_at >= thirty_d)
+                .distinct()
+            ).all()
+        sp_by_src: dict[str, set[str]] = {}
+        for src, sci in dpairs:
+            if src in coords_by_name:
+                sp_by_src.setdefault(src, set()).add(sci)
+        # Symmetric counts; key by sorted tuple so each pair is unique.
+        shared: dict[tuple[str, str], int] = {}
+        names = sorted(sp_by_src)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                n = len(sp_by_src[a] & sp_by_src[b])
+                if n > 0:
+                    shared[(a, b)] = n
+        # Per-site top-2 strongest neighbours; pairs union across sites so
+        # mutually-strong neighbours produce one shared edge, not two.
+        keep: set[tuple[str, str]] = set()
+        for name in names:
+            links = [
+                ((a, b), count)
+                for (a, b), count in shared.items()
+                if name in (a, b)
+            ]
+            links.sort(key=lambda x: x[1], reverse=True)
+            for pair, _ in links[:2]:
+                keep.add(pair)
+        pairs: list[dict] = []
+        for (a, b) in sorted(keep):
+            n = shared[(a, b)]
+            la, lo_a = coords_by_name[a]
+            lb, lo_b = coords_by_name[b]
+            pairs.append({
+                "a": a, "b": b, "shared": n,
+                "lat_a": la, "lon_a": lo_a,
+                "lat_b": lb, "lon_b": lo_b,
+            })
+
+        return activity, stats, pairs
 
     def _site_states(tiles: list[LiveTile], sources_by_name: dict[str, SourceConfig]) -> dict[str, dict]:
         out: dict[str, dict] = {}
@@ -306,6 +668,44 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "all_species": all_species,
         }
 
+    @app.get("/about", response_class=HTMLResponse)
+    def about(request: Request) -> HTMLResponse:
+        """Static credits + citation page. No DB calls; safe to render publicly
+        through the tunnel (middleware only blocks /admin + mutating verbs)."""
+        return TEMPLATES.TemplateResponse(request, "about.html", {})
+
+    @app.get("/logo-test", response_class=HTMLResponse)
+    def logo_test_page(request: Request) -> HTMLResponse:
+        """Side-by-side gallery of the 10 logo iterations. SVGs are generated
+        by tools/build_logos.py and served from /static/logo-test/. Each card
+        shows the same file on dark + light backgrounds at lockup, 32 px and
+        16 px scales so favicon legibility is visible at a glance."""
+        variants = [
+            (1,  "Birdbrain Classic",     "Symmetric · depth 6 · angle 30° · ratio 0.65"),
+            (2,  "Heart Canopy",          "Squat · depth 6 · angle 35° · ratio 0.60"),
+            (3,  "Tilted Perch",          "Classic geometry rotated 12° clockwise"),
+            (4,  "Asymmetric Branches",   "Left split 35°, right split 25°, depth 6"),
+            (5,  "Dense Network",         "Classic + skip-connections at depths 4–6"),
+            (6,  "Minimal Mark",          "Depth 4, thicker strokes — favicon-optimised"),
+            (7,  "Deep Detail",           "Depth 7, fine strokes — large-display canopy"),
+            (8,  "Head Accent",           "Classic + emerald chevron and amber beak dot"),
+            (9,  "Wing Spread",           "Angle 45°, ratio 0.70 — wings extended"),
+            (10, "Spectrogram Rotation",  "Classic rotated 90° CCW — trunk left, branches right"),
+            (11, "Crested Heart",         "v2 heart canopy + head chevron + beak dot — bird emerging from brain"),
+            (12, "Heart on Neck",         "v2 canopy on an S-curved bird neck — anatomy hint"),
+            (13, "Synaptic Heart",        "v2 + sparse arc skip-connections with synaptic dots — dendritic web"),
+            (14, "Soaring Heart (polished)",  "Centred head + triangular beak + tail-feather chevron · final candidate"),
+            (15, "Wide Crested Heart",    "Angle 40° (compromise between v2 and v9) + head chevron + beak dot"),
+        ]
+        return TEMPLATES.TemplateResponse(
+            request, "logo_test.html",
+            {"variants": [
+                {"n": n, "name": name, "blurb": blurb,
+                 "url": f"/static/logo-test/logo-{n:02d}.svg"}
+                for n, name, blurb in variants
+            ]},
+        )
+
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
         _, sources_by_name, tiles = _all_sources()
@@ -322,33 +722,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             )
             rows = _group_detections(raw, group_minutes * 60)[:50]
-            row_sources = list(
-                s.scalars(
-                    select(DetectionRow.source_name)
-                    .group_by(DetectionRow.source_name)
-                    .order_by(DetectionRow.source_name)
-                )
-            )
-            since = datetime.now(UTC) - timedelta(hours=1)
-            top_recent = list(
-                s.execute(
-                    select(
-                        DetectionRow.common_name,
-                        DetectionRow.scientific_name,
-                        func.count().label("n"),
-                        func.max(DetectionRow.confidence).label("max_conf"),
-                    )
-                    .where(DetectionRow.started_at >= since)
-                    .group_by(DetectionRow.common_name, DetectionRow.scientific_name)
-                    .order_by(desc("n"))
-                    .limit(10)
-                )
-            )
 
-        sites_for_map = [
-            {"name": s.name, "lat": s.lat, "lon": s.lon}
-            for s in sorted(sites.values(), key=lambda s: s.name)
-        ]
+        sites_activity, front_stats, site_pairs = _front_activity(sources_by_name)
         tiles_for_js = [
             {
                 "name": t.name,
@@ -361,20 +736,21 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             for t in tiles
         ]
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        latest_brief = db.get_latest_daily_brief()
         return TEMPLATES.TemplateResponse(
             request,
             "dashboard.html",
             {
                 "rows": rows,
-                "sources": row_sources,
-                "top_recent": top_recent,
-                "selected_source": None,
                 "tiles": tiles,
                 "tiles_json": tiles_for_js,
                 "sites": sorted(sites.values(), key=lambda s: s.name),
-                "sites_json": sites_for_map,
+                "sites_activity": sites_activity,
+                "site_pairs": site_pairs,
+                "front_stats": front_stats,
                 "site_states": _site_states(tiles, sources_by_name),
                 "source_tz": source_tz,
+                "latest_brief": latest_brief,
                 **_note_tag_context(),
             },
         )
@@ -439,6 +815,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             {
                 "rows": rows,
                 "selected_source": source,
+                # Carry the feed's site filter to species pages only when it's
+                # unambiguous (exactly one source selected); otherwise links go
+                # to the all-sites species view.
+                "page_source": sources_filter[0] if len(sources_filter) == 1 else None,
                 "source_tz": source_tz,
                 **_note_tag_context(),
             },
@@ -598,25 +978,41 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             return sources_partial(request)
         return JSONResponse({"ok": True, "name": name})
 
+    def _is_static_source(name: str) -> bool:
+        """True if ``name`` matches a sources.toml entry — independent of any
+        runtime row that might exist with the same name."""
+        return any(s.name == name for s in static_sources)
+
     @app.post("/api/sources/{name}/enable")
     def enable_source(request: Request, name: str) -> Response:
-        """Restore a soft-deleted runtime source. Supervisor picks it up within
-        SUPERVISOR_INTERVAL (15s) and starts a worker."""
-        ok = db.enable_runtime_source(name)
-        if not ok:
-            raise HTTPException(404, f"Runtime source not found: {name}")
+        """Re-enable a source. Dispatches by origin: runtime sources have
+        their soft-delete cleared; static sources have their disable-override
+        row removed. Supervisor picks it up within SUPERVISOR_INTERVAL (15s)
+        and starts a worker."""
+        did_runtime = db.enable_runtime_source(name)
+        did_static = False
+        if _is_static_source(name):
+            db.set_source_disabled(name, disabled=False)
+            did_static = True
+        if not (did_runtime or did_static):
+            raise HTTPException(404, f"Source not found: {name}")
         if request.headers.get("hx-request"):
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name})
 
     @app.post("/api/sources/{name}/disable")
     def disable_source(request: Request, name: str) -> Response:
-        """Soft-delete a runtime source so the supervisor stops its worker.
-        Equivalent to DELETE /api/sources/{name} but returns the admin
-        partial so the /admin table can re-render in place."""
-        ok = db.soft_delete_runtime_source(name)
-        if not ok:
-            raise HTTPException(404, f"Runtime source not found: {name}")
+        """Disable a source. Dispatches by origin: runtime sources are soft-
+        deleted (deleted_at set); static sources get a row in
+        source_disable_overrides. Supervisor stops the worker on its next tick.
+        Returns the admin partial so the table re-renders in place."""
+        did_runtime = db.soft_delete_runtime_source(name)
+        did_static = False
+        if _is_static_source(name):
+            db.set_source_disabled(name, disabled=True)
+            did_static = True
+        if not (did_runtime or did_static):
+            raise HTTPException(404, f"Source not found: {name}")
         if request.headers.get("hx-request"):
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name})
@@ -675,65 +1071,267 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/species", response_class=HTMLResponse)
     def species(
         request: Request,
-        sort: str = Query(default="last_seen"),  # last_seen | first_seen | count | max_conf | name
+        since: str = Query(default="all"),  # 24h | 7d | all
+        source: list[str] | None = Query(default=None),
+        q: str = Query(default=""),
+        tail: bool = Query(default=False),  # level-2 zoom: only ≤median species
     ) -> HTMLResponse:
+        """Per-source treemap of the species catalogue. Top-level rectangles
+        are sources; leaves are (source, species) pairs sized by detection
+        count in the chosen window. Clicking a leaf goes to /species/<sci>
+        already scoped to that source."""
         _, sources_by_name, _ = _all_sources()
-        # One row per (scientific_name, common_name) with aggregates.
-        # SQLite's group_concat handles the per-species source list cheaply.
-        with db.session() as s:
-            rows = list(
-                s.execute(
-                    select(
-                        DetectionRow.scientific_name,
-                        DetectionRow.common_name,
-                        func.count().label("n"),
-                        func.min(DetectionRow.started_at).label("first_seen"),
-                        func.max(DetectionRow.started_at).label("last_seen"),
-                        func.max(DetectionRow.confidence).label("max_conf"),
-                        func.avg(DetectionRow.confidence).label("avg_conf"),
-                        func.group_concat(DetectionRow.source_name.distinct()).label("sources"),
-                    )
-                    .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
-                )
-            )
-        species_list = [
-            {
-                "scientific_name": r.scientific_name,
-                "common_name": r.common_name,
-                "n": r.n,
-                "first_seen": r.first_seen,
-                "last_seen": r.last_seen,
-                "max_conf": r.max_conf,
-                "avg_conf": r.avg_conf,
-                "sources": sorted((r.sources or "").split(",")),
-            }
-            for r in rows
-        ]
-        sort_keys = {
-            "last_seen":  lambda r: r["last_seen"],
-            "first_seen": lambda r: r["first_seen"],
-            "count":      lambda r: r["n"],
-            "max_conf":   lambda r: r["max_conf"],
-            "name":       lambda r: r["common_name"].lower(),
-        }
-        key = sort_keys.get(sort, sort_keys["last_seen"])
-        # name sorts ascending; everything else descending (most recent / most / highest first).
-        species_list.sort(key=key, reverse=(sort != "name"))
+        sources_filter = [s for s in (source or []) if s]
 
-        # Pre-compute timezone per source so the template's localtime filter works.
-        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        # Time window.
+        now = datetime.now(UTC)
+        if since == "24h":
+            start = now - timedelta(hours=24)
+        elif since == "7d":
+            start = now - timedelta(days=7)
+        else:
+            start = None
+
+        # One GROUP BY query covers everything we need for the treemap.
+        stmt = (
+            select(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                func.count().label("n"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.max(DetectionRow.started_at).label("last_seen"),
+            )
+            .group_by(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+            )
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources_filter:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources_filter))
+
+        with db.session() as s:
+            rows = list(s.execute(stmt))
+            iucn = dict(s.execute(
+                select(
+                    SpeciesNoteRow.scientific_name,
+                    SpeciesNoteRow.conservation_status,
+                )
+            ).all())
+
+        # Group rows by source.
+        per_source: dict[str, list[dict]] = {}
+        for r in rows:
+            per_source.setdefault(r.source_name, []).append({
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "n": int(r.n),
+                "max_conf": float(r.max_conf or 0),
+                "last_seen": r.last_seen,
+                "iucn": iucn.get(r.scientific_name),
+            })
+
+        # Level-2 zoom: tail mode keeps only species at-or-below the per-site
+        # median count, so the long tail expands to fill the viewport. Only
+        # applied when exactly one source is in scope (otherwise the median
+        # split is per-site and doesn't compose cleanly across sites). The
+        # "loud" species we hid are remembered so the template can surface
+        # them as a back-out list.
+        tail_active = bool(tail) and len(per_source) == 1
+        hidden_loud: list[dict] = []
+        tail_threshold: int | None = None
+        if tail_active:
+            src_only = next(iter(per_source))
+            counts = sorted(sp["n"] for sp in per_source[src_only])
+            if counts:
+                med = counts[len(counts) // 2]
+                tail_threshold = med
+                kept = [sp for sp in per_source[src_only] if sp["n"] <= med]
+                hidden = sorted(
+                    (sp for sp in per_source[src_only] if sp["n"] > med),
+                    key=lambda s: -s["n"],
+                )
+                # If the median collapses everything (e.g. all species have
+                # count 1), don't bother — fall back to the level-1 view.
+                if kept and hidden:
+                    per_source[src_only] = kept
+                    hidden_loud = [
+                        {
+                            "scientific": sp["scientific"],
+                            "common": sp["common"],
+                            "n": sp["n"],
+                            "max_conf": sp["max_conf"],
+                            "iucn": sp["iucn"],
+                        }
+                        for sp in hidden
+                    ]
+                else:
+                    tail_active = False
+                    tail_threshold = None
+
+        # ---- Squarified layout: outer = sources (sized by total detections),
+        # inner = species inside each source ----
+        viewport = {"w": 1200, "h": 700}
+        source_totals = sorted(
+            ((src, sum(sp["n"] for sp in per_source[src])) for src in per_source),
+            key=lambda t: -t[1],
+        )
+        outer_rects: list[dict] = []
+        tiles: list[dict] = []
+        source_pad_top = 18  # leaves room for the source header label
+        # When the user has zoomed in to a single source, the whole viewport
+        # is dedicated to that site — show every species, including the long
+        # tail. Otherwise roll the dust into "+N more" so the layout reads.
+        single_source = len(source_totals) == 1
+        min_leaf_area = 0 if single_source else 12 * 12
+
+        if source_totals:
+            outer_sizes = squarify.normalize_sizes(
+                [t[1] for t in source_totals], viewport["w"], viewport["h"]
+            )
+            outer_layout = squarify.squarify(
+                outer_sizes, 0, 0, viewport["w"], viewport["h"]
+            )
+            for (src_name, src_count), rect in zip(
+                source_totals, outer_layout, strict=False
+            ):
+                outer_rects.append({
+                    "name": src_name, "count": src_count,
+                    "x": rect["x"], "y": rect["y"],
+                    "w": rect["dx"], "h": rect["dy"],
+                })
+                inner_x = rect["x"] + 1
+                inner_y = rect["y"] + source_pad_top
+                inner_w = max(1.0, rect["dx"] - 2)
+                inner_h = max(1.0, rect["dy"] - source_pad_top - 1)
+                avail_area = inner_w * inner_h
+
+                species_in_src = sorted(
+                    per_source[src_name], key=lambda s: -s["n"]
+                )
+                total_size = sum(sp["n"] for sp in species_in_src)
+                kept: list[dict] = []
+                other_n = 0
+                other_count = 0
+                for sp in species_in_src:
+                    est_area = (
+                        sp["n"] / total_size * avail_area if total_size else 0
+                    )
+                    if est_area >= min_leaf_area:
+                        kept.append(sp)
+                    else:
+                        other_n += sp["n"]
+                        other_count += 1
+
+                leaf_sizes = [sp["n"] for sp in kept] + (
+                    [other_n] if other_n else []
+                )
+                if not leaf_sizes:
+                    continue
+                leaf_sizes_norm = squarify.normalize_sizes(
+                    leaf_sizes, inner_w, inner_h
+                )
+                leaf_layout = squarify.squarify(
+                    leaf_sizes_norm, inner_x, inner_y, inner_w, inner_h
+                )
+                for sp, lr in zip(kept, leaf_layout, strict=False):
+                    ls = sp["last_seen"]
+                    if ls.tzinfo is None:
+                        ls = ls.replace(tzinfo=UTC)
+                    tiles.append({
+                        "source": src_name,
+                        "scientific": sp["scientific"],
+                        "common": sp["common"],
+                        "n": sp["n"],
+                        "max_conf": sp["max_conf"],
+                        "age_s": int((now - ls).total_seconds()),
+                        "iucn": sp["iucn"],
+                        "x": lr["x"], "y": lr["y"],
+                        "w": lr["dx"], "h": lr["dy"],
+                        "is_other": False,
+                    })
+                if other_n:
+                    or_ = leaf_layout[-1]
+                    tiles.append({
+                        "source": src_name,
+                        "scientific": None,
+                        "common": f"+{other_count} more",
+                        "n": other_n,
+                        "max_conf": None,
+                        "age_s": None,
+                        "iucn": None,
+                        "x": or_["x"], "y": or_["y"],
+                        "w": or_["dx"], "h": or_["dy"],
+                        "is_other": True,
+                    })
+
+        # Alphabetical list — drives the mobile fallback and serves as an
+        # accessible flat view of everything the treemap covers.
+        all_species = sorted(
+            {(sp["scientific"], sp["common"])
+             for ss in per_source.values() for sp in ss},
+            key=lambda x: x[1].lower(),
+        )
+
+        # Long tail at the zoomed-in level: rarest species at this site,
+        # surfaced as a clickable list so the tiny tiles aren't the only
+        # way to reach them. Empty list when not zoomed.
+        long_tail: list[dict] = []
+        if single_source:
+            src_name = source_totals[0][0]
+            long_tail = [
+                {
+                    "scientific": sp["scientific"],
+                    "common": sp["common"],
+                    "n": sp["n"],
+                    "max_conf": sp["max_conf"],
+                    "iucn": sp["iucn"],
+                }
+                for sp in sorted(per_source[src_name], key=lambda s: s["n"])[:24]
+            ]
+
+        all_known_sources = sorted(
+            set(per_source.keys())
+            | {c.name for c in sources_by_name.values()}
+        )
+
         return TEMPLATES.TemplateResponse(
             request,
             "species.html",
             {
-                "species_list": species_list,
-                "sort": sort,
-                "source_tz": source_tz,
+                "outer_rects": outer_rects,
+                "tiles": tiles,
+                "all_species": all_species,
+                "viewport": viewport,
+                "since": since,
+                "source_filter": sources_filter,
+                "q": q,
+                "all_source_names": all_known_sources,
+                "total_species": len(all_species),
+                "total_detections": sum(
+                    sp["n"] for ss in per_source.values() for sp in ss
+                ),
+                "source_colors": SOURCE_COLORS,
+                "zoomed": single_source,
+                "zoomed_source": (
+                    source_totals[0][0] if single_source else None
+                ),
+                "long_tail": long_tail,
+                "tail_active": tail_active,
+                "tail_threshold": tail_threshold,
+                "hidden_loud": hidden_loud,
             },
         )
 
     @app.get("/species/{scientific:path}", response_class=HTMLResponse)
-    def species_detail(request: Request, scientific: str) -> HTMLResponse:
+    def species_detail(
+        request: Request,
+        scientific: str,
+        source: str | None = Query(default=None),
+    ) -> HTMLResponse:
         from collections import Counter
         _, sources_by_name, _ = _all_sources()
         with db.session() as s:
@@ -753,6 +1351,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if all_rows
             else (note.common_name if note else scientific)
         )
+
+        # Per-site detection counts for the bubble map — across ALL sources,
+        # independent of the active filter so the map always shows the full
+        # geographic distribution.
+        site_counts = Counter(r.source_name for r in all_rows)
+
+        # Optional site filter: scope every stat/chart/clip below to one source.
+        active_source = source or None
+        if active_source:
+            all_rows = [r for r in all_rows if r.source_name == active_source]
 
         # Per-source breakdown.
         by_source: dict[str, list[DetectionRow]] = {}
@@ -793,11 +1401,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         for r in all_rows:
             ts = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
             cfg_src = sources_by_name.get(r.source_name)
-            tz_name = cfg_src.timezone if cfg_src else "UTC"
-            try:
-                tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                tz = UTC
+            tz = _zone_info(cfg_src.timezone if cfg_src else "UTC")
             hours[ts.astimezone(tz).hour] += 1
         peak_hour = max(hours) or 1
 
@@ -831,6 +1435,26 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             spread_clips = []
         good_clips = [r for r in all_rows if r.label == "good" and r.clip_path][:8]
 
+        # Map of every site this species HAS been heard at, coloured by the
+        # site's biome palette (see SOURCE_COLORS). Sites that have never
+        # recorded this species are omitted from the map entirely — the
+        # absence isn't informative on a species page (the alphabetical
+        # "By site" table below already lists who heard it and who didn't).
+        sites_for_map = [
+            {**site, "count": site_counts.get(site["name"], 0)}
+            for site in _map_sites(sources_by_name)
+            if site_counts.get(site["name"], 0) > 0
+        ]
+        # Sites where it was heard, most frequent first — drives the <select>
+        # fallback (and covers any source lacking map coordinates).
+        all_sources = [name for name, _ in site_counts.most_common()]
+
+        # Per-(species, site) AI note — only when scoped to a single site.
+        site_note = (
+            db.get_species_site_note(scientific, active_source)
+            if active_source else None
+        )
+
         return TEMPLATES.TemplateResponse(
             request,
             "species_detail.html",
@@ -838,6 +1462,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "scientific": scientific,
                 "common_name": common_name,
                 "note": note,
+                "site_note": site_note,
+                "active_source": active_source,
+                "sites_for_map": sites_for_map,
+                "source_colors": SOURCE_COLORS,
+                "all_sources": all_sources,
                 "total": len(all_rows),
                 "max_conf": max((r.confidence for r in all_rows), default=0),
                 "source_summary": source_summary,
@@ -859,35 +1488,946 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/confidence", response_class=HTMLResponse)
+    def confidence_page(
+        request: Request,
+        since: str = Query(default="all"),
+        cutoff: float = Query(default=0.65),
+    ) -> HTMLResponse:
+        """How does the species roster collapse as you raise the BirdNET
+        confidence floor? We pre-compute, per source, the right-cumulative
+        species count and detection count over a 1%-wide bucket grid spanning
+        0.10 → 0.99 (90 buckets). The slider is then a pure client-side index
+        lookup — no server round-trip per drag tick."""
+        from sqlalchemy import Integer
+        from sqlalchemy import cast as sa_cast
+
+        now = datetime.now(UTC)
+        if since == "24h":
+            start = now - timedelta(hours=24)
+        elif since == "7d":
+            start = now - timedelta(days=7)
+        else:
+            start = None
+
+        N_BUCKETS = 90
+        CONF_MIN = 0.10  # bucket index = floor((conf - 0.10) * 100), clamped
+
+        # Per-(source, species) max confidence — drives the species curves.
+        stmt_max = (
+            select(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                func.max(DetectionRow.confidence).label("max_conf"),
+            )
+            .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+        )
+        # Per-(source, bucket) detection counts — drives the detection curves.
+        bucket = sa_cast(
+            (DetectionRow.confidence - CONF_MIN) * 100, Integer
+        ).label("bucket")
+        stmt_hist = (
+            select(
+                DetectionRow.source_name,
+                bucket,
+                func.count().label("n"),
+            )
+            .where(DetectionRow.confidence >= CONF_MIN)
+            .group_by(DetectionRow.source_name, bucket)
+        )
+        if start is not None:
+            stmt_max = stmt_max.where(DetectionRow.started_at >= start)
+            stmt_hist = stmt_hist.where(DetectionRow.started_at >= start)
+
+        with db.session() as s:
+            rows_max = list(s.execute(stmt_max))
+            rows_hist = list(s.execute(stmt_hist))
+
+        per_source_maxconfs: dict[str, list[float]] = {}
+        species_global_max: dict[str, float] = {}
+        for r in rows_max:
+            c = float(r.max_conf or 0)
+            per_source_maxconfs.setdefault(r.source_name, []).append(c)
+            if c > species_global_max.get(r.scientific_name, 0.0):
+                species_global_max[r.scientific_name] = c
+
+        per_source_hist: dict[str, list[int]] = {}
+        for r in rows_hist:
+            h = per_source_hist.setdefault(r.source_name, [0] * N_BUCKETS)
+            b = int(r.bucket)
+            if 0 <= b < N_BUCKETS:
+                h[b] += int(r.n)
+
+        def species_buckets(maxconfs: list[float]) -> list[int]:
+            b = [0] * N_BUCKETS
+            for c in maxconfs:
+                idx = int((c - CONF_MIN) * 100)
+                if idx < 0:
+                    continue
+                if idx >= N_BUCKETS:
+                    idx = N_BUCKETS - 1
+                b[idx] += 1
+            return b
+
+        def cumulative_from_right(buckets: list[int]) -> list[int]:
+            out = [0] * len(buckets)
+            running = 0
+            for i in range(len(buckets) - 1, -1, -1):
+                running += buckets[i]
+                out[i] = running
+            return out
+
+        species_curves: dict[str, list[int]] = {
+            src: cumulative_from_right(species_buckets(per_source_maxconfs[src]))
+            for src in per_source_maxconfs
+        }
+        det_curves: dict[str, list[int]] = {
+            src: cumulative_from_right(per_source_hist[src])
+            for src in per_source_hist
+        }
+        overall_species_curve = cumulative_from_right(
+            species_buckets(list(species_global_max.values()))
+        )
+        overall_hist = [0] * N_BUCKETS
+        for h in per_source_hist.values():
+            for i, v in enumerate(h):
+                overall_hist[i] += v
+        overall_det_curve = cumulative_from_right(overall_hist)
+
+        # Chart geometry.
+        chart = {"w": 820, "h": 320, "padL": 44, "padR": 16, "padT": 14, "padB": 32}
+        chart["plotW"] = chart["w"] - chart["padL"] - chart["padR"]
+        chart["plotH"] = chart["h"] - chart["padT"] - chart["padB"]
+
+        y_max_species = max(
+            overall_species_curve[0] if overall_species_curve else 0, 1
+        )
+
+        def polyline(curve: list[int], y_max: int) -> str:
+            pts = []
+            for i, v in enumerate(curve):
+                x = chart["padL"] + (i / max(1, N_BUCKETS - 1)) * chart["plotW"]
+                y = chart["padT"] + chart["plotH"] * (1 - v / y_max)
+                pts.append(f"{x:.1f},{y:.1f}")
+            return " ".join(pts)
+
+        site_polylines = {
+            src: polyline(species_curves[src], y_max_species)
+            for src in species_curves
+        }
+        overall_polyline = polyline(overall_species_curve, y_max_species)
+
+        x_ticks = []
+        for tv in (0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99):
+            idx = int(round((tv - CONF_MIN) * 100))
+            x_ticks.append({
+                "val": tv,
+                "x": chart["padL"] + (idx / max(1, N_BUCKETS - 1)) * chart["plotW"],
+            })
+
+        # Y ticks: pick a 1/2/5 × 10^k step that yields ~5 ticks.
+        def nice_step(y_max: int, target: int = 5) -> int:
+            raw = max(1, y_max / target)
+            mag = 10 ** int(math.floor(math.log10(raw)))
+            for m in (1, 2, 5, 10):
+                if raw / mag <= m:
+                    return m * mag
+            return 10 * mag
+
+        step = nice_step(y_max_species)
+        y_ticks = []
+        v = 0
+        while v <= y_max_species + step // 2:
+            y_ticks.append({
+                "val": v,
+                "y": chart["padT"]
+                    + chart["plotH"] * (1 - v / max(1, y_max_species)),
+            })
+            v += step
+
+        cutoff = max(CONF_MIN, min(0.99, cutoff))
+        default_idx = int(round((cutoff - CONF_MIN) * 100))
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "confidence.html",
+            {
+                "since": since,
+                "site_names": sorted(per_source_maxconfs.keys()),
+                "species_curves": species_curves,
+                "det_curves": det_curves,
+                "overall_species_curve": overall_species_curve,
+                "overall_det_curve": overall_det_curve,
+                "site_polylines": site_polylines,
+                "overall_polyline": overall_polyline,
+                "source_colors": SOURCE_COLORS,
+                "chart": chart,
+                "y_max_species": y_max_species,
+                "x_ticks": x_ticks,
+                "y_ticks": y_ticks,
+                "conf_min": CONF_MIN,
+                "n_buckets": N_BUCKETS,
+                "default_cutoff": cutoff,
+                "default_idx": default_idx,
+                "total_species_floor": (
+                    overall_species_curve[0] if overall_species_curve else 0
+                ),
+                "total_dets_floor": (
+                    overall_det_curve[0] if overall_det_curve else 0
+                ),
+            },
+        )
+
+    # IUCN statuses we treat as "conservation-flagged" on /rare. NT is on the
+    # edge but worth surfacing for sub-Saharan birding; EX/EW are kept for
+    # completeness even though hearing one would be world-news. Ordered most
+    # urgent first so /rare can sort by this list's index.
+    _RARE_IUCN_ORDER = ["CR", "EN", "VU", "NT", "EW", "EX"]
+    _RARE_IUCN_SET = set(_RARE_IUCN_ORDER)
+
+    def _rare_pick_clip_id(s, sci: str, src: str, max_conf: float) -> int | None:
+        """For a (species, source) pair, return the detection_id of the
+        clip whose confidence equals the group's max_conf. Used by every
+        section to pick a representative spectrogram trigger."""
+        return s.execute(
+            select(DetectionRow.id)
+            .where(DetectionRow.scientific_name == sci)
+            .where(DetectionRow.source_name == src)
+            .where(DetectionRow.confidence == max_conf)
+            .order_by(desc(DetectionRow.started_at))
+            .limit(1)
+        ).scalar()
+
+    def _rare_newly_heard(s, start, sources: list[str]) -> list[dict]:
+        """(source, species) pairs whose first-ever detection at that source
+        lies inside the window. Empty for since=all. Up to 20 rows, sorted
+        by max confidence so the most clip-worthy newcomers come first."""
+        if start is None:
+            return []
+        stmt = (
+            select(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                func.min(DetectionRow.started_at).label("first_at"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.count().label("n"),
+            )
+            .group_by(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+            )
+            .having(func.min(DetectionRow.started_at) >= start)
+            .order_by(desc("max_conf"))
+            .limit(20)
+        )
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        out = []
+        for r in s.execute(stmt):
+            out.append({
+                "source": r.source_name,
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "first_at": r.first_at,
+                "max_conf": float(r.max_conf or 0),
+                "n": int(r.n),
+                "detection_id": _rare_pick_clip_id(
+                    s, r.scientific_name, r.source_name, float(r.max_conf or 0)
+                ),
+            })
+        return out
+
+    def _rare_long_tail(s, start, sources: list[str],
+                        bad_set: set[str]) -> list[dict]:
+        """Species with COUNT ≤ 3 in the window and max_conf ≥ 0.50, ranked
+        by max_conf. Drops species whose every reviewed clip is 'bad' — those
+        are systemic errors, not rarities. Surfaces (best_source, best clip)
+        for each, so the user can audit the one most likely to be a real
+        find."""
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                func.count().label("n"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.count(func.distinct(DetectionRow.source_name)).label(
+                    "n_sites"
+                ),
+            )
+            .group_by(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+            )
+            .having(func.count() <= 3)
+            .having(func.max(DetectionRow.confidence) >= 0.50)
+            .order_by(desc("max_conf"))
+            .limit(40)  # over-fetch; bad_set filter trims below
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        rows = list(s.execute(stmt))
+        out = []
+        for r in rows:
+            if r.scientific_name in bad_set:
+                continue
+            # Best source for this species in the window.
+            best_src = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                )
+                .where(DetectionRow.scientific_name == r.scientific_name)
+                .where(DetectionRow.confidence == r.max_conf)
+                .group_by(DetectionRow.source_name)
+                .limit(1)
+            ).first()
+            src_name = best_src.source_name if best_src else None
+            out.append({
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "n": int(r.n),
+                "n_sites": int(r.n_sites),
+                "max_conf": float(r.max_conf or 0),
+                "best_source": src_name,
+                "detection_id": (
+                    _rare_pick_clip_id(
+                        s, r.scientific_name, src_name, float(r.max_conf or 0)
+                    ) if src_name else None
+                ),
+            })
+            if len(out) >= 20:
+                break
+        return out
+
+    def _rare_label_counts(s, sources: list[str]) -> dict[str, dict]:
+        """Per-species good/bad/unsure tallies across all time (labels are
+        rare enough that the window doesn't materially help here)."""
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                DetectionRow.label,
+                func.count().label("n"),
+            )
+            .where(DetectionRow.label.isnot(None))
+            .group_by(DetectionRow.scientific_name, DetectionRow.label)
+        )
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        out: dict[str, dict] = {}
+        for r in s.execute(stmt):
+            d = out.setdefault(r.scientific_name, {
+                "good": 0, "bad": 0, "unsure": 0,
+            })
+            if r.label in d:
+                d[r.label] = int(r.n)
+        return out
+
+    def _rare_misclass_patterns(s, label_counts: dict[str, dict],
+                                tag_by_sci: dict[str, str | None],
+                                common_by_sci: dict[str, str],
+                                start, sources: list[str]) -> list[dict]:
+        """Species the model gets wrong: tag='suspect' OR (>=5 reviewed AND
+        bad/(good+bad) >= 0.5). Each row carries its dominant suggested-
+        species correction and a representative clip."""
+        suspect: list[dict] = []
+        seen: set[str] = set()
+        # Candidates: every labelled species AND every tag='suspect' species
+        # (the latter may have no labelled detections yet, but we still want
+        # them surfaced as patterns the model is known to confuse).
+        candidates = set(label_counts.keys()) | {
+            sci for sci, tag in tag_by_sci.items() if tag == "suspect"
+        }
+        for sci in candidates:
+            counts = label_counts.get(sci, {"good": 0, "bad": 0, "unsure": 0})
+            good, bad = counts["good"], counts["bad"]
+            reviewed = good + bad
+            tag = tag_by_sci.get(sci)
+            bad_rate = (bad / reviewed) if reviewed else 0.0
+            qualifies = (
+                tag == "suspect"
+                or (reviewed >= 5 and bad_rate >= 0.5)
+            )
+            if not qualifies:
+                continue
+            seen.add(sci)
+            # Top correction for this species (most common
+            # suggested_species when labelled bad).
+            top_corr = s.execute(
+                select(
+                    DetectionRow.suggested_species,
+                    func.count().label("n"),
+                )
+                .where(DetectionRow.scientific_name == sci)
+                .where(DetectionRow.label == "bad")
+                .where(DetectionRow.suggested_species.isnot(None))
+                .group_by(DetectionRow.suggested_species)
+                .order_by(desc("n"))
+                .limit(1)
+            ).first()
+            # Best clip in window for audit.
+            clip_q = (
+                select(
+                    DetectionRow.id,
+                    DetectionRow.source_name,
+                    func.max(DetectionRow.confidence).label("c"),
+                )
+                .where(DetectionRow.scientific_name == sci)
+                .group_by(DetectionRow.source_name)
+                .order_by(desc("c"))
+                .limit(1)
+            )
+            if start is not None:
+                clip_q = clip_q.where(DetectionRow.started_at >= start)
+            if sources:
+                clip_q = clip_q.where(
+                    DetectionRow.source_name.in_(sources)
+                )
+            clip = s.execute(clip_q).first()
+            suspect.append({
+                "scientific": sci,
+                "common": common_by_sci.get(sci, sci),
+                "tag": tag,
+                "good": good,
+                "bad": bad,
+                "reviewed": reviewed,
+                "bad_rate": bad_rate,
+                "top_correction": top_corr.suggested_species if top_corr else None,
+                "top_correction_n": int(top_corr.n) if top_corr else 0,
+                "best_source": clip.source_name if clip else None,
+                "best_conf": float(clip.c) if clip else 0.0,
+                "detection_id": clip.id if clip else None,
+            })
+        # Sort: tag='suspect' first, then by bad_rate desc, then reviewed desc.
+        suspect.sort(
+            key=lambda r: (
+                0 if r["tag"] == "suspect" else 1,
+                -r["bad_rate"],
+                -r["reviewed"],
+            )
+        )
+        return suspect[:10], seen
+
+    def _rare_top_corrections(s, sources: list[str]) -> list[dict]:
+        """Across all reviews, the most common "X actually was Y" patterns.
+        Surfaces systemic BirdNET confusions like 'Red-eyed Dove →
+        Cape Turtle-Dove'. Compact list, capped at 10."""
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                DetectionRow.suggested_species,
+                func.count().label("n"),
+            )
+            .where(DetectionRow.label == "bad")
+            .where(DetectionRow.suggested_species.isnot(None))
+            .group_by(
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+                DetectionRow.suggested_species,
+            )
+            .order_by(desc("n"))
+            .limit(10)
+        )
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        return [
+            {
+                "scientific": r.scientific_name,
+                "common": r.common_name,
+                "suggested": r.suggested_species,
+                "n": int(r.n),
+            }
+            for r in s.execute(stmt)
+        ]
+
+    def _rare_audit_queue(s, start, sources: list[str],
+                          patterns_set: set[str]) -> list[dict]:
+        """Up to 10 unreviewed in-window detections of species already
+        flagged as suspect. Highest-confidence first — those are the
+        outliers most worth a listen."""
+        if not patterns_set:
+            return []
+        stmt = (
+            select(DetectionRow)
+            .where(DetectionRow.label.is_(None))
+            .where(DetectionRow.scientific_name.in_(patterns_set))
+            .order_by(desc(DetectionRow.confidence))
+            .limit(10)
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        return list(s.scalars(stmt))
+
+    def _rare_conservation_flagged(s, start, sources: list[str]) -> list[dict]:
+        """Species whose IUCN status is in {CR,EN,VU,NT,EW,EX} and have at
+        least one detection in the window. Sorted by status severity, then
+        by max confidence so the strongest evidence per status floats up."""
+        # Get every threatened-status species' notes — small table, in-memory
+        # filter is fine.
+        notes = list(s.execute(
+            select(
+                SpeciesNoteRow.scientific_name,
+                SpeciesNoteRow.common_name,
+                SpeciesNoteRow.conservation_status,
+            ).where(
+                SpeciesNoteRow.conservation_status.in_(_RARE_IUCN_SET)
+            )
+        ))
+        if not notes:
+            return []
+        sci_to_status = {n.scientific_name: n.conservation_status for n in notes}
+        sci_to_common = {n.scientific_name: n.common_name for n in notes}
+        stmt = (
+            select(
+                DetectionRow.scientific_name,
+                func.count().label("n"),
+                func.max(DetectionRow.confidence).label("max_conf"),
+                func.max(DetectionRow.started_at).label("last_seen"),
+                func.count(func.distinct(DetectionRow.source_name)).label(
+                    "n_sites"
+                ),
+            )
+            .where(DetectionRow.scientific_name.in_(sci_to_status.keys()))
+            .group_by(DetectionRow.scientific_name)
+        )
+        if start is not None:
+            stmt = stmt.where(DetectionRow.started_at >= start)
+        if sources:
+            stmt = stmt.where(DetectionRow.source_name.in_(sources))
+        out = []
+        for r in s.execute(stmt):
+            status = sci_to_status[r.scientific_name]
+            # Best site for this species (where the max-conf clip lives).
+            best_src = s.execute(
+                select(DetectionRow.source_name)
+                .where(DetectionRow.scientific_name == r.scientific_name)
+                .where(DetectionRow.confidence == r.max_conf)
+                .limit(1)
+            ).scalar()
+            out.append({
+                "scientific": r.scientific_name,
+                "common": sci_to_common[r.scientific_name],
+                "conservation_status": status,
+                "severity": _RARE_IUCN_ORDER.index(status),
+                "n": int(r.n),
+                "n_sites": int(r.n_sites),
+                "max_conf": float(r.max_conf or 0),
+                "last_seen": r.last_seen,
+                "best_source": best_src,
+                "detection_id": (
+                    _rare_pick_clip_id(
+                        s, r.scientific_name, best_src,
+                        float(r.max_conf or 0),
+                    ) if best_src else None
+                ),
+            })
+        # Severity first (CR has index 0 — most urgent), then max_conf desc.
+        out.sort(key=lambda r: (r["severity"], -r["max_conf"]))
+        return out[:20]
+
+    @app.get("/rare", response_class=HTMLResponse)
+    def rare_page(
+        request: Request,
+        since: str = Query(default="7d"),
+        source: list[str] | None = Query(default=None),
+    ) -> HTMLResponse:
+        """Rare & interesting detections — surfaces species the loud-common
+        cacophony drowns out, and patterns that look like systemic BirdNET
+        misclassifications. Four sections; see the plan file for the rules
+        behind each."""
+        _, sources_by_name, _ = _all_sources()
+        sources_filter = [s for s in (source or []) if s]
+
+        now = datetime.now(UTC)
+        if since == "24h":
+            start = now - timedelta(hours=24)
+        elif since == "7d":
+            start = now - timedelta(days=7)
+        else:
+            start = None
+
+        with db.session() as s:
+            # Shared lookups used by multiple sections.
+            notes = list(s.execute(
+                select(
+                    SpeciesNoteRow.scientific_name,
+                    SpeciesNoteRow.common_name,
+                    SpeciesNoteRow.tag,
+                    SpeciesNoteRow.conservation_status,
+                )
+            ))
+            tag_by_sci = {n.scientific_name: n.tag for n in notes}
+            status_by_sci = {
+                n.scientific_name: n.conservation_status
+                for n in notes if n.conservation_status
+            }
+            common_by_sci = {n.scientific_name: n.common_name for n in notes}
+
+            label_counts = _rare_label_counts(s, sources_filter)
+            # Set of species whose every reviewed clip was 'bad' — excluded
+            # from the long-tail surface so we don't promote known noise.
+            all_bad = {
+                sci for sci, c in label_counts.items()
+                if c["bad"] > 0 and c["good"] == 0 and c["unsure"] == 0
+            }
+
+            newly_heard = _rare_newly_heard(s, start, sources_filter)
+            long_tail = _rare_long_tail(s, start, sources_filter, all_bad)
+            misclass_patterns, patterns_set = _rare_misclass_patterns(
+                s, label_counts, tag_by_sci, common_by_sci,
+                start, sources_filter,
+            )
+            top_corrections = _rare_top_corrections(s, sources_filter)
+            audit_queue = _rare_audit_queue(
+                s, start, sources_filter, patterns_set,
+            )
+            conservation = _rare_conservation_flagged(
+                s, start, sources_filter,
+            )
+
+        all_source_names = sorted(sources_by_name.keys())
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "rare.html",
+            {
+                "since": since,
+                "source_filter": sources_filter,
+                "all_source_names": all_source_names,
+                "newly_heard": newly_heard,
+                "long_tail": long_tail,
+                "misclass_patterns": misclass_patterns,
+                "top_corrections": top_corrections,
+                "audit_queue": audit_queue,
+                "conservation": conservation,
+                "source_tz": {
+                    n: c.timezone for n, c in sources_by_name.items()
+                },
+                "status_by_sci": status_by_sci,
+                "tag_by_sci": tag_by_sci,
+                **_note_tag_context(),
+            },
+        )
+
+    @app.get("/site/{name:path}", response_class=HTMLResponse)
+    def site_detail(request: Request, name: str) -> HTMLResponse:
+        """Per-site detail page. Mirrors /species/{scientific}: AI commentary
+        on top, then top species, hourly rhythm, and recent detections."""
+        _, sources_by_name, _ = _all_sources()
+        src_cfg = sources_by_name.get(name)
+        site_note = db.get_site_note(name)
+        with db.session() as s:
+            total = s.execute(
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.source_name == name)
+            ).scalar() or 0
+
+            if total == 0 and site_note is None and src_cfg is None:
+                raise HTTPException(404, f"No site or detections for {name!r}")
+
+            top_species = list(s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    func.count(DetectionRow.id).label("n"),
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                    func.max(DetectionRow.started_at).label("last_seen"),
+                )
+                .where(DetectionRow.source_name == name)
+                .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
+                .order_by(desc("n"))
+                .limit(20)
+            ))
+
+            # Recent unique species at this site — one row per species, most-
+            # recently-heard first. Drives the scrollable panel beside the
+            # video; complements top_species (sorted by count).
+            recent_unique = list(s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    DetectionRow.common_name,
+                    func.count(DetectionRow.id).label("n"),
+                    func.max(DetectionRow.confidence).label("max_conf"),
+                    func.max(DetectionRow.started_at).label("last_seen"),
+                )
+                .where(DetectionRow.source_name == name)
+                .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
+                .order_by(desc("last_seen"))
+                .limit(40)
+            ))
+
+            recent = list(s.scalars(
+                select(DetectionRow)
+                .where(DetectionRow.source_name == name)
+                .order_by(desc(DetectionRow.started_at))
+                .limit(25)
+            ))
+
+            per_hour = dict(s.execute(
+                select(
+                    func.strftime("%H", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.source_name == name)
+                .group_by(func.strftime("%H", DetectionRow.started_at))
+            ).all())
+
+            first_seen, last_seen, distinct_species = s.execute(
+                select(
+                    func.min(DetectionRow.started_at),
+                    func.max(DetectionRow.started_at),
+                    func.count(func.distinct(DetectionRow.scientific_name)),
+                ).where(DetectionRow.source_name == name)
+            ).one()
+
+        # Render the hourly histogram in the source's local timezone so the
+        # bar chart matches what the operator hears wall-clock at the site.
+        tz_name = src_cfg.timezone if src_cfg else "UTC"
+        local_tz = _zone_info(tz_name)
+        # SQLite gave us UTC hour strings; convert each utc hour to the
+        # corresponding local hour. For most timezones this is a fixed offset
+        # so a single shift works.
+        offset = int(datetime.now(local_tz).utcoffset().total_seconds() // 3600)
+        hours = [0] * 24
+        for hr_str, c in per_hour.items():
+            if hr_str is None:
+                continue
+            local_hr = (int(hr_str) + offset) % 24
+            hours[local_hr] += int(c)
+        peak_hour = max(hours) or 1
+
+        # Live video embed: derived from the source's url + kind. video_id is
+        # None for non-YouTube sources, in which case the template hides the
+        # iframe and shows the open-original link instead.
+        video_id = (
+            _youtube_video_id(src_cfg.url)
+            if src_cfg and src_cfg.kind == "youtube" else None
+        )
+
+        # Downtime data for the uptime panel: how long this site has been
+        # down right now (None = up), how much in the last 24h / 7 days, and
+        # the last 5 closed outages with their cause.
+        now_utc = datetime.now(UTC)
+        cur_down = db.current_downtime_by_source().get(name)
+        cur_started = cur_down.started_at if cur_down else None
+        if cur_started is not None and cur_started.tzinfo is None:
+            cur_started = cur_started.replace(tzinfo=UTC)
+        downtime = {
+            "current_outage_s": (
+                int((now_utc - cur_started).total_seconds()) if cur_started else None
+            ),
+            "current_reason": cur_down.reason if cur_down else None,
+            "down_24h_s": db.downtime_seconds_since(name, now_utc - timedelta(hours=24)),
+            "down_7d_s": db.downtime_seconds_since(name, now_utc - timedelta(days=7)),
+            "recent": db.recent_downtime(name, limit=5),
+        }
+
+        # Notable-day anomalies for the panel between the AI narrative and
+        # hourly activity. 30-day lookback is enough to catch a migration
+        # event without burying recent ones under stale entries.
+        anomalies = db.list_recent_anomalies(name, days=30)
+
+        # Current local time + weather for the site header. Both come from
+        # cached upstreams (Open-Meteo TTL = 1h) so this adds no real cost
+        # to the page render. Falls back to None when coords/tz missing or
+        # the API call fails — the template hides the line gracefully.
+        current_weather = None
+        if src_cfg and src_cfg.lat is not None and src_cfg.lon is not None:
+            current_weather = weather_module.current_weather_at(
+                src_cfg.lat, src_cfg.lon, tz_name
+            )
+        local_now = datetime.now(local_tz).strftime("%H:%M")
+        tz_abbr = _tz_abbr(tz_name)
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "site_detail.html",
+            {
+                "name": name,
+                "src_cfg": src_cfg,
+                "source_color": SOURCE_COLORS.get(name, "#10b981"),
+                "video_id": video_id,
+                "multisite": bool(src_cfg and src_cfg.multisite),
+                "note": site_note,
+                "total": total,
+                "distinct_species": distinct_species or 0,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "top_species": top_species,
+                "recent_unique": recent_unique,
+                "recent": recent,
+                "downtime": downtime,
+                "hours": hours,
+                "peak_hour": peak_hour,
+                "tz_name": tz_name,
+                "source_tz": {n: c.timezone for n, c in sources_by_name.items()},
+                "anomalies": anomalies,
+                "current_weather": current_weather,
+                "local_now": local_now,
+                "tz_abbr": tz_abbr,
+                **_note_tag_context(),
+            },
+        )
+
+    @app.get("/briefs", response_class=HTMLResponse)
+    def briefs_index(request: Request) -> HTMLResponse:
+        """Archive page: every generated daily brief, newest first."""
+        briefs = db.list_daily_briefs(limit=180)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "briefs.html",
+            {"briefs": briefs},
+        )
+
     def _admin_view() -> dict:
         """Build the per-source admin payload: status + knobs + heartbeat info.
-        Combines file-defined sources (sources.toml), live runtime sources
-        (runtime_sources where deleted_at IS NULL), and soft-deleted runtime
-        sources (deleted_at NOT NULL) so the operator can re-enable them."""
-        ordered, sources_by_name, _ = _all_sources()
+        Lists every source we know about — file-defined (sources.toml), live
+        runtime, soft-deleted runtime, AND disabled-via-override — so the
+        operator can toggle any of them from /admin."""
+        disabled = db.list_disabled_source_names()
         runtime_rows = db.list_runtime_sources(include_deleted=True)
         runtime_by_name = {r.name: r for r in runtime_rows}
         heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        current_downs = db.current_downtime_by_source()
 
         now = datetime.now(UTC)
+        last_24h = now - timedelta(hours=24)
         rows: list[dict] = []
         seen: set[str] = set()
-        for cfg_src in ordered:
-            seen.add(cfg_src.name)
-            rt = runtime_by_name.get(cfg_src.name)
-            hb = heartbeats.get(cfg_src.name)
-            rows.append(_admin_row(cfg_src, rt, hb, deleted=False, now=now))
-        # Soft-deleted runtime sources — still listed so they can be re-enabled.
+
+        def _down_extras(name: str) -> tuple[int | None, int]:
+            cur = current_downs.get(name)
+            cur_started = cur.started_at if cur else None
+            if cur_started is not None and cur_started.tzinfo is None:
+                cur_started = cur_started.replace(tzinfo=UTC)
+            current_outage_s = (
+                int((now - cur_started).total_seconds()) if cur_started else None
+            )
+            return current_outage_s, db.downtime_seconds_since(name, last_24h)
+
+        # Static sources first — they're the stable backbone. A live runtime
+        # row with the same name overrides the config (existing "runtime wins"
+        # merge); a soft-deleted runtime row of the same name is ignored.
+        for static in static_sources:
+            seen.add(static.name)
+            rt = runtime_by_name.get(static.name)
+            cfg_src = (
+                _runtime_to_cfg(rt) if (rt and rt.deleted_at is None) else static
+            )
+            hb = heartbeats.get(static.name)
+            cur_s, day_s = _down_extras(static.name)
+            # Static-source disabled-ness lives only in the override table.
+            rows.append(_admin_row(
+                cfg_src, rt, hb, deleted=(static.name in disabled), now=now,
+                current_outage_s=cur_s, down_today_s=day_s,
+            ))
+
+        # Runtime-only sources (no static counterpart) — soft-deleted ones
+        # are still listed so they can be re-enabled. Disabled by either the
+        # soft-delete OR the override set.
         for rt in runtime_rows:
-            if rt.name in seen or rt.deleted_at is None:
+            if rt.name in seen:
                 continue
             cfg_src = _runtime_to_cfg(rt)
             hb = heartbeats.get(rt.name)
-            rows.append(_admin_row(cfg_src, rt, hb, deleted=True, now=now))
+            is_disabled = rt.deleted_at is not None or rt.name in disabled
+            cur_s, day_s = _down_extras(rt.name)
+            rows.append(_admin_row(
+                cfg_src, rt, hb, deleted=is_disabled, now=now,
+                current_outage_s=cur_s, down_today_s=day_s,
+            ))
 
         rows.sort(key=lambda r: r["name"].lower())
         running = sum(1 for r in rows if r["status"] == "running")
-        return {"rows": rows, "running": running, "total": len(rows), "now": now}
+        # Defaults for the add-source form: pick the most common timezone
+        # already in use so the user doesn't have to retype it. Fall back to
+        # UTC if no source has a sensible value yet.
+        from collections import Counter
+        from zoneinfo import available_timezones
+        tz_counter = Counter(
+            r["timezone"] for r in rows if r["timezone"] and r["timezone"] != "UTC"
+        )
+        default_tz = tz_counter.most_common(1)[0][0] if tz_counter else "UTC"
+
+        # Timezone dropdown options. Every Africa/* zone (the project's
+        # primary geography) plus a handful of common non-African zones,
+        # grouped so the select renders as optgroups.
+        africa_zones = sorted(
+            tz for tz in available_timezones() if tz.startswith("Africa/")
+        )
+        common_zones = [
+            "UTC",
+            "Europe/London",
+            "Europe/Berlin",
+            "Europe/Paris",
+            "America/New_York",
+            "America/Los_Angeles",
+            "America/Sao_Paulo",
+            "Asia/Tokyo",
+            "Asia/Singapore",
+            "Australia/Sydney",
+        ]
+        tz_options = [
+            {"group": "Common", "zones": common_zones},
+            {"group": "Africa", "zones": africa_zones},
+        ]
+
+        # Existing sites with coords, for the map picker.
+        existing_sites = [
+            {"name": r["name"], "lat": r["lat"], "lon": r["lon"]}
+            for r in rows
+            if r["lat"] is not None and r["lon"] is not None
+        ]
+        # Suggested default location for a new source: centroid of existing
+        # sites if any, otherwise a sensible southern-Africa fallback. The
+        # form drops a pin here on page load so submit-without-clicking-the-
+        # map works, but the user can move it freely.
+        if existing_sites:
+            default_lat = sum(s["lat"] for s in existing_sites) / len(existing_sites)
+            default_lon = sum(s["lon"] for s in existing_sites) / len(existing_sites)
+        else:
+            default_lat, default_lon = -24.0, 31.0
+
+        return {
+            "rows": rows,
+            "running": running,
+            "total": len(rows),
+            "now": now,
+            "default_tz": default_tz,
+            "tz_options": tz_options,
+            "existing_sites": existing_sites,
+            "default_lat": round(default_lat, 6),
+            "default_lon": round(default_lon, 6),
+        }
+
+    def _hb_status(
+        heartbeat: WorkerHeartbeatRow | None, now: datetime
+    ) -> tuple[str, int | None, str | None, str | None]:
+        """Derive a worker's health from its heartbeat row.
+        Returns (status, seconds_since_heartbeat, raw_state, last_error)."""
+        if heartbeat is None:
+            return "never", None, None, None
+        hb_at = heartbeat.last_heartbeat_at
+        if hb_at.tzinfo is None:
+            hb_at = hb_at.replace(tzinfo=UTC)
+        since_s = max(0, int((now - hb_at).total_seconds()))
+        state = heartbeat.state
+        error = heartbeat.last_error
+        if state == "running" and since_s < 60:
+            status = "running"
+        elif state == "backoff":
+            status = "backoff"
+        elif state == "stopped":
+            status = "stopped"
+        else:
+            status = "stale"
+        return status, since_s, state, error
 
     def _admin_row(
         cfg_src: SourceConfig,
@@ -896,33 +2436,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         *,
         deleted: bool,
         now: datetime,
+        current_outage_s: int | None = None,
+        down_today_s: int = 0,
     ) -> dict:
         is_runtime = runtime_row is not None
         if deleted:
-            status = "disabled"
-            since_s = None
-            error = None
-            state = None
-        elif heartbeat is None:
-            status = "never"
-            since_s = None
-            error = None
-            state = None
+            status, since_s, state, error = "disabled", None, None, None
         else:
-            hb_at = heartbeat.last_heartbeat_at
-            if hb_at.tzinfo is None:
-                hb_at = hb_at.replace(tzinfo=UTC)
-            since_s = max(0, int((now - hb_at).total_seconds()))
-            state = heartbeat.state
-            error = heartbeat.last_error
-            if state == "running" and since_s < 60:
-                status = "running"
-            elif state == "backoff":
-                status = "backoff"
-            elif state == "stopped":
-                status = "stopped"
-            else:
-                status = "stale"
+            status, since_s, state, error = _hb_status(heartbeat, now)
         return {
             "name": cfg_src.name,
             "kind": cfg_src.kind,
@@ -939,16 +2460,93 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "state": state,
             "since_s": since_s,
             "error": error,
+            "current_outage_s": current_outage_s,
+            "down_today_s": down_today_s,
+        }
+
+    def _health_view() -> dict:
+        """Raspberry Pi host health for the admin page: CPU load, memory, SoC
+        temperature, throttling/under-voltage, uptime and storage headroom —
+        plus worker liveness and detection freshness as data-flow signals."""
+        now = datetime.now(UTC)
+        ordered, _, _ = _all_sources()
+        heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        workers_running = 0
+        problems: list[dict] = []
+        for cfg_src in ordered:
+            status, since_s, _, error = _hb_status(heartbeats.get(cfg_src.name), now)
+            if status == "running":
+                workers_running += 1
+            else:
+                problems.append(
+                    {"name": cfg_src.name, "status": status, "since_s": since_s, "error": error}
+                )
+
+        with db.session() as s:
+            last_det = s.execute(select(func.max(DetectionRow.started_at))).scalar()
+            det_24h = s.execute(
+                select(func.count(DetectionRow.id)).where(
+                    DetectionRow.started_at >= now - timedelta(hours=24)
+                )
+            ).scalar() or 0
+
+        last_det_age_s = None
+        if last_det is not None:
+            if last_det.tzinfo is None:
+                last_det = last_det.replace(tzinfo=UTC)
+            last_det_age_s = max(0, int((now - last_det).total_seconds()))
+
+        # Storage headroom for the filesystem holding the clips + DB (O(1) — no
+        # tree walk) plus the SQLite file size.
+        try:
+            target = clips_root if clips_root.exists() else clips_root.parent
+            du = shutil.disk_usage(target)
+            disk = {"total": du.total, "used": du.used, "free": du.free}
+        except OSError:
+            disk = None
+        db_path = Path(cfg.db_url.removeprefix("sqlite:///"))
+        db_bytes = db_path.stat().st_size if db_path.exists() else None
+
+        # Serialized-detector saturation: all workers share one locked
+        # BirdNetDetector, so the ceiling is chunk_seconds / inference_time.
+        chunk_s = cfg.chunk_seconds or 3.0
+        inf_ms = cfg.inference_ms_estimate or 110.0
+        infer_pct = round(workers_running * inf_ms / (chunk_s * 1000) * 100)
+        infer_max = int(chunk_s * 1000 / inf_ms)
+
+        return {
+            "health": {
+                "now": now,
+                "host": host_metrics(),
+                "disk": disk,
+                "db_bytes": db_bytes,
+                "workers_running": workers_running,
+                "workers_total": len(ordered),
+                "worker_problems": problems,
+                "last_det_age_s": last_det_age_s,
+                "det_24h": det_24h,
+                "infer_pct": infer_pct,
+                "infer_max": infer_max,
+                "infer_ms": round(inf_ms),
+            }
         }
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request) -> HTMLResponse:
-        return TEMPLATES.TemplateResponse(request, "admin.html", _admin_view())
+        return TEMPLATES.TemplateResponse(
+            request, "admin.html", {**_admin_view(), **_health_view()}
+        )
 
     @app.get("/partials/admin", response_class=HTMLResponse)
     def admin_partial(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
             request, "_admin_table.html", _admin_view()
+        )
+
+    @app.get("/partials/health", response_class=HTMLResponse)
+    def health_partial(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request, "_system_health.html", _health_view()
         )
 
     @app.get("/rollup", response_class=HTMLResponse)
@@ -999,11 +2597,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             # computed in the source's local timezone (so dawn-chorus peaks
             # land on the morning hours regardless of where the camera is).
             cfg_for_src = sources_by_name.get(src_name)
-            tz_name = cfg_for_src.timezone if cfg_for_src else "UTC"
-            try:
-                src_tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                src_tz = UTC
+            src_tz = _zone_info(cfg_for_src.timezone if cfg_for_src else "UTC")
             stats: dict[str, dict] = {}
             for r in src_rows:
                 d = stats.setdefault(
@@ -1033,7 +2627,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             per_source_top.append(
                 {
                     "source": src_name,
-                    "tz": tz_name,
+                    "tz": cfg_for_src.timezone if cfg_for_src else "UTC",
                     "species": ordered,
                 }
             )
@@ -1054,18 +2648,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             },
         )
 
-    @app.get("/audition", response_class=HTMLResponse)
-    def audition(
-        request: Request,
-        source: str | None = Query(default=None),
-        species: str | None = Query(default=None, description="case-insensitive substring of common name"),
-        min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
-        max_conf: float = Query(default=1.0, ge=0.0, le=1.0),
-        label_filter: str = Query(default="unreviewed"),  # unreviewed | good | bad | unsure | all
-        note_tag: str = Query(default="any"),  # any | reliable | suspect | rare | untagged
-        order: str = Query(default="conf_desc"),  # conf_desc | conf_asc | recent
-        limit: int = Query(default=50, ge=1, le=500),
-    ) -> HTMLResponse:
+    def _detections_context(
+        source: str | None,
+        species: str | None,
+        min_conf: float,
+        max_conf: float,
+        label_filter: str,
+        note_tag: str,
+        order: str,
+        limit: int,
+    ) -> dict:
+        """Build the template context for the per-detection view of /review.
+        Pulled out of the old /audition handler so /review can dispatch."""
         _, sources_by_name, _ = _all_sources()
 
         with db.session() as s:
@@ -1144,51 +2738,47 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
-        return TEMPLATES.TemplateResponse(
-            request,
-            "audition.html",
-            {
-                "rows": rows,
-                "all_sources": all_sources,
-                "all_species": all_species,
-                "note_tag_by_sci": note_tag_by_sci,
-                "status_by_sci": status_by_sci,
-                "palette_for_tag": {
-                    k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
-                },
-                "default_palette": SPEC_PALETTE_FOR_TAG[None],
-                "source_tz": source_tz,
-                "filters": {
-                    "source": source or "",
-                    "species": species or "",
-                    "min_conf": min_conf,
-                    "max_conf": max_conf,
-                    "label_filter": label_filter,
-                    "note_tag": note_tag,
-                    "order": order,
-                    "limit": limit,
-                },
-                "label_counts": {
-                    "good": label_counts.get("good", 0),
-                    "bad": label_counts.get("bad", 0),
-                    "unsure": label_counts.get("unsure", 0),
-                    "unreviewed": label_counts.get(None, 0),
-                },
+        return {
+            "rows": rows,
+            "all_sources": all_sources,
+            "all_species": all_species,
+            "note_tag_by_sci": note_tag_by_sci,
+            "status_by_sci": status_by_sci,
+            "palette_for_tag": {
+                k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
             },
-        )
+            "default_palette": SPEC_PALETTE_FOR_TAG[None],
+            "source_tz": source_tz,
+            "filters": {
+                "source": source or "",
+                "species": species or "",
+                "min_conf": min_conf,
+                "max_conf": max_conf,
+                "label_filter": label_filter,
+                "note_tag": note_tag,
+                "order": order,
+                "limit": limit,
+            },
+            "label_counts": {
+                "good": label_counts.get("good", 0),
+                "bad": label_counts.get("bad", 0),
+                "unsure": label_counts.get("unsure", 0),
+                "unreviewed": label_counts.get(None, 0),
+            },
+        }
 
-    @app.get("/soundscape", response_class=HTMLResponse)
-    def soundscape(
-        request: Request,
-        source: str | None = Query(default=None),
-        min_species: int = Query(default=2, ge=2, le=10),
-        order: str = Query(default="recent"),  # recent | n_species | max_conf
-        limit: int = Query(default=50, ge=1, le=200),
-        bucket: str = Query(default="genuine"),  # genuine | confusions
-    ) -> HTMLResponse:
-        """Browse chunks where the live pipeline detected multiple species at
-        once. Every DetectionRow sharing a ``clip_path`` came from the same
-        3 s window, so a clip_path with >=2 rows means BirdNET heard several
+    def _chunks_context(
+        source: str | None,
+        min_species: int,
+        order: str,
+        limit: int,
+        bucket: str,
+    ) -> dict:
+        """Build the template context for the multi-species-chunk view of
+        /review. Pulled out of the old /soundscape handler.
+
+        Every DetectionRow sharing a ``clip_path`` came from the same 3 s
+        window, so a clip_path with >=2 rows means BirdNET heard several
         birds — or hedged between similar species — in the same instant.
 
         Split into two buckets:
@@ -1332,33 +2922,88 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             total_groups = genuine_count + confusion_count
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
-        return TEMPLATES.TemplateResponse(
-            request,
-            "soundscape.html",
-            {
-                "groups": groups,
-                "total_groups": total_groups,
-                "genuine_count": genuine_count,
-                "confusion_count": confusion_count,
-                "bucket": bucket,
-                "all_sources": all_sources_list,
-                "all_species": all_species,
-                "note_tag_by_sci": note_tag_by_sci,
-                "status_by_sci": status_by_sci,
-                "palette_for_tag": {
-                    k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
-                },
-                "default_palette": SPEC_PALETTE_FOR_TAG[None],
-                "source_tz": source_tz,
-                "filters": {
-                    "source": source or "",
-                    "min_species": min_species,
-                    "order": order,
-                    "limit": limit,
-                    "bucket": bucket,
-                },
+        return {
+            "groups": groups,
+            "total_groups": total_groups,
+            "genuine_count": genuine_count,
+            "confusion_count": confusion_count,
+            "bucket": bucket,
+            "all_sources": all_sources_list,
+            "all_species": all_species,
+            "note_tag_by_sci": note_tag_by_sci,
+            "status_by_sci": status_by_sci,
+            "palette_for_tag": {
+                k: v for k, v in SPEC_PALETTE_FOR_TAG.items() if k is not None
             },
-        )
+            "default_palette": SPEC_PALETTE_FOR_TAG[None],
+            "source_tz": source_tz,
+            "filters": {
+                "source": source or "",
+                "min_species": min_species,
+                "order": order,
+                "limit": limit,
+                "bucket": bucket,
+            },
+        }
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review(
+        request: Request,
+        tab: str = Query(default="detections"),
+        # Detection-view filters
+        source: str | None = Query(default=None),
+        species: str | None = Query(default=None),
+        min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
+        max_conf: float = Query(default=1.0, ge=0.0, le=1.0),
+        label_filter: str = Query(default="unreviewed"),
+        note_tag: str = Query(default="any"),
+        # Chunk-view filters
+        min_species: int = Query(default=2, ge=2, le=10),
+        bucket: str = Query(default="genuine"),
+        # Both tabs share these but defaults differ — see below.
+        order: str | None = Query(default=None),
+        limit: int | None = Query(default=None),
+    ) -> HTMLResponse:
+        """Unified review surface — merges the old /audition (per-detection)
+        and /soundscape (multi-species chunks) into one page with tabs."""
+        if tab not in ("detections", "chunks"):
+            tab = "detections"
+        if tab == "chunks":
+            ctx = _chunks_context(
+                source=source,
+                min_species=min_species,
+                order=order or "recent",
+                limit=limit or 50,
+                bucket=bucket,
+            )
+        else:
+            ctx = _detections_context(
+                source=source,
+                species=species,
+                min_conf=min_conf,
+                max_conf=max_conf,
+                label_filter=label_filter,
+                note_tag=note_tag,
+                order=order or "conf_desc",
+                limit=limit or 50,
+            )
+        ctx["tab"] = tab
+        ctx.update(_note_tag_context())
+        return TEMPLATES.TemplateResponse(request, "review.html", ctx)
+
+    @app.get("/audition")
+    def audition_redirect(request: Request) -> RedirectResponse:
+        """Legacy /audition URLs get punted to /review?tab=detections,
+        preserving the query string so bookmarked filters keep working."""
+        qs = request.url.query
+        target = "/review?tab=detections" + (f"&{qs}" if qs else "")
+        return RedirectResponse(target, status_code=302)
+
+    @app.get("/soundscape")
+    def soundscape_redirect(request: Request) -> RedirectResponse:
+        qs = request.url.query
+        target = "/review?tab=chunks" + (f"&{qs}" if qs else "")
+        return RedirectResponse(target, status_code=302)
 
     @app.get("/diurnal", response_class=HTMLResponse)
     def diurnal(
@@ -1391,21 +3036,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         peaks line up regardless of which camera the row came from."""
         _, sources_by_name, _ = _all_sources()
 
-        # Cache per-source ZoneInfo so we don't re-parse for every row.
-        tz_cache: dict[str, ZoneInfo] = {}
-
         def _tz_for(name: str) -> ZoneInfo:
-            tz = tz_cache.get(name)
-            if tz is not None:
-                return tz
             cfg = sources_by_name.get(name)
-            tz_name = cfg.timezone if cfg else "UTC"
-            try:
-                tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                tz = UTC  # type: ignore[assignment]
-            tz_cache[name] = tz
-            return tz
+            return _zone_info(cfg.timezone if cfg else "UTC")
 
         # Effective window. If both date pickers filled, they win and we
         # back-compute ``days`` from the span (used downstream for the
@@ -1602,20 +3235,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             until_dt = now
         weather_days = max(1, min(92, (until_dt - since_dt).days or 1))
 
-        tz_cache: dict[str, ZoneInfo] = {}
-
         def _tz_for(name: str) -> ZoneInfo:
-            tz = tz_cache.get(name)
-            if tz is not None:
-                return tz
             cfg = sources_by_name.get(name)
-            tz_name = cfg.timezone if cfg else "UTC"
-            try:
-                tz = ZoneInfo(tz_name)
-            except ZoneInfoNotFoundError:
-                tz = UTC  # type: ignore[assignment]
-            tz_cache[name] = tz
-            return tz
+            return _zone_info(cfg.timezone if cfg else "UTC")
 
         with db.session() as s:
             note = s.get(SpeciesNoteRow, scientific)
@@ -1687,11 +3309,21 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             cfg = sources_by_name[source]
             if cfg.lat is not None and cfg.lon is not None:
                 tz_name = cfg.timezone or "UTC"
-                data = _open_meteo_hourly(cfg.lat, cfg.lon, weather_days, tz_name)
-                if data:
-                    weather = _weather_at_hour(data, hour) or None
-                if weather is None and data is None:
-                    weather_note = "Open-Meteo lookup failed."
+                # Local archive first — fast, no network. Falls back to a
+                # live Open-Meteo call only when the weather worker hasn't
+                # populated this coord yet (fresh DB, disabled worker, new
+                # site added between ticks).
+                weather = db.weather_hour_summary(
+                    cfg.lat, cfg.lon, hour, since_dt, until_dt, tz_name,
+                )
+                if weather is None:
+                    data = _open_meteo_hourly(
+                        cfg.lat, cfg.lon, weather_days, tz_name,
+                    )
+                    if data:
+                        weather = _weather_at_hour(data, hour) or None
+                    elif data is None:
+                        weather_note = "Open-Meteo lookup failed."
             else:
                 weather_note = "This source has no lat/lon configured."
         else:
@@ -1833,6 +3465,111 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 },
             )
         return JSONResponse({"ok": True, "id": detection_id, "label": new_label})
+
+    @app.get("/partials/site-hour-detail", response_class=HTMLResponse)
+    def site_hour_detail_partial(
+        request: Request,
+        source: str = Query(..., min_length=1),
+        hour: int = Query(..., ge=0, le=23),
+    ) -> HTMLResponse:
+        """Hour drill-down for the dashboard's interactive 24-h clock.
+        The dial sums detections in the trailing 24 h bucketed by source-
+        local hour, so the rail does the same: any detection within the
+        last ~25 h whose source-local hour matches is in scope. Hours
+        already past today read as today's slot; hours later than now
+        read as yesterday's. The slot label tells the operator which."""
+        _, sources_by_name, _ = _all_sources()
+        cfg = sources_by_name.get(source)
+        tz_name = cfg.timezone if cfg else "UTC"
+        tz = _zone_info(tz_name)
+        now_local = datetime.now(tz)
+        # ~25 h lookback (24 + a small buffer) so detections right at the
+        # boundary aren't dropped if the worker is mid-write.
+        since = datetime.now(UTC) - timedelta(hours=25)
+
+        with db.session() as s:
+            cand = list(s.scalars(
+                select(DetectionRow)
+                .where(DetectionRow.source_name == source)
+                .where(DetectionRow.started_at >= since)
+                .order_by(desc(DetectionRow.confidence))
+            ))
+
+        def _local_hour_of(ts: datetime) -> int:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            return ts.astimezone(tz).hour
+
+        def _local_date_of(ts: datetime) -> date:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            return ts.astimezone(tz).date()
+
+        rows = [r for r in cand if _local_hour_of(r.started_at) == hour]
+        # Label the slot by the date of the most recent matching detection.
+        # For hours later than now-local this will typically resolve to
+        # yesterday; for hours already past today, to today. Empty rails
+        # default to "today" / today's date for display.
+        today_local = now_local.date()
+        slot_dates = sorted(
+            {_local_date_of(r.started_at) for r in rows}, reverse=True
+        )
+        slot_date = slot_dates[0] if slot_dates else today_local
+        if slot_date == today_local:
+            slot_label = "today"
+        elif slot_date == today_local - timedelta(days=1):
+            slot_label = "yesterday"
+        else:
+            slot_label = slot_date.strftime("%a %d %b")
+        # Aggregate species heard at this hour. ``conf`` is the max-
+        # confidence detection of that species inside the bucket; ``n`` is
+        # the count. The template renders one row per species with a
+        # background bar of width n / max_n in the site's palette colour.
+        by_species: dict[str, dict] = {}
+        for r in rows:
+            cur = by_species.setdefault(
+                r.scientific_name,
+                {"sci": r.scientific_name, "common": r.common_name, "n": 0, "conf": 0.0},
+            )
+            cur["n"] += 1
+            cur["conf"] = max(cur["conf"], float(r.confidence or 0))
+        species_list = sorted(
+            by_species.values(), key=lambda x: (-x["n"], -x["conf"])
+        )
+        species_max_n = max((s["n"] for s in species_list), default=1)
+
+        # Top clip = highest-confidence row in the bucket with a clip_path.
+        top_clip = next((r for r in rows if r.clip_path), None)
+
+        # Weather: pure local SQL read against weather_observations (filled
+        # hourly by the background weather worker). Same window the rail
+        # uses — last 25 h — so a click on hour=14 picks the most recent
+        # 14:00 local observation. Returns None when the worker hasn't
+        # populated this coord yet; the template hides the block.
+        weather = None
+        if cfg and cfg.lat is not None and cfg.lon is not None:
+            weather = db.weather_hour_summary(
+                cfg.lat, cfg.lon, hour, since, datetime.now(UTC), tz_name,
+            )
+
+        return TEMPLATES.TemplateResponse(
+            request,
+            "_site_hour_detail.html",
+            {
+                "source": source,
+                "hour": hour,
+                "tz_name": tz_name,
+                "slot_date": slot_date,
+                "slot_label": slot_label,
+                "n_detections": len(rows),
+                "n_species": len(by_species),
+                "species_list": species_list,
+                "species_max_n": species_max_n,
+                "site_color": SOURCE_COLORS.get(source, "#10b981"),
+                "top_clip": top_clip,
+                "weather": weather,
+            },
+        )
 
     @app.get("/api/detections/{detection_id}/reanalyze")
     def reanalyze(
@@ -2026,108 +3763,41 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # Wikimedia's REST API.
     _wp_cache: dict[str, tuple[float, dict]] = {}
     _WP_TTL_SECONDS = 24 * 3600
+    # Durable DB-backed media cache: how long a persisted lookup stays fresh
+    # before the sweeper/endpoint will re-fetch from Wikipedia.
+    _MEDIA_DB_TTL_DAYS = 30
 
     # Open-Meteo hourly archive cache: (lat, lon, past_days, tz) → (expiry, json).
     # Their data updates hourly at most; 1h TTL is generous given how stale
     # the diurnal view's lookback window is. Free API, no key required.
-    _om_cache: dict[tuple, tuple[float, dict]] = {}
-    _OM_TTL_SECONDS = 3600
-
-    def _open_meteo_hourly(
-        lat: float, lon: float, past_days: int, tz_name: str
-    ) -> dict | None:
-        key = (round(lat, 3), round(lon, 3), past_days, tz_name)
-        now = time.monotonic()
-        cached = _om_cache.get(key)
-        if cached and cached[0] > now:
-            return cached[1]
-        params = urllib.parse.urlencode(
-            {
-                "latitude": f"{lat:.4f}",
-                "longitude": f"{lon:.4f}",
-                "past_days": past_days,
-                "forecast_days": 1,
-                "hourly": (
-                    "temperature_2m,relative_humidity_2m,"
-                    "precipitation,wind_speed_10m,cloud_cover,weather_code"
-                ),
-                "timezone": tz_name,
-            }
-        )
-        url = f"https://api.open-meteo.com/v1/forecast?{params}"
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "africam-bird/0.1"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
-                data = json.load(resp)
-        except Exception:
-            return None
-        _om_cache[key] = (now + _OM_TTL_SECONDS, data)
-        return data
-
-    def _weather_at_hour(data: dict, hour: int) -> dict:
-        """Aggregate hourly weather values for one hour-of-day across the
-        Open-Meteo response window. Returns ``{}`` if no samples landed on
-        the requested hour."""
-        hourly = (data or {}).get("hourly") or {}
-        times = hourly.get("time") or []
-        if not times:
-            return {}
-        idxs = []
-        for i, t in enumerate(times):
-            # times look like "2026-05-13T07:00"; the hour lives at offset 11:13.
-            if isinstance(t, str) and len(t) >= 13 and t[10] == "T":
-                try:
-                    if int(t[11:13]) == hour:
-                        idxs.append(i)
-                except ValueError:
-                    continue
-        if not idxs:
-            return {}
-
-        def _gather(name: str) -> list[float]:
-            arr = hourly.get(name) or []
-            return [arr[i] for i in idxs if i < len(arr) and arr[i] is not None]
-
-        temps = _gather("temperature_2m")
-        codes = [
-            int(c) for c in _gather("weather_code") if c is not None
-        ]
-        wmo_modal = None
-        if codes:
-            counts: dict[int, int] = {}
-            for c in codes:
-                counts[c] = counts.get(c, 0) + 1
-            wmo_modal = max(counts, key=counts.get)
-        icon, label = _wmo_summary(wmo_modal)
-        return {
-            "n_samples": len(idxs),
-            "temp_mean": (sum(temps) / len(temps)) if temps else None,
-            "wmo_code": wmo_modal,
-            "icon": icon,
-            "label": label,
-        }
+    # Open-Meteo lookups moved to africam.weather (shared with the notes
+    # worker). Aliased here so call sites below don't change.
+    _open_meteo_hourly = weather_module.fetch_open_meteo_hourly
+    _weather_at_hour = weather_module.weather_at_hour
 
     # Time-of-day band fills shared by every chart that paints solar bands.
     # Night = deep navy (almost black); twilight ramps through warm pinks
     # and oranges around sunrise/sunset; day = sky blue. Stars are added on
     # top of the night band in the dial only.
+    # Dial collapses to three visual bands: night, twilight (dawn/dusk), day.
+    # The sunrise/sunset glow strips are folded into day so the dial doesn't
+    # have to render the orange wedges that kept reading as detection bars.
+    # Bar chart in diurnal.html keeps the full warm palette.
     _DIAL_BAND_FILL = {
         "night":   "#020617",  # slate-950
-        "dawn":    "#f43f5e",  # rose-500   — warm pre-sunrise glow
-        "sunrise": "#fb923c",  # orange-400 — peak sunrise
+        "dawn":    "#7f1d1d",  # red-900 — deep muted rose
+        "sunrise": "#38bdf8",  # collapsed into day
         "day":     "#38bdf8",  # sky-400
-        "sunset":  "#f97316",  # orange-500 — peak sunset
-        "dusk":    "#e11d48",  # rose-600   — warm post-sunset glow
+        "sunset":  "#38bdf8",  # collapsed into day
+        "dusk":    "#7f1d1d",
     }
     _DIAL_BAND_OPACITY = {
         "night":   0.85,
-        "dawn":    0.50,
-        "sunrise": 0.65,
-        "day":     0.30,
-        "sunset":  0.65,
-        "dusk":    0.50,
+        "dawn":    0.30,
+        "sunrise": 0.18,
+        "day":     0.18,
+        "sunset":  0.18,
+        "dusk":    0.30,
     }
     _DIAL_DEFAULT_FILL = "#10b981"  # emerald-500 — wedge bars / no-band fallback
 
@@ -2213,6 +3883,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         hours: list[int],
         highlight: int | None = None,
         bands: list[dict] | None = None,
+        compact: bool = False,
+        interactive: bool = False,
     ) -> str:
         """Render a 24-hour radial bar dial as inline SVG.
 
@@ -2221,7 +3893,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         fractional-hour edges. Foreground = one emerald wedge per hour with
         length ∝ detection count; the ``highlight`` hour gets an amber
         stroke. All geometry is computed here so the template stays
-        declarative."""
+        declarative.
+
+        ``compact`` drops the night-sky constellation and the hour labels and
+        tightens the viewBox — for small map markers where that detail just
+        reads as noise.
+
+        ``interactive`` adds click-handle hooks for the dashboard hour
+        drill-down modal: every hour wedge (including silent ones) gets
+        ``data-hour`` + ``class="dial-wedge"`` so the JS event delegate can
+        route clicks, and the centre hub is replaced with a clickable
+        ``data-dial-centre`` circle. Off by default so the existing species
+        diurnal popup renders byte-identically."""
         W, H = 220, 220
         cx, cy = W / 2.0, H / 2.0
         r_in, r_out = 26.0, 90.0
@@ -2236,8 +3919,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         def _dial_angle(h: float) -> float:
             return -math.pi / 2 + (h - 12.0) * slice_rad
 
+        # Compact crops the label margin so the dial fills the marker box.
+        view_box = "16 16 188 188" if compact else f"0 0 {W} {H}"
         parts: list[str] = [
-            f'<svg viewBox="0 0 {W} {H}" '
+            f'<svg viewBox="{view_box}" '
             f'width="{W}" height="{H}" '
             f'class="block mx-auto" '
             f'style="max-width:220px;height:auto">',
@@ -2275,7 +3960,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     f'<path d="{d}" fill="{fill}" '
                     f'fill-opacity="{opacity:.2f}"/>'
                 )
-                if b.get("name") == "night":
+                if b.get("name") == "night" and not compact:
                     # Pick the constellation that's high in the sky during
                     # this part of the night for southern Africa in May:
                     # Scorpius dominates the morning hours, Crux dominates
@@ -2295,13 +3980,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         )
                     )
 
+        # Inner hub: gains ``data-dial-centre`` + a pointer cursor when the
+        # dial is interactive so the dashboard's hour-drill-down JS can
+        # capture a centre click without needing a separate overlay shape.
+        centre_attr = (
+            ' data-dial-centre="1" style="cursor:pointer"' if interactive else ""
+        )
         parts.extend([
             # Faint outer reference ring at max radius.
             f'<circle cx="{cx}" cy="{cy}" r="{r_out}" '
             f'fill="none" stroke="#27272a" stroke-width="1"/>',
             # Inner hub.
             f'<circle cx="{cx}" cy="{cy}" r="{r_in}" '
-            f'fill="#0a0a0a" stroke="#27272a" stroke-width="1"/>',
+            f'fill="#0a0a0a" stroke="#27272a" stroke-width="1"'
+            f'{centre_attr}/>',
         ])
 
         for h in range(24):
@@ -2315,7 +4007,28 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             x2i, y2i = cx + cos2 * r_in, cy + sin2 * r_in
             x1o, y1o = cx + cos1 * r, cy + sin1 * r
             x2o, y2o = cx + cos2 * r, cy + sin2 * r
+            # Silent hours: when interactive we still need an invisible click
+            # target so every hour from 00–23 is selectable. A 4 px-thick
+            # ring slice at r_in is invisible against the inner hub but big
+            # enough to land a click.
             if hours[h] == 0:
+                if not interactive:
+                    continue
+                r_silent = r_in + 4.0
+                xso1, yso1 = cx + cos1 * r_silent, cy + sin1 * r_silent
+                xso2, yso2 = cx + cos2 * r_silent, cy + sin2 * r_silent
+                d = (
+                    f"M {x1i:.2f} {y1i:.2f} "
+                    f"L {xso1:.2f} {yso1:.2f} "
+                    f"A {r_silent:.2f} {r_silent:.2f} 0 0 1 {xso2:.2f} {yso2:.2f} "
+                    f"L {x2i:.2f} {y2i:.2f} "
+                    f"A {r_in:.2f} {r_in:.2f} 0 0 0 {x1i:.2f} {y1i:.2f} Z"
+                )
+                parts.append(
+                    f'<path d="{d}" fill="transparent" '
+                    f'class="dial-wedge" data-hour="{h}" '
+                    f'style="cursor:pointer"/>'
+                )
                 continue
             fill = _DIAL_DEFAULT_FILL
             opacity = 0.90
@@ -2330,50 +4043,37 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 f"L {x2i:.2f} {y2i:.2f} "
                 f"A {r_in:.2f} {r_in:.2f} 0 0 0 {x1i:.2f} {y1i:.2f} Z"
             )
-            title = f"{h:02d}:00 · {hours[h]} detections"
+            title_el = (
+                "" if compact else f"<title>{h:02d}:00 · {hours[h]} detections</title>"
+            )
+            interact_attr = (
+                f' class="dial-wedge" data-hour="{h}" style="cursor:pointer"'
+                if interactive else ""
+            )
             parts.append(
                 f'<path d="{d}" fill="{fill}" '
-                f'fill-opacity="{opacity:.2f}"{stroke_attr}>'
-                f"<title>{title}</title></path>"
+                f'fill-opacity="{opacity:.2f}"{stroke_attr}{interact_attr}>'
+                f'{title_el}</path>'
             )
 
-        for h, label in ((0, "00"), (6, "06"), (12, "12"), (18, "18")):
-            # Labels sit at the hour boundary (not wedge center) so the
-            # cardinal hours land exactly at top/right/bottom/left.
-            a = _dial_angle(h)
-            x = cx + math.cos(a) * (r_out + 12)
-            y = cy + math.sin(a) * (r_out + 12)
-            parts.append(
-                f'<text x="{x:.2f}" y="{y:.2f}" '
-                f'text-anchor="middle" dominant-baseline="middle" '
-                f'fill="#71717a" font-size="10" '
-                f'font-family="ui-sans-serif, system-ui">{label}</text>'
-            )
+        if not compact:
+            for h, label in ((0, "00"), (6, "06"), (12, "12"), (18, "18")):
+                # Labels sit at the hour boundary (not wedge center) so the
+                # cardinal hours land exactly at top/right/bottom/left.
+                a = _dial_angle(h)
+                x = cx + math.cos(a) * (r_out + 12)
+                y = cy + math.sin(a) * (r_out + 12)
+                parts.append(
+                    f'<text x="{x:.2f}" y="{y:.2f}" '
+                    f'text-anchor="middle" dominant-baseline="middle" '
+                    f'fill="#71717a" font-size="10" '
+                    f'font-family="ui-sans-serif, system-ui">{label}</text>'
+                )
 
         parts.append("</svg>")
         return "".join(parts)
 
-    def _wmo_summary(code: int | None) -> tuple[str, str]:
-        """WMO weather code → (icon key, human label). The icon key is one
-        of clear/partly/overcast/fog/rain/thunder; the template renders an
-        inline SVG per key. Returns ('', '') when the code is unknown."""
-        if code is None:
-            return ("", "")
-        if code == 0:
-            return ("clear", "clear")
-        if code in (1, 2):
-            return ("partly", "partly cloudy")
-        if code == 3:
-            return ("overcast", "overcast")
-        if code in (45, 48):
-            return ("fog", "fog")
-        if code in (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82):
-            return ("rain", "rain")
-        if code in (95, 96, 99):
-            return ("thunder", "thunderstorm")
-        if code in (71, 73, 75, 77, 85, 86):
-            return ("overcast", "wintry")
-        return ("overcast", "")
+    _wmo_summary = weather_module.wmo_summary
 
     def _wp_fetch(title: str) -> dict | None:
         """Fetch the Wikipedia REST summary for a page title and return the
@@ -2385,7 +4085,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         title_enc = urllib.parse.quote(title.strip().replace(" ", "_"))
         url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{title_enc}"
         req = urllib.request.Request(
-            url, headers={"User-Agent": "africam-bird/0.1"}
+            url, headers={"User-Agent": "birdbrain/0.1"}
         )
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
@@ -2403,18 +4103,168 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             # HTML markup like <span lang="en">…</span>).
             "wp_title": data.get("title") or title,
             "extract": (data.get("extract") or "")[:280],
+            # Wikidata QID for this page; lets us fall back to wdt:P181 for
+            # species whose en.wiki article doesn't transclude a range map.
+            "wikidata_qid": data.get("wikibase_item"),
         }
 
-    @app.get("/api/species_image")
-    def species_image(
-        scientific: str = Query(..., min_length=2, max_length=200),
-        common: str = Query(default="", max_length=200),
-    ) -> JSONResponse:
+    def _wikidata_range_map(qid: str | None) -> dict | None:
+        """Last-resort range-map lookup: read wdt:P181 (range map image) from
+        Wikidata's per-entity REST endpoint, bypassing the SPARQL service
+        (which is rate-limited during outages). Returns the same shape as
+        ``_pick_range_map`` or None when no P181 claim is set."""
+        if not qid or not qid.startswith("Q") or not qid[1:].isdigit():
+            return None
+        url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "birdbrain/0.1"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        entity = (data.get("entities") or {}).get(qid) or {}
+        claims = (entity.get("claims") or {}).get("P181") or []
+        for c in claims:
+            val = (c.get("mainsnak") or {}).get("datavalue", {}).get("value")
+            if isinstance(val, str) and val.strip():
+                fname = val.strip()
+                enc = urllib.parse.quote(fname.replace(" ", "_"))
+                return {
+                    # Special:FilePath redirects to the actual Commons URL and
+                    # supports ?width=N for a sized thumbnail.
+                    "range_map": (
+                        f"https://commons.wikimedia.org/wiki/Special:FilePath/"
+                        f"{enc}?width=330"
+                    ),
+                    "range_map_page": (
+                        f"https://commons.wikimedia.org/wiki/File:{enc}"
+                    ),
+                }
+        return None
+
+    def _gbif_range_map(scientific: str) -> dict | None:
+        """GBIF fallback: when Wikipedia and Wikidata both have no range map,
+        GBIF's occurrence-density tile (CC-BY 4.0) is the next licence-clean
+        rung. Two cheap HTTPs — species/match to resolve the scientific name
+        to a usageKey, then occurrence/count so we don't store a deterministic
+        URL that renders as an empty world tile for taxa GBIF has no records
+        for. Returns ``{range_map, range_map_page}`` or None.
+
+        Tile params: classic.poly style fills hex-bins so range reads at a
+        glance from the zoom-0 (whole-world) tile rather than as sparse pixel
+        points; @2x suffix gives a retina-sharp 512×512 PNG."""
+        name = (scientific or "").strip()
+        if not name:
+            return None
+        try:
+            req = urllib.request.Request(
+                "https://api.gbif.org/v1/species/match?name="
+                + urllib.parse.quote(name),
+                headers={"User-Agent": "birdbrain/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        key = data.get("usageKey")
+        if not isinstance(key, int):
+            return None
+        if data.get("matchType") not in ("EXACT", "FUZZY"):
+            return None
+        try:
+            req = urllib.request.Request(
+                f"https://api.gbif.org/v1/occurrence/count?taxonKey={key}",
+                headers={"User-Agent": "birdbrain/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                n_records = int(resp.read().decode().strip() or "0")
+        except Exception:
+            n_records = 0
+        if n_records < 1:
+            return None
+        tile = (
+            f"https://api.gbif.org/v2/map/occurrence/density/0/0/0@2x.png"
+            f"?taxonKey={key}&style=classic.poly&bin=hex&hexPerTile=30"
+        )
+        return {
+            "range_map": tile,
+            "range_map_page": f"https://www.gbif.org/species/{key}",
+        }
+
+    def _inat_range_map(scientific: str) -> dict | None:
+        """iNaturalist fallback: when even GBIF has nothing, iNat sometimes
+        does (citizen-science observations cover taxa where research-grade
+        records are sparse). API is open, rate-limited ~100 req/min, content
+        is CC BY-NC which composes cleanly with BirdNET's CC BY-NC-SA.
+
+        Two HTTPs: /v1/taxa search to resolve a scientific name to a numeric
+        taxon_id (we require an exact case-insensitive match on the result's
+        ``name`` to avoid genus-only hits stealing the slot), then we trust
+        the tile URL — iNat returns a transparent PNG for taxa with zero
+        observations so the client-side rendering will simply look blank if
+        the species has no data, which is harmless."""
+        name = (scientific or "").strip()
+        if not name:
+            return None
+        try:
+            req = urllib.request.Request(
+                "https://api.inaturalist.org/v1/taxa"
+                "?rank=species&per_page=5&q="
+                + urllib.parse.quote(name),
+                headers={"User-Agent": "birdbrain/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+                data = json.load(resp)
+        except Exception:
+            return None
+        wanted = name.lower()
+        taxon_id: int | None = None
+        for r in data.get("results", []):
+            rname = (r.get("name") or "").strip().lower()
+            if rname == wanted and isinstance(r.get("id"), int):
+                taxon_id = r["id"]
+                break
+        if taxon_id is None:
+            return None
+        tile = (
+            f"https://api.inaturalist.org/v1/colored_heatmap/0/0/0.png"
+            f"?taxon_id={taxon_id}"
+        )
+        return {
+            "range_map": tile,
+            "range_map_page": f"https://www.inaturalist.org/taxa/{taxon_id}",
+        }
+
+    def _resolve_species_media(scientific: str, common: str = "") -> dict:
+        """Photo + range-map + IUCN status for a species, behind two cache
+        layers: a process-local 24h cache and a durable per-species row in the
+        DB (``media_fetched_at``). Only a live Wikipedia hit reaches the
+        network; the background sweeper warms the DB layer for every species."""
         key = scientific.strip().lower()
         now = time.monotonic()
         cached = _wp_cache.get(key)
         if cached and cached[0] > now:
-            return JSONResponse(cached[1])
+            return cached[1]
+        # Durable DB layer — skip Wikipedia entirely when we looked recently
+        # (even if the lookup found no map: media_fetched_at is stamped either
+        # way so we don't re-hit Wikipedia for species that simply have none).
+        row = db.get_species_note(scientific)
+        if row is not None and row.media_fetched_at is not None:
+            ts = row.media_fetched_at
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts > datetime.now(UTC) - timedelta(days=_MEDIA_DB_TTL_DAYS):
+                payload = {
+                    "thumbnail": row.image_url,
+                    "page_url": row.image_page_url,
+                    "range_map": row.range_map_url,
+                    "range_map_page": row.range_map_page_url,
+                    "conservation_status": row.conservation_status,
+                }
+                _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
+                return payload
         payload = (
             _wp_fetch(scientific)
             or _wp_fetch(common)
@@ -2436,19 +4286,57 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if status:
                 payload["conservation_status"] = status
             break
-        # Persist conservation status so row templates can show a badge
-        # without hitting Wikipedia per page render.
-        if payload.get("conservation_status"):
-            db.set_species_status(scientific, payload["conservation_status"])
-        # Only cache when we actually got *something* useful — otherwise a
-        # transient Wikipedia hiccup poisons the cache for 24h.
-        if (
+        # Wikidata fallback: many species (Barn Owl, Common Bulbul, …) have a
+        # P181 range-map image on their Wikidata item even though it isn't
+        # transcluded in the en.wiki article. One extra HTTP per species, only
+        # when Wikipedia didn't provide one.
+        if not payload.get("range_map"):
+            wd = _wikidata_range_map(payload.get("wikidata_qid"))
+            if wd:
+                payload = {**payload, **wd}
+        # GBIF fallback (CC-BY 4.0): when Wikipedia *and* Wikidata both have
+        # nothing, GBIF almost always does — it covers ~all bird species via
+        # the occurrence density tile. Two extra HTTPs, only when nothing
+        # else hit. Persisted to species_notes.range_map_url like the others.
+        if not payload.get("range_map"):
+            gb = _gbif_range_map(scientific)
+            if gb:
+                payload = {**payload, **gb}
+        # iNaturalist fallback (CC BY-NC, composes with our BirdNET CC
+        # BY-NC-SA): citizen-science observation density. Last rung — fires
+        # only when Wikipedia, Wikidata, AND GBIF have all come back empty.
+        if not payload.get("range_map"):
+            inat = _inat_range_map(scientific)
+            if inat:
+                payload = {**payload, **inat}
+        # Persist only when we actually reached Wikipedia and got something —
+        # otherwise a transient hiccup would poison both caches (and stamp
+        # media_fetched_at, suppressing retries for 30 days).
+        useful = (
             payload.get("thumbnail")
             or payload.get("range_map")
             or payload.get("conservation_status")
-        ):
+        )
+        if useful:
+            if payload.get("conservation_status"):
+                db.set_species_status(scientific, payload["conservation_status"])
+            db.set_species_media(
+                scientific,
+                common_name=common,
+                image_url=payload.get("thumbnail"),
+                image_page_url=payload.get("page_url"),
+                range_map_url=payload.get("range_map"),
+                range_map_page_url=payload.get("range_map_page"),
+            )
             _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
-        return JSONResponse(payload)
+        return payload
+
+    @app.get("/api/species_image")
+    def species_image(
+        scientific: str = Query(..., min_length=2, max_length=200),
+        common: str = Query(default="", max_length=200),
+    ) -> JSONResponse:
+        return JSONResponse(_resolve_species_media(scientific, common))
 
     # Tokens (split on non-letter chars) that mark an image as a species range
     # map. We tokenize so 'range' doesn't match 'orange' and 'map' doesn't
@@ -2457,6 +4345,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     _RANGE_EXCLUDES = ("status_iucn", "commons-logo", "ooui_icon", "oojs_ui")
 
     _RANGE_SPLIT = re.compile(r"[^a-z0-9]+")
+    # BirdLife/IUCN range maps are commonly named "<Species>IUCNver2018.png" or
+    # "<Species>IUCN2019-2.png" — no 'range'/'map' token, so token-matching
+    # alone misses them. Catch "iucn" followed by "ver" or a 4-digit year. The
+    # small status icon ("Status iucn3.1 LC") has only "iucn3.1" after iucn, so
+    # it won't match (and is also skipped explicitly in _pick_range_map).
+    _RANGE_IUCN_RE = re.compile(r"iucn[ _]?(?:ver|\d{4})", re.IGNORECASE)
     # IUCN status icon filenames: "Status_iucn3.1_LC.svg", "Status_iucn_VU.svg",
     # legacy "Status_LC.svg". Code is the last all-caps token before .svg.
     _IUCN_STATUS_RE = re.compile(
@@ -2476,10 +4370,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         list_url = (
             "https://en.wikipedia.org/w/api.php"
             f"?action=query&prop=images&titles={title_enc}"
-            "&format=json&imlimit=80"
+            "&redirects=1&format=json&imlimit=80"
         )
         req = urllib.request.Request(
-            list_url, headers={"User-Agent": "africam-bird/0.1"}
+            list_url, headers={"User-Agent": "birdbrain/0.1"}
         )
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
@@ -2509,19 +4403,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             tl = t.lower()
             if any(x in tl for x in _RANGE_EXCLUDES):
                 continue
+            if _IUCN_STATUS_RE.search(t):
+                continue  # the small conservation-status icon, not a range map
             tokens = {tk for tk in _RANGE_SPLIT.split(tl) if tk}
-            if tokens & _RANGE_TOKENS:
+            if (tokens & _RANGE_TOKENS) or _RANGE_IUCN_RE.search(tl):
                 candidates.append(t)
         if not candidates:
             return None
-        # Prefer 'distribution' over 'range' over plain 'map'.
+        # Prefer 'distribution' over 'range' over an IUCN range map over plain 'map'.
         def _rank(t: str) -> int:
             tl = t.lower()
             if "distribution" in tl:
                 return 0
             if "range" in tl:
                 return 1
-            return 2
+            if _RANGE_IUCN_RE.search(tl):
+                return 2
+            return 3
         candidates.sort(key=_rank)
         fname = candidates[0]
         fname_enc = urllib.parse.quote(fname.replace(" ", "_"))
@@ -2531,7 +4429,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "&prop=imageinfo&iiprop=url&iiurlwidth=320&format=json"
         )
         req2 = urllib.request.Request(
-            info_url, headers={"User-Agent": "africam-bird/0.1"}
+            info_url, headers={"User-Agent": "birdbrain/0.1"}
         )
         try:
             with urllib.request.urlopen(req2, timeout=8) as resp:  # noqa: S310
@@ -2671,7 +4569,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         params = urllib.parse.urlencode({"query": tag_query, "key": api_key})
         url = f"https://xeno-canto.org/api/3/recordings?{params}"
-        req = urllib.request.Request(url, headers={"User-Agent": "africam-bird/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "birdbrain/0.1"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
                 data = json.load(resp)
@@ -2768,7 +4666,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         params = urllib.parse.urlencode({"query": tag_query, "key": api_key})
         url = f"https://xeno-canto.org/api/3/recordings?{params}"
-        req = urllib.request.Request(url, headers={"User-Agent": "africam-bird/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "birdbrain/0.1"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 (https only)
                 data = json.load(resp)
@@ -2895,6 +4793,40 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac", ".mp3": "audio/mpeg"}
         return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "audio/wav"))
+
+    def _media_sweep_loop() -> None:
+        """Warm the durable media cache: fetch Wikipedia photo + range map for
+        every detected species that's missing or stale, then re-sweep on an
+        interval so newly-detected species get picked up too. Rate-limited to
+        stay polite to Wikimedia; all the heavy lifting (and the don't-refetch
+        stamping) lives in _resolve_species_media / set_species_media."""
+        time.sleep(20)  # let the app settle before reaching out to Wikipedia
+        batch = 25
+        while True:
+            drained = True
+            try:
+                todo = db.species_needing_media(
+                    limit=batch, max_age_days=_MEDIA_DB_TTL_DAYS
+                )
+                if todo:
+                    log.info("media_sweep.batch", count=len(todo))
+                for sci, common in todo:
+                    try:
+                        _resolve_species_media(sci, common)
+                    except Exception as e:  # one bad species shouldn't stall the sweep
+                        log.warning("media_sweep.species_failed", sci=sci, error=str(e)[:200])
+                    time.sleep(1.5)  # be gentle on Wikimedia's API
+                # A full batch means more backlog likely remains — keep draining
+                # promptly; otherwise idle and just re-check for new species.
+                drained = len(todo) < batch
+            except Exception as e:
+                log.warning("media_sweep.tick_failed", error=str(e)[:200])
+            time.sleep(1800 if drained else 30)
+
+    if cfg.media_cache_enabled:
+        threading.Thread(
+            target=_media_sweep_loop, name="media-sweeper", daemon=True
+        ).start()
 
     return app
 

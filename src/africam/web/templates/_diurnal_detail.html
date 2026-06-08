@@ -1,6 +1,10 @@
 {# Drill-down panel rendered when the user clicks a heatmap cell. Reuses
    `_audition_row.html` for each detection so the audio/spectrogram/label
    controls work as on the audition page. #}
+{% from "_macros.html" import species_link %}
+{# Carry this cell's source (may be None for the all-sources view) through to
+   the species page and the included detection rows. #}
+{% set page_source = source %}
 <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3">
   <div class="min-w-0">
     <h3 class="text-sm uppercase tracking-wider text-zinc-400">
@@ -8,7 +12,7 @@
       <span class="text-zinc-200 ml-2">{{ rows | length }}</span>
     </h3>
     <div class="text-xs text-zinc-400 mt-0.5 truncate">
-      <span class="text-zinc-100">{{ common_name }}</span>
+      {{ species_link(common_name, scientific, source=page_source, cls="text-zinc-100 hover:text-emerald-300") }}
       <span class="italic text-zinc-500 ml-1">{{ scientific }}</span>
       <span class="text-zinc-600 mx-2">·</span>
       hour {{ "%02d:00"|format(hour) }}{% if source %} · <code class="text-zinc-300">{{ source }}</code>{% endif %}

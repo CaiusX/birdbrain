@@ -73,11 +73,55 @@ class AppConfig(BaseSettings):
     clip_format: Literal["ogg", "wav", "flac"] = "ogg"
     sample_rate: int = 48_000
     chunk_seconds: float = 3.0
+    # Measured per-chunk BirdNET inference time (ms), used only to estimate the
+    # serialized-detector saturation shown on the health panel. All workers
+    # share one locked detector, so capacity ≈ chunk_seconds*1000 / this.
+    # Re-measure (BirdNetDetector.analyze on a 3s chunk) if the hardware changes.
+    inference_ms_estimate: float = 110.0
     log_level: str = "INFO"
     # Xeno-Canto API v3 requires a key (free, per-account). When set, the
     # audition modal shows reference recordings inline. When unset, it falls
     # back to a plain "search XC" link that needs no auth.
     xeno_canto_key: str | None = None
+
+    # Background species-note generator. Picks one stale species every
+    # notes_tick_seconds and asks Claude to write a 1–2 paragraph commentary
+    # grounded in our detection footprint. Dormant unless ANTHROPIC_API_KEY
+    # is present in the process env.
+    notes_enabled: bool = True
+    # Background sweeper (web process) that pre-fetches Wikipedia photo + range
+    # maps for every detected species and caches them on the species row, so
+    # the header media loads instantly and survives restarts. Needs only
+    # network access to Wikipedia (no API key).
+    media_cache_enabled: bool = True
+    notes_model: str = "claude-haiku-4-5"
+    notes_tick_seconds: int = 300
+    notes_stale_days: int = 7
+    notes_min_detections: int = 3
+    # Per-(species, site) note threshold. Higher than notes_min_detections so
+    # we don't burn budget on one-off visitors — but low enough to include
+    # interesting rarities at a site.
+    notes_species_site_min_detections: int = 30
+    # Multiplier on detection_count_at_gen that retriggers regeneration even
+    # before the age cutoff hits — i.e. "data roughly doubled, old note is
+    # stale even at 2 days old."
+    notes_regen_count_factor: float = 2.0
+    # Lookback window for the daily-brief worker. Each tick scans this
+    # many past UTC days (excluding today) for missing briefs and fills
+    # the gaps oldest-first. Keep modest — re-fills after multi-day
+    # outages but doesn't ask Claude to write briefs about ancient history.
+    notes_brief_lookback_days: int = 3
+
+    # Background hourly weather archiver. Walks the union of live sources
+    # and sites.toml every weather_tick_seconds, pulls hourly observations
+    # from Open-Meteo, and upserts them into weather_observations. A fresh
+    # coord gets a backfill (weather_backfill_days, capped by Open-Meteo's
+    # 92-day forecast-endpoint window); subsequent ticks revise only the
+    # last ~48 h. Lets the dashboard read weather as a pure local SQL
+    # lookup instead of blocking UI requests on the upstream API.
+    weather_archive_enabled: bool = True
+    weather_tick_seconds: int = 3600
+    weather_backfill_days: int = 92
 
 
 def load_sources(path: Path) -> list[SourceConfig]:

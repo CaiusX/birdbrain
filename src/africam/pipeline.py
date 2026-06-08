@@ -4,16 +4,22 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import timedelta
+
+import numpy as np
 
 from africam.audio import AudioSource, RtspSource, YouTubeSource
+from africam.audio.source import AudioChunk
 from africam.clips import save_chunk
 from africam.config import AppConfig, OcrConfig, SourceConfig
 from africam.detector import BirdNetDetector
 from africam.logging import get_logger
+from africam.notes import start_notes_worker
 from africam.site_ocr import SiteOcrWatcher
 from africam.site_resolver import SiteResolver
 from africam.sites import Site, load_sites
 from africam.storage import Database, RuntimeSourceRow
+from africam.weather_worker import start_weather_worker
 
 log = get_logger(__name__)
 
@@ -177,6 +183,13 @@ def _consume_stream(
     # we don't need millisecond freshness — once a minute is plenty given the
     # UI tweaks land seconds-to-minutes after the user wants them.
     SPECIES_FLOOR_REFRESH_S = 60.0
+    # Rolling pre-roll buffer: keep the previous chunk's PCM samples per
+    # worker so saved clips include the 3 s before the BirdNET window. Calls
+    # that straddle a chunk boundary used to be cut at the start (we'd save
+    # only the half BirdNET happened to fire on); with pre-roll, the full
+    # call lives in seconds 3-6 of the saved clip. Memory cost: one chunk
+    # per worker (~580 KB at 48 kHz mono float32, 3 s).
+    prev_samples: np.ndarray | None = None
     for chunk in source.stream(stop_event=stop_event):
         if stop_event.is_set():
             return
@@ -216,11 +229,33 @@ def _consume_stream(
             ]
 
         if not detections:
+            # Even when no detections fire, advance the pre-roll buffer so
+            # the NEXT chunk (if it has detections) carries this one's audio
+            # as its pre-roll context.
+            prev_samples = chunk.samples
             continue
 
         clip_path = None
         if app.save_clips:
-            clip_path = str(save_chunk(chunk, app.clips_dir, fmt=app.clip_format))
+            # Prepend the previous chunk's samples so the saved clip is 6 s:
+            # 3 s pre-roll + 3 s BirdNET window. Filename's started_at gets
+            # shifted back so the on-disk file uniquely names its real start;
+            # DB-level Detection.started_at stays at the BirdNET window's
+            # actual start (set by the detector).
+            if prev_samples is not None and len(prev_samples) > 0:
+                merged = np.concatenate([prev_samples, chunk.samples])
+                pre_s = float(len(prev_samples)) / float(chunk.sample_rate)
+                extended = AudioChunk(
+                    samples=merged,
+                    sample_rate=chunk.sample_rate,
+                    started_at=chunk.started_at - timedelta(seconds=pre_s),
+                    source_name=chunk.source_name,
+                )
+                clip_path = str(save_chunk(extended, app.clips_dir, fmt=app.clip_format))
+            else:
+                clip_path = str(save_chunk(chunk, app.clips_dir, fmt=app.clip_format))
+        # Buffer this chunk for next iteration's pre-roll.
+        prev_samples = chunk.samples
 
         db.insert_detections(
             detections,
@@ -273,9 +308,16 @@ def _desired_sources(
     db: Database,
 ) -> dict[str, SourceConfig]:
     """Merge file-based and runtime sources by name. Runtime wins on conflict
-    so the user can override a static source via the UI without editing TOML."""
-    out: dict[str, SourceConfig] = {s.name: s for s in static_sources}
+    so the user can override a static source via the UI without editing TOML.
+    Sources flagged via the /admin disable toggle are dropped from the desired
+    set so the supervisor stops their workers on the next tick."""
+    disabled = db.list_disabled_source_names()
+    out: dict[str, SourceConfig] = {
+        s.name: s for s in static_sources if s.name not in disabled
+    }
     for row in db.list_runtime_sources():
+        if row.name in disabled:
+            continue
         out[row.name] = _runtime_row_to_cfg(row)
     return out
 
@@ -355,6 +397,16 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
 
     reconcile()
     log.info("pipeline.workers_started", count=len(workers))
+
+    # Optional background commentary generator. Idempotent — stays dormant
+    # if the API key isn't set or anthropic isn't installed; never raises
+    # back into the supervisor loop. Sources passed through so the site-note
+    # tick knows which source names are valid candidates.
+    start_notes_worker(db, app, static_sources)
+
+    # Background hourly weather archiver. Fills weather_observations for
+    # every (source ∪ site) coord so dashboard reads stay local.
+    start_weather_worker(db, app, static_sources, sites)
 
     try:
         while True:

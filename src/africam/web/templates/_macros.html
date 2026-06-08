@@ -1,0 +1,85 @@
+{# Shared Jinja macros. Imported with: {% from "_macros.html" import iucn_badge %} #}
+
+{# Render a parsed daily brief: one overall highlights paragraph + per-site
+   bullet lists. Pass the result of the `parse_brief` filter. Site names link
+   to their site page (the generator uses exact source names). #}
+{% macro brief_body(parsed) -%}
+  {% if parsed.overall %}
+    <p class="text-sm text-zinc-300 leading-relaxed max-w-3xl">{{ parsed.overall }}</p>
+  {% endif %}
+  {% if parsed.sites %}
+    <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3">
+      {% for s in parsed.sites %}
+        <div class="min-w-0">
+          <a href="/site/{{ s.site | urlencode }}"
+             class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300 hover:text-emerald-200">{{ s.site }}</a>
+          <ul class="mt-1 space-y-0.5">
+            {% for b in s.bullets %}
+              <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ b }}</span></li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+{%- endmacro %}
+
+{# Link a species name to its detail page. `source` (optional) carries the
+   origin page's active site filter through to the detail page so it opens
+   pre-scoped to that site; omit it to land on the all-sites view. #}
+{% macro species_link(common, scientific, source=None, cls="") -%}
+<a href="/species/{{ scientific | urlencode }}{% if source %}?source={{ source | urlencode }}{% endif %}"{% if cls %} class="{{ cls }}"{% endif %}>{{ common }}</a>
+{%- endmacro %}
+
+{# Link a site name to its site-detail page. Use this anywhere a site name
+   is shown so the user can always click through to /site/<name>. Pass cls
+   to override the default emerald hover when the surrounding context has
+   its own colour scheme. #}
+{% macro site_link(name, cls="hover:text-emerald-300") -%}
+<a href="/site/{{ name | urlencode }}"{% if cls %} class="{{ cls }}"{% endif %}>{{ name }}</a>
+{%- endmacro %}
+
+{% set _IUCN_CLASS = {
+  "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
+  "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),
+  "VU": ("bg-amber-700/30 text-amber-300 border-amber-600/40", "Vulnerable"),
+  "EN": ("bg-orange-700/30 text-orange-300 border-orange-600/40", "Endangered"),
+  "CR": ("bg-rose-700/30 text-rose-300 border-rose-600/40", "Critically Endangered"),
+  "EW": ("bg-rose-900/40 text-rose-400 border-rose-700/50", "Extinct in the Wild"),
+  "EX": ("bg-zinc-900 text-zinc-500 border-zinc-700", "Extinct"),
+  "DD": ("bg-zinc-700/30 text-zinc-400 border-zinc-600/40", "Data Deficient"),
+  "NE": ("bg-zinc-800 text-zinc-500 border-zinc-700", "Not Evaluated"),
+} %}
+
+{# Inline weather icon matching the keys returned by ``wmo_summary`` in
+   africam.weather. Keep in sync with the bigger inline copies in the
+   diurnal popup. Returns nothing for unknown keys so the surrounding
+   layout collapses cleanly. #}
+{% macro weather_icon(key, size=20) -%}
+{%- if key == 'clear' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+{%- elif key == 'partly' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="9" r="3"/><path d="M8 2v2M2 9h2M13.5 4.5L12 6M3.5 14.5L2 16"/><path d="M17.5 21a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 13.5 4.5 4.5 0 0 0 6.5 21h11Z"/></svg>
+{%- elif key == 'overcast' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 11.5 4.5 4.5 0 0 0 6.5 19h11Z"/></svg>
+{%- elif key == 'fog' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h18M3 13h12M3 18h18"/></svg>
+{%- elif key == 'rain' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M17.5 14a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 6.5 4.5 4.5 0 0 0 6.5 14h11Z"/><path d="M9 17v3M13 17v3M11 19v3"/></svg>
+{%- elif key == 'thunder' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 14a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 6.5 4.5 4.5 0 0 0 6.5 14h11Z"/><path d="M13 15l-3 5h4l-3 5"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
+{# IUCN Red List badge. size="sm" (10px, for inline row use) or "md" (11px,
+   for species-detail headers). Renders nothing when status is empty/unknown. #}
+{% macro iucn_badge(status, size="sm") -%}
+{%- if status and status in _IUCN_CLASS -%}
+{%- set _cls, _label = _IUCN_CLASS[status] -%}
+{%- if size == "md" -%}
+<span class="px-1.5 py-0 rounded text-[11px] font-medium tabular-nums border {{ _cls }}" title="IUCN · {{ _label }}">{{ status }}</span>
+{%- else -%}
+<span class="px-1 py-0 rounded text-[10px] font-medium tabular-nums border {{ _cls }}" title="IUCN · {{ _label }}">{{ status }}</span>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro %}

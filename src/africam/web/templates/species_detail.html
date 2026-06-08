@@ -1,22 +1,19 @@
 {% extends "base.html" %}
-{% block title %}Africam · {{ common_name }}{% endblock %}
+{% block title %}BirdBrain · {{ common_name }}{% endblock %}
 
 {% set sp_tag = (note_tag_by_sci or {}).get(scientific) %}
 {% set sp_palette = (palette_for_tag or {}).get(sp_tag, default_palette or 'fire') %}
 {% set sp_status = (status_by_sci or {}).get(scientific) %}
-{% set _iucn_class = {
-  "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
-  "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),
-  "VU": ("bg-amber-700/30 text-amber-300 border-amber-600/40", "Vulnerable"),
-  "EN": ("bg-orange-700/30 text-orange-300 border-orange-600/40", "Endangered"),
-  "CR": ("bg-rose-700/30 text-rose-300 border-rose-600/40", "Critically Endangered"),
-  "EW": ("bg-rose-900/40 text-rose-400 border-rose-700/50", "Extinct in the Wild"),
-  "EX": ("bg-zinc-900 text-zinc-500 border-zinc-700", "Extinct"),
-  "DD": ("bg-zinc-700/30 text-zinc-400 border-zinc-600/40", "Data Deficient"),
-  "NE": ("bg-zinc-800 text-zinc-500 border-zinc-700", "Not Evaluated"),
-} %}
+{% from "_macros.html" import iucn_badge %}
 
-{% macro spectrogram_button(r) -%}
+{% block head_extra %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+{% endblock %}
+
+{% macro spectrogram_button(r, big=false) -%}
   {% set tz = (source_tz | default({})).get(r.source_name, 'UTC') %}
   <button type="button"
           data-spectrogram-trigger
@@ -27,12 +24,12 @@
           data-label="{{ r.label or '' }}"
           data-suggested="{{ r.suggested_species or '' }}"
           data-palette="{{ sp_palette }}"
-          class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
+          class="relative block w-full {{ 'h-28' if big else 'h-7' }} rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
           style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
           title="click to play">
-    <img src="/spectrograms/{{ r.id }}.png?p={{ sp_palette }}" alt=""
+    <img src="/spectrograms/{{ r.id }}.png?{{ 'size=large' if big else 'p=' ~ sp_palette }}" alt=""
          class="absolute inset-0 w-full h-full object-cover pointer-events-none" loading="lazy">
-    <span class="absolute inset-0 flex items-center justify-center text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
+    <span class="absolute {{ 'bottom-1 right-2' if big else 'inset-0 flex items-center justify-center' }} text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
       {{ "%.2f"|format(r.confidence) }}
     </span>
   </button>
@@ -46,11 +43,7 @@
     <div class="min-w-0 flex-1">
       <h2 class="text-xl font-semibold text-zinc-100 flex items-center gap-2 flex-wrap">
         {{ common_name }}
-        {% if sp_status and sp_status in _iucn_class %}
-          {% set _cls, _label = _iucn_class[sp_status] %}
-          <span class="px-1.5 py-0 rounded text-[11px] font-medium tabular-nums border {{ _cls }}"
-                title="IUCN · {{ _label }}">{{ sp_status }}</span>
-        {% endif %}
+        {{ iucn_badge(sp_status, size="md") }}
         {% if sp_tag == 'reliable' %}
           <span class="px-1.5 py-0 rounded text-[11px] uppercase tracking-wider border border-emerald-500/50 text-emerald-300 bg-emerald-500/10">reliable</span>
         {% elif sp_tag == 'suspect' %}
@@ -60,8 +53,28 @@
         {% endif %}
       </h2>
       <div class="italic text-zinc-400 text-sm">{{ scientific }}</div>
+      {% if active_source %}
+        <div class="mt-2">
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-emerald-500/10 border border-emerald-500/40 text-emerald-300">
+            filtered to <a href="/site/{{ active_source | urlencode }}" class="font-medium hover:text-white" title="open {{ active_source }} site page">{{ active_source }}</a>
+            <a href="/species/{{ scientific | urlencode }}" class="text-emerald-200/70 hover:text-white" title="show all sites">×</a>
+          </span>
+        </div>
+      {% endif %}
       {% if note and note.note %}
         <p class="mt-3 text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ note.note }}</p>
+      {% endif %}
+      {% if site_note and site_note.note %}
+        <div class="mt-3 max-w-3xl">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">at <a href="/site/{{ active_source | urlencode }}" class="hover:text-emerald-200" title="open {{ active_source }} site page">{{ active_source }}</a></div>
+          <ul class="mt-1 space-y-0.5">
+            {% for line in site_note.note.splitlines() %}
+              {% if line.strip() %}
+                <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ line.strip().lstrip('•-* ').strip() }}</span></li>
+              {% endif %}
+            {% endfor %}
+          </ul>
+        </div>
       {% endif %}
     </div>
     <a href="https://en.wikipedia.org/wiki/{{ scientific.replace(' ', '_') }}"
@@ -69,12 +82,236 @@
        class="text-xs text-emerald-300 hover:text-emerald-200">Wikipedia ↗</a>
   </div>
 
+  {# Header media strip: photo + natural range map (both lazily fetched from
+     Wikipedia via /api/species_image) + a representative spectrogram. #}
+  {% set feature_clip = good_clips[0] if good_clips else (top_clips[0] if top_clips else none) %}
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-px bg-zinc-800/50 border-t border-zinc-800">
+    <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">photo</div>
+      <a id="species-photo-link" href="#" target="_blank" rel="noopener" class="inline-block" style="display:none">
+        <img id="species-photo" alt="" loading="lazy"
+             class="max-w-full max-h-44 rounded border border-zinc-800">
+      </a>
+      <div id="species-photo-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no photo</div>
+    </div>
+    <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">distribution <span class="normal-case text-zinc-600">· natural range</span></div>
+      {# Static-image slot: Wikipedia/Wikidata range maps include their own
+         continent outlines. Shown via <img> wrapped in an attribution link. #}
+      <a id="species-range-link" href="#" target="_blank" rel="noopener" class="inline-block" style="display:none">
+        <img id="species-range" alt="" loading="lazy"
+             class="max-w-full max-h-44 rounded border border-zinc-800 bg-zinc-950">
+      </a>
+      {# Live Leaflet slot: GBIF tiles are transparent overlays — they need
+         a basemap or you're staring at dots in space. JS swaps between this
+         and the <img> based on the range_map URL. #}
+      <div id="species-range-map"
+           class="w-full rounded border border-zinc-800 overflow-hidden"
+           style="display:none; height: 11rem;"></div>
+      <div id="species-range-attrib" class="text-[10px] text-zinc-500 mt-1" style="display:none;">
+        from <a id="species-range-attrib-link" href="#" target="_blank" rel="noopener" class="text-emerald-400 hover:text-emerald-300">source</a>
+        · <span id="species-range-attrib-text">occurrence density</span>
+        over <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" class="hover:text-zinc-300">OpenStreetMap</a>
+      </div>
+      <div id="species-range-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no range map</div>
+    </div>
+    <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">
+        distinctive spectrogram
+        {% if feature_clip %}<span class="normal-case text-zinc-600">· {{ 'labelled good' if good_clips else 'highest confidence' }}</span>{% endif %}
+      </div>
+      {% if feature_clip %}
+        {{ spectrogram_button(feature_clip, big=true) }}
+      {% else %}
+        <div class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no audio captured yet</div>
+      {% endif %}
+    </div>
+  </div>
+  <script>
+  (function () {
+    const qs = new URLSearchParams({ scientific: {{ scientific | tojson }} });
+    const common = {{ common_name | tojson }};
+    if (common) qs.set('common', common);
+    function show(linkId, imgId, emptyId, src, href) {
+      if (!src) return;  // leave the "no …" placeholder in place
+      const link = document.getElementById(linkId);
+      const img = document.getElementById(imgId);
+      const empty = document.getElementById(emptyId);
+      img.src = src;
+      link.href = href || '#';
+      // Toggle via inline style: Tailwind's .flex/.inline-block utilities
+      // override the [hidden] attribute, so the attribute alone won't hide
+      // the placeholder or reveal the link.
+      link.style.display = '';
+      if (empty) empty.style.display = 'none';
+    }
+    // Live-tile URLs (GBIF, iNaturalist) need a Leaflet map with an OSM
+    // basemap underneath; static-image URLs (Wikipedia, Wikidata) render as
+    // an <img>. We detect by URL regex.
+    const GBIF_RE = /^https:\/\/api\.gbif\.org\/v2\/map\/occurrence\/density\/\d+\/\d+\/\d+@2x\.png\?taxonKey=(\d+)/;
+    const INAT_RE = /^https:\/\/api\.inaturalist\.org\/v1\/colored_heatmap\/\d+\/\d+\/\d+\.png\?taxon_id=(\d+)/;
+
+    // Continent lookups for fitting GBIF range maps to a sensible startup
+    // extent. We tally the country facet, pick the continent with the most
+    // occurrences, and fit that bbox — provided the winner is clearly
+    // dominant (≥ 70% of total). Widespread species (Tyto alba, etc.) keep
+    // the default world view.
+    const CC_CONTINENT = {
+      // Africa
+      AO:'AF',BF:'AF',BI:'AF',BJ:'AF',BW:'AF',CD:'AF',CF:'AF',CG:'AF',CI:'AF',CM:'AF',
+      CV:'AF',DJ:'AF',DZ:'AF',EG:'AF',EH:'AF',ER:'AF',ET:'AF',GA:'AF',GH:'AF',GM:'AF',
+      GN:'AF',GQ:'AF',GW:'AF',KE:'AF',KM:'AF',LR:'AF',LS:'AF',LY:'AF',MA:'AF',MG:'AF',
+      ML:'AF',MR:'AF',MU:'AF',MW:'AF',MZ:'AF',NA:'AF',NE:'AF',NG:'AF',RE:'AF',RW:'AF',
+      SC:'AF',SD:'AF',SH:'AF',SL:'AF',SN:'AF',SO:'AF',SS:'AF',ST:'AF',SZ:'AF',TD:'AF',
+      TG:'AF',TN:'AF',TZ:'AF',UG:'AF',YT:'AF',ZA:'AF',ZM:'AF',ZW:'AF',
+      // Europe
+      AD:'EU',AL:'EU',AT:'EU',AX:'EU',BA:'EU',BE:'EU',BG:'EU',BY:'EU',CH:'EU',CZ:'EU',
+      DE:'EU',DK:'EU',EE:'EU',ES:'EU',FI:'EU',FO:'EU',FR:'EU',GB:'EU',GG:'EU',GI:'EU',
+      GR:'EU',HR:'EU',HU:'EU',IE:'EU',IM:'EU',IS:'EU',IT:'EU',JE:'EU',LI:'EU',LT:'EU',
+      LU:'EU',LV:'EU',MC:'EU',MD:'EU',ME:'EU',MK:'EU',MT:'EU',NL:'EU',NO:'EU',PL:'EU',
+      PT:'EU',RO:'EU',RS:'EU',RU:'EU',SE:'EU',SI:'EU',SK:'EU',SM:'EU',UA:'EU',VA:'EU',
+      XK:'EU',
+      // Asia
+      AE:'AS',AF:'AS',AM:'AS',AZ:'AS',BD:'AS',BH:'AS',BN:'AS',BT:'AS',CN:'AS',CY:'AS',
+      GE:'AS',HK:'AS',ID:'AS',IL:'AS',IN:'AS',IQ:'AS',IR:'AS',JO:'AS',JP:'AS',KG:'AS',
+      KH:'AS',KP:'AS',KR:'AS',KW:'AS',KZ:'AS',LA:'AS',LB:'AS',LK:'AS',MM:'AS',MN:'AS',
+      MO:'AS',MV:'AS',MY:'AS',NP:'AS',OM:'AS',PH:'AS',PK:'AS',PS:'AS',QA:'AS',SA:'AS',
+      SG:'AS',SY:'AS',TH:'AS',TJ:'AS',TL:'AS',TM:'AS',TR:'AS',TW:'AS',UZ:'AS',VN:'AS',
+      YE:'AS',
+      // North/Central America + Caribbean
+      AG:'NA',AI:'NA',AW:'NA',BB:'NA',BM:'NA',BS:'NA',BZ:'NA',CA:'NA',CR:'NA',CU:'NA',
+      DM:'NA',DO:'NA',GD:'NA',GL:'NA',GT:'NA',HN:'NA',HT:'NA',JM:'NA',KN:'NA',KY:'NA',
+      LC:'NA',MX:'NA',NI:'NA',PA:'NA',PR:'NA',SV:'NA',TC:'NA',TT:'NA',US:'NA',VC:'NA',
+      VG:'NA',VI:'NA',
+      // South America
+      AR:'SA',BO:'SA',BR:'SA',CL:'SA',CO:'SA',EC:'SA',FK:'SA',GF:'SA',GY:'SA',PE:'SA',
+      PY:'SA',SR:'SA',UY:'SA',VE:'SA',
+      // Oceania
+      AS:'OC',AU:'OC',CK:'OC',FJ:'OC',FM:'OC',GU:'OC',KI:'OC',MH:'OC',MP:'OC',NC:'OC',
+      NF:'OC',NR:'OC',NU:'OC',NZ:'OC',PF:'OC',PG:'OC',PN:'OC',PW:'OC',SB:'OC',TK:'OC',
+      TO:'OC',TV:'OC',VU:'OC',WF:'OC',WS:'OC',
+    };
+    const CONTINENT_BBOX = {
+      AF: [[-35, -20], [38, 55]],
+      EU: [[35, -25], [72, 60]],
+      AS: [[-12, 25], [78, 180]],
+      NA: [[7, -170], [83, -52]],
+      SA: [[-56, -82], [13, -34]],
+      OC: [[-50, 110], [-10, 180]],
+    };
+
+    function fitGBIFExtent(map, taxonKey) {
+      const url = 'https://api.gbif.org/v1/occurrence/search'
+        + '?taxonKey=' + taxonKey
+        + '&hasCoordinate=true&limit=0'
+        + '&facet=country&facetLimit=15';
+      fetch(url).then(r => r.ok ? r.json() : null).then(d => {
+        if (!d || !d.facets || !d.facets[0]) return;
+        const counts = d.facets[0].counts || [];
+        if (!counts.length) return;
+        const totals = {};
+        let grand = 0;
+        counts.forEach(c => {
+          const cont = CC_CONTINENT[c.name];
+          if (!cont) return;
+          totals[cont] = (totals[cont] || 0) + c.count;
+          grand += c.count;
+        });
+        let winner = null, max = 0;
+        for (const k in totals) {
+          if (totals[k] > max) { winner = k; max = totals[k]; }
+        }
+        if (winner && max >= grand * 0.70 && CONTINENT_BBOX[winner]) {
+          map.fitBounds(CONTINENT_BBOX[winner],
+            { padding: [8, 8], animate: false });
+        }
+      }).catch(() => { /* silent — keep default view */ });
+    }
+
+    function renderLiveTile({ mapEl, tileTemplate, attribSource, attribText,
+                              attribLink, onMapReady }) {
+      // CRITICAL ORDERING: make the container visible BEFORE L.map(). Leaflet
+      // measures the container at init time and caches the dimensions; if the
+      // element is display:none, that cache is 0×0 and every subsequent
+      // setView/fitBounds computes nonsense zoom levels (we ended up at z>10,
+      // past the maxZoom where GBIF serves tiles → no overlay visible).
+      mapEl.style.display = 'block';
+      document.getElementById('species-range-attrib').style.display = '';
+
+      const map = L.map(mapEl, {
+        zoomControl: false, attributionControl: false,
+        worldCopyJump: true,
+      });
+      lockMap(map);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+      L.tileLayer(tileTemplate, { maxZoom: 14, opacity: 0.85 }).addTo(map);
+      // Defensive invalidateSize on the next frame in case the parent is
+      // still mid-layout (Tailwind grid + lazy fetch can race).
+      map.setView([5, 25], 2);
+      requestAnimationFrame(() => map.invalidateSize());
+
+      const a = document.getElementById('species-range-attrib-link');
+      a.textContent = attribSource;
+      a.href = attribLink;
+      document.getElementById('species-range-attrib-text').textContent = attribText;
+      if (onMapReady) onMapReady(map);
+    }
+    function showRange(src, href) {
+      if (!src) return;
+      const empty = document.getElementById('species-range-empty');
+      if (empty) empty.style.display = 'none';
+      const mapEl = document.getElementById('species-range-map');
+      const mg = GBIF_RE.exec(src);
+      if (mg) {
+        const taxonKey = mg[1];
+        renderLiveTile({
+          mapEl,
+          tileTemplate:
+            'https://api.gbif.org/v2/map/occurrence/density/{z}/{x}/{y}@2x.png'
+            + '?taxonKey=' + taxonKey
+            + '&style=classic.poly&bin=hex&hexPerTile=30',
+          attribSource: 'GBIF',
+          attribText: 'occurrence density (CC BY 4.0)',
+          attribLink: href || 'https://www.gbif.org/species/' + taxonKey,
+          onMapReady: (map) => fitGBIFExtent(map, taxonKey),
+        });
+        return;
+      }
+      const mi = INAT_RE.exec(src);
+      if (mi) {
+        const taxonId = mi[1];
+        renderLiveTile({
+          mapEl,
+          tileTemplate:
+            'https://api.inaturalist.org/v1/colored_heatmap/{z}/{x}/{y}.png'
+            + '?taxon_id=' + taxonId,
+          attribSource: 'iNaturalist',
+          attribText: 'observation density (CC BY-NC)',
+          attribLink: href || 'https://www.inaturalist.org/taxa/' + taxonId,
+        });
+        return;
+      }
+      // Static image path (Wikipedia / Wikidata P181 / etc.).
+      show('species-range-link', 'species-range', null, src, href);
+    }
+    fetch('/api/species_image?' + qs.toString())
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data) return;
+        show('species-photo-link', 'species-photo', 'species-photo-empty',
+             data.thumbnail, data.page_url);
+        showRange(data.range_map, data.range_map_page || data.page_url);
+      })
+      .catch(() => { /* silent — placeholders remain */ });
+  })();
+  </script>
+
   <div class="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 flex-wrap text-xs">
     <label class="flex items-center gap-2 text-zinc-400">
       <span class="uppercase tracking-wider text-[10px]">min confidence for this species</span>
       <input id="species-min-conf-input" type="number" min="0" max="1" step="0.05"
              value="{{ '%.2f'|format(note.min_confidence) if note and note.min_confidence is not none else '' }}"
-             placeholder="(source default)"
+             placeholder="(site default)"
              class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 w-24 tabular-nums text-zinc-100">
     </label>
     <button id="species-min-conf-save"
@@ -124,7 +361,7 @@
       <div class="text-2xl font-semibold tabular-nums">{{ "%.2f"|format(max_conf) }}</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
-      <div class="text-[10px] uppercase tracking-wider text-zinc-500">sources</div>
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500">sites</div>
       <div class="text-2xl font-semibold tabular-nums">{{ source_summary | length }}</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
@@ -154,6 +391,96 @@
   </div>
 </section>
 
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3 flex-wrap">
+    <h3 class="text-sm uppercase tracking-wider text-zinc-400">
+      Where it's heard
+      <span class="text-zinc-500 normal-case text-xs ml-1">bubble size = detections per site · click to filter</span>
+    </h3>
+    <div class="flex items-center gap-3 text-xs">
+      <span class="text-zinc-400">
+        {% if active_source %}<a href="/site/{{ active_source | urlencode }}" class="text-emerald-300 hover:text-emerald-200" title="open {{ active_source }} site page">{{ active_source }}</a>{% else %}all sites{% endif %}
+      </span>
+      {% if all_sources %}
+        <form method="get" action="/species/{{ scientific | urlencode }}" onchange="this.submit()">
+          {% set filters = {'source': active_source} %}
+          {% include "_source_filter.html" %}
+        </form>
+      {% endif %}
+    </div>
+  </div>
+  {% if sites_for_map %}
+    <div id="species-map" class="w-full" style="height: 340px;"></div>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">No mapped locations for this species.</p>
+  {% endif %}
+</section>
+
+{% if sites_for_map %}
+<script>
+(function () {
+  const SITES = {{ sites_for_map | tojson }};
+  const ACTIVE = {{ active_source | tojson }};
+  const SCI = {{ scientific | tojson }};
+  const SOURCE_COLORS = {{ source_colors | tojson }};
+  const DEFAULT_COLOR = '#10b981';
+
+  function speciesUrl(source) {
+    const base = '/species/' + encodeURIComponent(SCI);
+    return source ? base + '?source=' + encodeURIComponent(source) : base;
+  }
+
+  const map = L.map('species-map', {
+    scrollWheelZoom: true,
+    worldCopyJump: false,
+    // Constrain panning to one world so you can't slide off into the void;
+    // viscosity 1 makes the bounce hard.
+    maxBounds: [[-85, -180], [85, 180]],
+    maxBoundsViscosity: 1.0,
+  });
+  lockMap(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap',
+    maxZoom: 18,
+    // noWrap stops Leaflet from rendering a second copy of the world to
+    // the east/west — at z=1 the globe is only 512 px wide so without
+    // this you see two duplicate continents side by side.
+    noWrap: true,
+  }).addTo(map);
+
+  // One small, uniform bubble per site that recorded this species. Colour
+  // comes from the per-site biome palette so the marker matches the legend
+  // on /species and /confidence. The active-filter site gets a thick white
+  // ring around its bubble (same fill colour) so it stands out without
+  // changing its identity.
+  const RADIUS = 7;
+  const markers = [];
+  SITES.forEach(s => {
+    const isActive = ACTIVE && s.name === ACTIVE;
+    const fill = SOURCE_COLORS[s.name] || DEFAULT_COLOR;
+    const m = L.circleMarker([s.lat, s.lon], {
+      radius: RADIUS,
+      color: isActive ? '#fafafa' : fill,
+      weight: isActive ? 3 : 1,
+      fillColor: fill,
+      fillOpacity: 0.85,
+    }).addTo(map);
+    m.bindTooltip(`${s.name} · ${s.count}`, {
+      permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
+    });
+    // Clicking the active site clears the filter; any other site applies it.
+    m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
+    markers.push(m);
+  });
+
+  // Default to a global overview so the spread of sites (and the empty
+  // continents around them) reads at a glance. Click-to-interact unlocks
+  // pan/zoom; the locked map widget defaults to the whole world.
+  map.setView([10, 0], 1);
+})();
+</script>
+{% endif %}
+
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl">
     <div class="px-5 py-3 border-b border-zinc-800">
@@ -163,10 +490,10 @@
       </h3>
     </div>
     <div class="px-5 py-4">
-      <div class="flex items-end gap-1 h-32" title="oldest → today">
+      <div class="flex gap-1 h-32" title="oldest → today">
         {% for d in daily %}
           {% set h = (d.count / peak_day * 100) | round(0) | int %}
-          <div class="flex-1 flex flex-col items-center gap-1">
+          <div class="flex-1 flex flex-col items-center justify-end gap-1">
             <div class="text-[9px] tabular-nums text-zinc-400">{{ d.count if d.count else '' }}</div>
             <div class="w-full bg-emerald-500/70 rounded-sm"
                  style="height: {{ h if h > 0 else 1 }}%; min-height: 1px;"
@@ -185,15 +512,15 @@
     <div class="px-5 py-3 border-b border-zinc-800">
       <h3 class="text-sm uppercase tracking-wider text-zinc-400">
         Hour of day
-        <span class="text-zinc-500 normal-case text-xs ml-1">aggregated local time per source</span>
+        <span class="text-zinc-500 normal-case text-xs ml-1">aggregated local time per site</span>
       </h3>
     </div>
     <div class="px-5 py-4">
-      <div class="flex items-end gap-1 h-32">
+      <div class="flex gap-1 h-32">
         {% for c in hours %}
           {% set h = (c / peak_hour * 100) | round(0) | int %}
           {% set is_label_hour = loop.index0 in [0, 6, 12, 18] %}
-          <div class="flex-1 flex flex-col items-center gap-1" title="{{ loop.index0 }}:00 · {{ c }} detection{{ '' if c == 1 else 's' }}">
+          <div class="flex-1 flex flex-col items-center justify-end gap-1" title="{{ loop.index0 }}:00 · {{ c }} detection{{ '' if c == 1 else 's' }}">
             <div class="w-full bg-emerald-500/70 rounded-sm"
                  style="height: {{ h if h > 0 else 1 }}%; min-height: 1px;"></div>
           </div>
@@ -209,13 +536,13 @@
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl">
     <div class="px-5 py-3 border-b border-zinc-800">
-      <h3 class="text-sm uppercase tracking-wider text-zinc-400">By source</h3>
+      <h3 class="text-sm uppercase tracking-wider text-zinc-400">By site</h3>
     </div>
     {% if source_summary %}
       <table class="w-full text-sm">
         <thead class="text-zinc-400 text-xs uppercase tracking-wider">
           <tr class="border-b border-zinc-800">
-            <th class="text-left font-medium px-5 py-2">Source</th>
+            <th class="text-left font-medium px-5 py-2">Site</th>
             <th class="text-right font-medium px-5 py-2">Count</th>
             <th class="text-right font-medium px-5 py-2">Max conf</th>
             <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Last seen</th>
@@ -225,7 +552,7 @@
           {% for s in source_summary %}
             {% set tz = (source_tz | default({})).get(s.source, 'UTC') %}
             <tr class="hover:bg-zinc-800/40">
-              <td class="px-5 py-2"><code class="text-zinc-300">{{ s.source }}</code></td>
+              <td class="px-5 py-2"><a href="/site/{{ s.source | urlencode }}" class="text-zinc-300 hover:text-emerald-300">{{ s.source }}</a></td>
               <td class="px-5 py-2 text-right tabular-nums">{{ s.count }}</td>
               <td class="px-5 py-2 text-right tabular-nums">{{ "%.2f"|format(s.max_conf) }}</td>
               <td class="px-5 py-2 text-zinc-400 hidden md:table-cell tabular-nums">
@@ -246,10 +573,10 @@
       <h3 class="text-sm uppercase tracking-wider text-zinc-400">Confidence distribution</h3>
     </div>
     <div class="px-5 py-4">
-      <div class="flex items-end gap-1 h-32" title="0.0 — 1.0 in 0.1 buckets">
+      <div class="flex gap-1 h-32" title="0.0 — 1.0 in 0.1 buckets">
         {% for c in conf_bins %}
           {% set h = (c / peak_conf_bin * 100) | round(0) | int %}
-          <div class="flex-1 flex flex-col items-center gap-1" title="conf {{ "%.1f"|format(loop.index0 * 0.1) }}–{{ "%.1f"|format(loop.index0 * 0.1 + 0.1) }} · {{ c }}">
+          <div class="flex-1 flex flex-col items-center justify-end gap-1" title="conf {{ "%.1f"|format(loop.index0 * 0.1) }}–{{ "%.1f"|format(loop.index0 * 0.1 + 0.1) }} · {{ c }}">
             <div class="text-[9px] tabular-nums text-zinc-400">{{ c if c else '' }}</div>
             <div class="w-full bg-emerald-500/70 rounded-sm"
                  style="height: {{ h if h > 0 else 1 }}%; min-height: 1px;"></div>
