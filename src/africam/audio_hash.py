@@ -108,6 +108,18 @@ def clip_hash(path: str | Path) -> str | None:
     # within-frequency so a bandwise gain drift doesn't flip every bit.
     S_db = librosa.power_to_db(S)
     medians = np.median(S_db, axis=1, keepdims=True)
-    bits = (S_db > medians).astype(np.uint8).flatten()
-    packed = np.packbits(bits)  # 256 bits -> 32 bytes
+    bits_2d = (S_db > medians).astype(np.uint8)  # shape (n_mels, n_frames)
+
+    # Reject degenerate patterns where every mel band carries the same
+    # time-pattern. A real signal (bird call, music, speech) has
+    # band-specific energy dynamics; if all 16 bands move in lockstep we
+    # are looking at stationary noise (wind, hum, silence floor) whose
+    # fingerprint isn't distinctive enough to dedup with. Without this
+    # gate, hundreds of unrelated noise-floor clips collide on hashes like
+    # ``ff00ff00ff00…`` and get wrongly flagged as replays of each other.
+    n_unique_band_patterns = len(np.unique(bits_2d, axis=0))
+    if n_unique_band_patterns < 3:
+        return None
+
+    packed = np.packbits(bits_2d.flatten())  # 256 bits -> 32 bytes
     return packed.tobytes().hex()
