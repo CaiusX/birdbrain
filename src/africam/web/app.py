@@ -713,10 +713,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         group_minutes = 5
         with db.session() as s:
             # Pull a wider window than ``limit`` so we have enough raw rows to
-            # form ``limit`` groups when grouping is on.
+            # form ``limit`` groups when grouping is on. Replays are hidden by
+            # default (see Database.not_replay_predicate); the /admin/replays
+            # page is the place to inspect what's been filtered.
             raw = list(
                 s.scalars(
                     select(DetectionRow)
+                    .where(Database.not_replay_predicate())
                     .order_by(desc(DetectionRow.started_at))
                     .limit(500)
                 )
@@ -766,6 +769,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         last_minutes: int = Query(default=0, ge=0, le=24 * 60 * 14),
         # 0 = "all species" — no species cap.
         top_species: int = Query(default=0, ge=0, le=200),
+        # Default hides replays (YouTube ad/highlight loops, see
+        # Database.not_replay_predicate). ?include_replays=1 reveals them.
+        include_replays: bool = Query(default=False),
     ) -> HTMLResponse:
         _, sources_by_name, _ = _all_sources()
         # Fetch enough raw rows to fill ``limit`` buckets even when one
@@ -790,6 +796,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if last_minutes > 0:
                 cutoff = datetime.now(UTC) - timedelta(minutes=last_minutes)
                 stmt = stmt.where(DetectionRow.started_at >= cutoff)
+            if not include_replays:
+                stmt = stmt.where(Database.not_replay_predicate())
             raw = list(s.scalars(stmt))
         rows = _group_detections(raw, group_minutes * 60)
         if top_species > 0:
@@ -902,6 +910,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     def api_detections(
         source: str | None = Query(default=None),
         limit: int = Query(default=100, ge=1, le=1000),
+        include_replays: bool = Query(default=False),
     ) -> JSONResponse:
         with db.session() as s:
             stmt = (
@@ -911,6 +920,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
             if source:
                 stmt = stmt.where(DetectionRow.source_name == source)
+            if not include_replays:
+                stmt = stmt.where(Database.not_replay_predicate())
             rows = list(s.scalars(stmt))
         return JSONResponse(
             [
@@ -1306,17 +1317,19 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         request: Request,
         scientific: str,
         source: str | None = Query(default=None),
+        include_replays: bool = Query(default=False),
     ) -> HTMLResponse:
         from collections import Counter
         _, sources_by_name, _ = _all_sources()
         with db.session() as s:
-            all_rows = list(
-                s.scalars(
-                    select(DetectionRow)
-                    .where(DetectionRow.scientific_name == scientific)
-                    .order_by(desc(DetectionRow.started_at))
-                )
+            stmt = (
+                select(DetectionRow)
+                .where(DetectionRow.scientific_name == scientific)
+                .order_by(desc(DetectionRow.started_at))
             )
+            if not include_replays:
+                stmt = stmt.where(Database.not_replay_predicate())
+            all_rows = list(s.scalars(stmt))
             note = s.get(SpeciesNoteRow, scientific)
         if not all_rows and note is None:
             raise HTTPException(404, f"No detections or note for {scientific!r}")
@@ -2140,6 +2153,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             recent = list(s.scalars(
                 select(DetectionRow)
                 .where(DetectionRow.source_name == name)
+                .where(Database.not_replay_predicate())
                 .order_by(desc(DetectionRow.started_at))
                 .limit(25)
             ))
@@ -2510,6 +2524,128 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     def admin(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
             request, "admin.html", {**_admin_view(), **_health_view()}
+        )
+
+    @app.get("/admin/replays", response_class=HTMLResponse)
+    def admin_replays(
+        request: Request,
+        days: int = Query(default=30, ge=1, le=365),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> HTMLResponse:
+        """Audit page: lists hash-groups that appear at multiple distinct
+        timestamps at the same source in the lookback window. Each group is
+        a candidate ad/highlight loop that the replay filter is hiding from
+        every other detection feed.
+
+        Multi-species-within-one-chunk groups (BirdNET firing multiple
+        species labels on a single audio buffer) are excluded: those share
+        a single ``started_at`` and aren't replays of anything — they're
+        the legitimate parallel output of one detection event.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        with db.session() as s:
+            # True replays: same (source, hash) appearing at ≥2 distinct
+            # started_at values. ``n`` is total detection rows sharing the
+            # hash; ``n_times`` is the number of replay events (≥ 2);
+            # ``hidden`` is how many rows the replay filter actually drops.
+            groups = list(s.execute(
+                select(
+                    DetectionRow.source_name,
+                    DetectionRow.audio_hash,
+                    func.count(DetectionRow.id).label("n"),
+                    func.count(func.distinct(DetectionRow.started_at)).label("n_times"),
+                    func.min(DetectionRow.started_at).label("first_seen"),
+                    func.max(DetectionRow.started_at).label("last_seen"),
+                    func.count(func.distinct(DetectionRow.scientific_name)).label("n_species"),
+                )
+                .where(DetectionRow.audio_hash.is_not(None))
+                .where(DetectionRow.started_at >= cutoff)
+                .group_by(DetectionRow.source_name, DetectionRow.audio_hash)
+                .having(func.count(func.distinct(DetectionRow.started_at)) >= 2)
+                .order_by(desc("n_times"), desc("n"))
+                .limit(limit)
+            ).all())
+
+            # For each group, pull a representative detection id (highest
+            # confidence with a clip) so the audit page can offer a play
+            # button without a second round-trip.
+            samples: dict[tuple[str, str], int] = {}
+            top_species: dict[tuple[str, str], list[tuple[str, str, int]]] = {}
+            for g in groups:
+                key = (g.source_name, g.audio_hash)
+                rep = s.scalar(
+                    select(DetectionRow.id)
+                    .where(DetectionRow.source_name == g.source_name)
+                    .where(DetectionRow.audio_hash == g.audio_hash)
+                    .where(DetectionRow.clip_path.is_not(None))
+                    .order_by(desc(DetectionRow.confidence))
+                    .limit(1)
+                )
+                if rep is not None:
+                    samples[key] = rep
+                # Which species BirdNET flagged within this hash-group — a
+                # true ad-loop often makes BirdNET cycle through 3-5
+                # different "species" depending on jitter, so seeing the
+                # mix is itself a signal that this is replayed audio.
+                top_species[key] = list(s.execute(
+                    select(
+                        DetectionRow.common_name,
+                        DetectionRow.scientific_name,
+                        func.count(DetectionRow.id).label("c"),
+                    )
+                    .where(DetectionRow.source_name == g.source_name)
+                    .where(DetectionRow.audio_hash == g.audio_hash)
+                    .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
+                    .order_by(desc("c"))
+                    .limit(5)
+                ).all())
+
+            # Headline numbers for the page banner.
+            total = s.scalar(
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.audio_hash.is_not(None))
+                .where(DetectionRow.started_at >= cutoff)
+            ) or 0
+            hidden_subq = (
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.audio_hash.is_not(None))
+                .where(DetectionRow.started_at >= cutoff)
+                .where(~Database.not_replay_predicate())
+            )
+            hidden = s.scalar(hidden_subq) or 0
+
+        rows = [
+            {
+                "source_name": g.source_name,
+                "audio_hash": g.audio_hash,
+                # 16-char prefix is unique in practice; 12 was prone to
+                # birthday collisions on busy sources (the audio_hash
+                # high-bits are biased toward 0/f by the mel-band ordering).
+                "hash_short": (g.audio_hash or "")[:16],
+                "n": int(g.n),
+                "n_times": int(g.n_times),
+                "replays": int(g.n_times) - 1,
+                "first_seen": g.first_seen,
+                "last_seen": g.last_seen,
+                "n_species": int(g.n_species),
+                "sample_detection_id": samples.get((g.source_name, g.audio_hash)),
+                "top_species": [
+                    {"common": c, "scientific": sc, "count": int(n)}
+                    for c, sc, n in top_species.get((g.source_name, g.audio_hash), [])
+                ],
+            }
+            for g in groups
+        ]
+        return TEMPLATES.TemplateResponse(
+            request,
+            "admin_replays.html",
+            {
+                "rows": rows,
+                "days": days,
+                "limit": limit,
+                "total_hashed": total,
+                "total_hidden": hidden,
+            },
         )
 
     @app.get("/partials/admin", response_class=HTMLResponse)
@@ -3358,6 +3494,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 .where(DetectionRow.started_at >= since)
                 .where(DetectionRow.scientific_name == scientific)
                 .where(DetectionRow.confidence >= min_conf)
+                .where(Database.not_replay_predicate())
                 .order_by(desc(DetectionRow.confidence))
             )
             if source:
@@ -3467,6 +3604,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 select(DetectionRow)
                 .where(DetectionRow.source_name == source)
                 .where(DetectionRow.started_at >= since)
+                .where(Database.not_replay_predicate())
                 .order_by(desc(DetectionRow.confidence))
             ))
 

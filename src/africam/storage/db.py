@@ -7,7 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Integer, create_engine, func, or_, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from africam.detector.birdnet import Detection
 from africam.storage.models import (
@@ -38,7 +38,33 @@ class Database:
             db_path = Path(url.removeprefix("sqlite:///"))
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.engine = create_engine(url, future=True)
+        # ``timeout`` is the Python sqlite3 driver's busy-wait, applied to
+        # every connection in the pool. With the pipeline writing detection
+        # rows continuously, the backfill and the notes worker would
+        # otherwise hit ``OperationalError: database is locked`` whenever
+        # they collided with the inserter. 30 s is plenty for the
+        # pipeline's per-chunk transactions (sub-second) to clear.
+        connect_args = (
+            {"timeout": 30}
+            if url.startswith("sqlite:")
+            else {}
+        )
+        self.engine = create_engine(url, future=True, connect_args=connect_args)
+        if url.startswith("sqlite:"):
+            # WAL lets the live pipeline insert detections while the notes
+            # worker / backfill CLI / web app are reading or writing. In
+            # classic rollback-journal mode (the SQLite default) any writer
+            # blocks every reader and we'd see ``database is locked``
+            # whenever two workloads collided — even with a generous
+            # busy_timeout. Setting WAL once flips it persistently for the
+            # database file; subsequent opens stay in WAL automatically.
+            # ``synchronous=NORMAL`` is the conventional WAL pairing —
+            # crash-safe, and the last few committed transactions can be
+            # lost only on a power-cut (not a process crash), which is fine
+            # here since detections re-arrive constantly anyway.
+            with self.engine.begin() as conn:
+                conn.exec_driver_sql("PRAGMA journal_mode = WAL")
+                conn.exec_driver_sql("PRAGMA synchronous = NORMAL")
         self._Session = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
         self._migrate_in_place()
@@ -58,6 +84,7 @@ class Database:
             ("detections", "label", "TEXT"),
             ("detections", "labeled_at", "TIMESTAMP"),
             ("detections", "suggested_species", "TEXT"),
+            ("detections", "audio_hash", "TEXT"),
             ("species_notes", "conservation_status", "TEXT"),
             ("species_notes", "min_confidence", "REAL"),
             ("species_notes", "generated_at", "TIMESTAMP"),
@@ -71,6 +98,14 @@ class Database:
             ("species_notes", "media_fetched_at", "TIMESTAMP"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
         ]
+        # Indexes to create on existing tables. ``Base.metadata.create_all``
+        # only creates indexes for tables it creates, so any index attached to
+        # a pre-existing table needs an explicit CREATE INDEX IF NOT EXISTS
+        # here. SQLite treats these as cheap no-ops when the index already
+        # exists, so it's safe to leave them in indefinitely.
+        added_indexes: list[tuple[str, str, str]] = [
+            ("ix_detections_source_hash", "detections", "source_name, audio_hash"),
+        ]
         with self.engine.begin() as conn:
             for table, col, ddl in added:
                 existing = {
@@ -79,6 +114,10 @@ class Database:
                 }
                 if col not in existing:
                     conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            for name, table, cols in added_indexes:
+                conn.exec_driver_sql(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({cols})"
+                )
 
     def session(self) -> Session:
         return self._Session()
@@ -90,6 +129,7 @@ class Database:
         site: str | None = None,
         latitude: float | None = None,
         longitude: float | None = None,
+        audio_hash: str | None = None,
     ) -> int:
         rows = [
             DetectionRow(
@@ -103,6 +143,7 @@ class Database:
                 site=site,
                 latitude=latitude,
                 longitude=longitude,
+                audio_hash=audio_hash,
             )
             for d in detections
         ]
@@ -111,6 +152,112 @@ class Database:
         with self._Session() as s, s.begin():
             s.add_all(rows)
         return len(rows)
+
+    # --- Replay filter: hides detections whose audio_hash already appeared
+    # earlier on the same source. The hash itself is computed by
+    # africam.audio_hash at insert time (and backfilled via
+    # `africam dedup-backfill`). Rows with NULL hash are NEVER flagged as
+    # replays — they're treated as "not yet evaluated."
+
+    @staticmethod
+    def not_replay_predicate():
+        """Return a SQLAlchemy predicate that's True for non-replay rows.
+
+        Compose into any ``select(DetectionRow)`` to hide replays::
+
+            stmt = select(DetectionRow).where(Database.not_replay_predicate())
+
+        Implementation: NOT EXISTS (earlier row at same source with same
+        non-null hash). ``.correlate(DetectionRow)`` is critical — without
+        it SQLAlchemy puts a fresh ``detections`` table reference in the
+        subquery's FROM clause instead of correlating to the outer query,
+        which silently turns the predicate into a meaningless cross-join.
+        The composite index ``ix_detections_source_hash`` keeps this fast.
+        """
+        earlier = aliased(DetectionRow, name="earlier")
+        return ~(
+            select(1)
+            .select_from(earlier)
+            .where(earlier.source_name == DetectionRow.source_name)
+            .where(earlier.audio_hash == DetectionRow.audio_hash)
+            .where(earlier.audio_hash.is_not(None))
+            .where(earlier.started_at < DetectionRow.started_at)
+            .correlate(DetectionRow)
+            .exists()
+        )
+
+    def backfill_audio_hash(
+        self,
+        days: int,
+        batch_size: int,
+        hasher,
+        progress_cb=None,
+    ) -> dict[str, int]:
+        """Stream NULL-hash detections (newest-first within the window) and
+        update ``audio_hash`` for each clip. ``hasher`` is a callable that
+        takes the clip path and returns a hex string or None.
+
+        Returns ``{processed, hashed, missing_clip, missing_file, errors}``
+        as a small report dict. Idempotent: rows that already have a hash
+        are skipped, so a second invocation finds nothing to do.
+
+        Plays nicely with the live pipeline writer:
+          * Hashing (the slow step) happens OUTSIDE any DB transaction.
+          * Each batch flushes with a single bulk ``UPDATE … WHERE id IN
+            VALUES (?)`` so the write lock is held for milliseconds.
+          * ``PRAGMA busy_timeout`` waits a few seconds if the pipeline
+            happens to be mid-insert when the batch tries to flush.
+        """
+        from pathlib import Path
+
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        report = {
+            "processed": 0,
+            "hashed": 0,
+            "missing_clip": 0,  # clip_path is NULL on the row
+            "missing_file": 0,  # path set but file gone from disk
+            "errors": 0,
+        }
+        with self._Session() as s:
+            todo = list(s.execute(
+                select(DetectionRow.id, DetectionRow.clip_path)
+                .where(DetectionRow.audio_hash.is_(None))
+                .where(DetectionRow.started_at >= cutoff)
+                .order_by(DetectionRow.started_at.desc())
+            ).all())
+
+        for i in range(0, len(todo), batch_size):
+            chunk = todo[i : i + batch_size]
+            updates: list[tuple[int, str]] = []
+            for det_id, clip_path in chunk:
+                report["processed"] += 1
+                if not clip_path:
+                    report["missing_clip"] += 1
+                    continue
+                if not Path(clip_path).exists():
+                    report["missing_file"] += 1
+                    continue
+                try:
+                    h = hasher(clip_path)
+                except Exception:
+                    report["errors"] += 1
+                    continue
+                if h is None:
+                    report["errors"] += 1
+                    continue
+                updates.append((det_id, h))
+            if updates:
+                # Short-lived write transaction (the engine-level 30 s
+                # busy_timeout handles collisions with the live pipeline).
+                with self.engine.begin() as conn:
+                    conn.exec_driver_sql(
+                        "UPDATE detections SET audio_hash = ? WHERE id = ?",
+                        [(h, det_id) for det_id, h in updates],
+                    )
+                report["hashed"] += len(updates)
+            if progress_cb is not None:
+                progress_cb(report, total=len(todo))
+        return report
 
     # --- Source state (current site for multi-site streams) ---
 

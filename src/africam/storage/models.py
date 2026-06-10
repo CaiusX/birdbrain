@@ -33,9 +33,19 @@ class DetectionRow(Base):
     # Free-text (auto-completed from species we've already detected). NULL
     # whenever label is anything other than 'bad'.
     suggested_species: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Perceptual fingerprint of the saved clip (see africam.audio_hash). Lets
+    # us detect when a YouTube source replays a highlight reel or airs the
+    # same advertisement: two replays produce the same hash, so we hide all
+    # but the first occurrence on the same source. NULL = not yet hashed
+    # (legacy rows before the backfill ran, or clip missing on disk).
+    audio_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
     __table_args__ = (
         Index("ix_detections_source_time", "source_name", "started_at"),
+        # Hot path for the replay predicate (NOT EXISTS earlier row at same
+        # source with same hash). The single-column index on audio_hash isn't
+        # selective enough on its own — most lookups are scoped per-source.
+        Index("ix_detections_source_hash", "source_name", "audio_hash"),
     )
 
 

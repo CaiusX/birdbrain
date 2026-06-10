@@ -10,6 +10,7 @@ import numpy as np
 
 from africam.audio import AudioSource, RtspSource, YouTubeSource
 from africam.audio.source import AudioChunk
+from africam.audio_hash import clip_hash
 from africam.clips import save_chunk
 from africam.config import AppConfig, OcrConfig, SourceConfig
 from africam.detector import BirdNetDetector
@@ -257,12 +258,25 @@ def _consume_stream(
         # Buffer this chunk for next iteration's pre-roll.
         prev_samples = chunk.samples
 
+        # Perceptual fingerprint of the saved clip, used by the replay
+        # filter to hide YouTube ad/highlight loops. All detections from one
+        # chunk share the same clip and therefore the same hash. Failures
+        # are non-fatal — we'd rather lose a row's dedup info than skip
+        # writing the detection itself.
+        audio_hash: str | None = None
+        if clip_path:
+            try:
+                audio_hash = clip_hash(clip_path)
+            except Exception as e:
+                slog.warning("audio_hash.failed", clip=clip_path, error=str(e)[:200])
+
         db.insert_detections(
             detections,
             clip_path=clip_path,
             site=resolved.site,
             latitude=resolved.latitude,
             longitude=resolved.longitude,
+            audio_hash=audio_hash,
         )
         for d in detections:
             slog.info(

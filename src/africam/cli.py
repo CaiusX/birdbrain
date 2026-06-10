@@ -403,5 +403,61 @@ def web(
     )
 
 
+@app.command(name="dedup-backfill")
+def dedup_backfill(
+    days: Annotated[
+        int,
+        typer.Option("--days", "-d", help="Hash detections newer than this many days."),
+    ] = 30,
+    batch_size: Annotated[
+        int,
+        typer.Option("--batch-size", help="Rows to update per DB transaction."),
+    ] = 200,
+) -> None:
+    """Compute audio_hash for existing detections so the replay filter can bite.
+
+    Walks ``detections`` rows where audio_hash IS NULL and clip_path IS NOT
+    NULL within the lookback, decoding each saved clip with
+    ``africam.audio_hash.clip_hash``. Idempotent — rerunnable, will only
+    touch rows that still lack a hash.
+    """
+    from africam.audio_hash import clip_hash
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    db = Database(cfg.db_url)
+
+    console.print(
+        f"[cyan]Backfilling audio_hash for detections in the last {days} days "
+        f"(batch={batch_size})…[/cyan]"
+    )
+
+    last_print = [0]
+
+    def _progress(report: dict, total: int) -> None:
+        # Print every batch end. Cheap (terminal can absorb 100s/s) and the
+        # backfill is long enough that silence would feel like a hang.
+        last_print[0] = report["processed"]
+        console.print(
+            f"  {report['processed']:>6,} / {total:,} "
+            f"hashed={report['hashed']:,} "
+            f"miss={report['missing_clip']+report['missing_file']:,} "
+            f"err={report['errors']:,}",
+            highlight=False,
+        )
+
+    report = db.backfill_audio_hash(
+        days=days, batch_size=batch_size, hasher=clip_hash, progress_cb=_progress,
+    )
+    console.print(
+        f"[green]done.[/green] "
+        f"processed={report['processed']:,} "
+        f"hashed={report['hashed']:,} "
+        f"missing_clip={report['missing_clip']:,} "
+        f"missing_file={report['missing_file']:,} "
+        f"errors={report['errors']:,}"
+    )
+
+
 if __name__ == "__main__":
     app()
