@@ -324,6 +324,39 @@ class WeatherObservationRow(Base):
     )
 
 
+class HighlightIntervalRow(Base):
+    """One row per continuous span a source spent showing a replayed highlight
+    reel (the orange HIGHLIGHT banner). Opened when the HighlightWatcher first
+    sees the banner, closed when it clears. ``ended_at`` is NULL while ongoing.
+    Mirrors WorkerDowntimeRow so /admin can answer 'how long in highlights'."""
+
+    __tablename__ = "highlight_intervals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_name: Mapped[str] = mapped_column(String(128), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class PlaybackStateRow(Base):
+    """Current live-vs-highlight state of a monitored source, written by the
+    HighlightWatcher every tick. ``checked_at`` doubles as a freshness
+    heartbeat: a stale value means the watcher isn't running, so /admin should
+    show 'unknown' rather than a frozen state. Only sources with highlight
+    gating enabled get a row."""
+
+    __tablename__ = "playback_state"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    in_highlight: Mapped[bool] = mapped_column(default=False)
+    # When the current state (live or highlight) began.
+    since: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Last time the watcher checked a frame — freshness signal.
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AppSettingRow(Base):
     """Key-value store for app-wide tunables that BOTH the web process (the
     writer) and the pipeline workers (readers, via polling) need to agree on

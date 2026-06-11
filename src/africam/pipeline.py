@@ -130,6 +130,7 @@ def run_source(
                 source_name=cfg.name,
                 url=cfg.url,
                 cookies_file=str(cfg.cookies_file) if cfg.cookies_file else None,
+                db=db,
             )
             highlight_watcher.start()
     except Exception:

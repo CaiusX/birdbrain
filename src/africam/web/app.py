@@ -2474,6 +2474,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             r["min_conf_overridden"] = override is not None
             if override is not None:
                 r["min_confidence"] = override
+        # Live-vs-highlight playback state for monitored sources. A reading is
+        # only trusted when fresh (the watcher checks every ~2 min); a stale
+        # checked_at means the watcher isn't running, so show nothing.
+        playback = db.playback_state_by_source()
+        PLAYBACK_STALE_S = 360
+        for r in rows:
+            ps = playback.get(r["name"])
+            r["playback"] = None
+            r["playback_since"] = None
+            r["highlight_secs_24h"] = 0
+            if ps is not None:
+                checked = ps.checked_at
+                if checked.tzinfo is None:
+                    checked = checked.replace(tzinfo=UTC)
+                if (now - checked).total_seconds() <= PLAYBACK_STALE_S:
+                    r["playback"] = "highlight" if ps.in_highlight else "live"
+                    since = ps.since
+                    if since.tzinfo is None:
+                        since = since.replace(tzinfo=UTC)
+                    r["playback_since"] = since
+                    r["highlight_secs_24h"] = db.highlight_seconds_since(
+                        r["name"], last_24h
+                    )
         running = sum(1 for r in rows if r["status"] == "running")
         # Defaults for the add-source form: pick the most common timezone
         # already in use so the user doesn't have to retype it. Fall back to

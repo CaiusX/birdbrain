@@ -15,6 +15,8 @@ from africam.storage.models import (
     AppSettingRow,
     Base,
     DailyBriefRow,
+    HighlightIntervalRow,
+    PlaybackStateRow,
     DetectionRow,
     RuntimeSourceRow,
     SiteNoteRow,
@@ -468,6 +470,83 @@ class Database:
             e_utc = (
                 end if (end is None or end.tzinfo) else end.replace(tzinfo=UTC)
             )
+            effective_start = max(s_utc, since)
+            effective_end = e_utc if e_utc is not None else now
+            if effective_end > effective_start:
+                total += int((effective_end - effective_start).total_seconds())
+        return total
+
+    # --- Highlight playback state (written by HighlightWatcher) ---
+
+    def _ensure_open_highlight(self, s, source_name: str, now: datetime) -> None:
+        existing = s.execute(
+            select(HighlightIntervalRow)
+            .where(HighlightIntervalRow.source_name == source_name)
+            .where(HighlightIntervalRow.ended_at.is_(None))
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is None:
+            s.add(HighlightIntervalRow(source_name=source_name, started_at=now))
+
+    def _close_open_highlight(self, s, source_name: str, now: datetime) -> None:
+        existing = s.execute(
+            select(HighlightIntervalRow)
+            .where(HighlightIntervalRow.source_name == source_name)
+            .where(HighlightIntervalRow.ended_at.is_(None))
+            .order_by(HighlightIntervalRow.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.ended_at = now
+
+    def record_highlight_state(self, source_name: str, in_highlight: bool) -> None:
+        """Persist the watcher's current reading. Always bumps ``checked_at``
+        (freshness); on a state change, stamps ``since`` and opens/closes the
+        matching highlight interval. Called every watcher tick."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(PlaybackStateRow, source_name)
+            changed = row is None or row.in_highlight != in_highlight
+            if row is None:
+                row = PlaybackStateRow(
+                    source_name=source_name,
+                    in_highlight=in_highlight,
+                    since=now,
+                    checked_at=now,
+                )
+                s.add(row)
+            else:
+                if changed:
+                    row.in_highlight = in_highlight
+                    row.since = now
+                row.checked_at = now
+            if changed:
+                if in_highlight:
+                    self._ensure_open_highlight(s, source_name, now)
+                else:
+                    self._close_open_highlight(s, source_name, now)
+
+    def playback_state_by_source(self) -> dict[str, PlaybackStateRow]:
+        """Map source_name → its current playback-state row (for /admin)."""
+        with self._Session() as s:
+            return {r.source_name: r for r in s.scalars(select(PlaybackStateRow))}
+
+    def highlight_seconds_since(self, source_name: str, since: datetime) -> int:
+        """Total seconds this source spent in highlights in [since, now)."""
+        now = datetime.now(UTC)
+        with self._Session() as s:
+            rows = s.execute(
+                select(HighlightIntervalRow.started_at, HighlightIntervalRow.ended_at)
+                .where(HighlightIntervalRow.source_name == source_name)
+                .where(
+                    HighlightIntervalRow.ended_at.is_(None)
+                    | (HighlightIntervalRow.ended_at > since)
+                )
+            ).all()
+        total = 0
+        for start, end in rows:
+            s_utc = start if start.tzinfo else start.replace(tzinfo=UTC)
+            e_utc = end if (end is None or end.tzinfo) else end.replace(tzinfo=UTC)
             effective_start = max(s_utc, since)
             effective_end = e_utc if e_utc is not None else now
             if effective_end > effective_start:

@@ -80,12 +80,16 @@ class HighlightWatcher:
         cookies_file: str | None = None,
         every_seconds: int = DEFAULT_EVERY_S,
         stale_after_s: int = STALE_AFTER_S,
+        db=None,
     ) -> None:
         self.source_name = source_name
         self.url = url
         self.cookies_file = cookies_file
         self.every_seconds = every_seconds
         self.stale_after_s = stale_after_s
+        # Optional Database — when set, each tick's state is persisted so /admin
+        # can show live-vs-highlight and time-in-each.
+        self.db = db
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._active = False
@@ -132,6 +136,12 @@ class HighlightWatcher:
             log.info(
                 "highlight.state", source=self.source_name, active=self._active
             )
+        # Persist for /admin (current state + freshness + interval accounting).
+        if self.db is not None:
+            try:
+                self.db.record_highlight_state(self.source_name, self._active)
+            except Exception:
+                log.exception("highlight.record_failed", source=self.source_name)
 
     def _grab_frame(self) -> bytes | None:
         """Grab one frame as PNG bytes from a low-res video rendition. Resolves
