@@ -8,6 +8,15 @@
   <script src="https://unpkg.com/htmx.org@2.0.3" defer></script>
   <link rel="icon" type="image/svg+xml" href="/static/birdbrain-logo.svg">
   <style>
+    /* Tell the browser this is a dark UI so it renders native form controls
+       (notably <select> dropdown popups) in dark mode. Without this, Firefox
+       paints the option list with system colours — dark text on our dark
+       background — so dropdowns look empty/broken; Chrome happens to inherit
+       the select's background and stays readable. Explicit <option> colours
+       belt-and-suspenders the same fix for older engines. */
+    :root { color-scheme: dark; }
+    option { background-color: #18181b; color: #e4e4e7; }
+
     .conf-bar { background: linear-gradient(90deg, #16a34a var(--w), transparent var(--w)); }
     /* Leaflet popups inherit a white background by default — match the dark theme. */
     .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: #18181b !important; color: #e4e4e7; }
