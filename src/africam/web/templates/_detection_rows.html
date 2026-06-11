@@ -42,7 +42,7 @@
           <td class="px-5 py-2">
             <div class="font-medium flex items-center gap-1.5 flex-wrap">
               {{ species_link(r.common_name, r.scientific_name, source=page_source, cls="hover:text-emerald-300") }}
-              {{ iucn_badge((status_by_sci or {}).get(r.scientific_name)) }}
+              {{ iucn_badge((status_by_sci or {}).get(r.scientific_name), hide_common=True) }}
             </div>
             <div class="italic text-zinc-500 text-xs hidden lg:block">{{ r.scientific_name }}</div>
           </td>

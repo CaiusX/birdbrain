@@ -10,7 +10,7 @@
   <div class="md:col-span-5 min-w-0">
     <div class="text-sm font-medium text-zinc-100 truncate flex items-center gap-1.5 flex-wrap">
       {{ species_link(r.common_name, r.scientific_name, source=page_source, cls="hover:text-emerald-300") }}
-      {{ iucn_badge(sp_status) }}
+      {{ iucn_badge(sp_status, hide_common=True) }}
       <span class="text-xs italic text-zinc-500 font-normal ml-1">{{ r.scientific_name }}</span>
     </div>
     <div class="text-xs text-zinc-500 truncate">

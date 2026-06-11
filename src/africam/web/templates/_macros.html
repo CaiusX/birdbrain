@@ -72,9 +72,14 @@
 {%- endmacro %}
 
 {# IUCN Red List badge. size="sm" (10px, for inline row use) or "md" (11px,
-   for species-detail headers). Renders nothing when status is empty/unknown. #}
-{% macro iucn_badge(status, size="sm") -%}
-{%- if status and status in _IUCN_CLASS -%}
+   for species-detail headers). Renders nothing when status is empty/unknown.
+   hide_common=True suppresses the low-signal statuses (LC/DD/NE) so a feed
+   only flags NT-and-above — ~95% of rows are LC, which otherwise drowns out
+   the few that matter. Detail pages pass hide_common=False to show the real
+   status either way. #}
+{% macro iucn_badge(status, size="sm", hide_common=False) -%}
+{%- if hide_common and status in ('LC', 'DD', 'NE') -%}
+{%- elif status and status in _IUCN_CLASS -%}
 {%- set _cls, _label = _IUCN_CLASS[status] -%}
 {%- if size == "md" -%}
 <span class="px-1.5 py-0 rounded text-[11px] font-medium tabular-nums border {{ _cls }}" title="IUCN · {{ _label }}">{{ status }}</span>
