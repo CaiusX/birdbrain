@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import math
@@ -35,6 +36,7 @@ from fastapi.responses import (
     JSONResponse,
     RedirectResponse,
     Response,
+    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -4986,6 +4988,70 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "search_url": search_url,
                 "needs_key": False,
             }
+        )
+
+    @app.get("/api/sites/{name}/live.mp3")
+    async def site_live_audio(request: Request, name: str) -> StreamingResponse:
+        """Proxy a site's LIVE audio as a streaming MP3 so the admin page can
+        audition it (and tap it with Web Audio for a spectrogram — only
+        same-origin audio can be analysed in-browser). Resolves the stream URL
+        via yt-dlp (off the event loop), then pipes it through ffmpeg to mono
+        MP3. Async so client disconnect cancels the generator and kills ffmpeg
+        promptly; a 10-min ffmpeg cap is the backstop for a forgotten tab."""
+        cfg_src = _all_sources()[1].get(name)
+        if cfg_src is None or cfg_src.kind != "youtube":
+            raise HTTPException(404, "No live audio for this site")
+        from africam.audio.youtube import YouTubeSource
+
+        def _resolve() -> str:
+            return YouTubeSource(
+                name=cfg_src.name,
+                url=cfg_src.url,
+                cookies_file=str(cfg_src.cookies_file) if cfg_src.cookies_file else None,
+            ).current_url()
+
+        try:
+            stream_url = await asyncio.to_thread(_resolve)
+        except Exception as e:
+            raise HTTPException(502, f"could not resolve stream: {e}") from e
+
+        # Plain Popen (asyncio subprocesses are unreliable under uvicorn), read
+        # off the event loop via to_thread so the request can still be cancelled
+        # on disconnect. The finally kills ffmpeg, which closes the pipe and
+        # unblocks the reader thread — no orphaned ffmpeg.
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-reconnect", "1", "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-t", "600",  # 10-min safety cap so a forgotten tab can't stream forever
+                "-i", stream_url,
+                "-vn", "-ac", "1", "-ar", "44100", "-b:a", "96k",
+                "-f", "mp3", "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+        async def _pump():
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(proc.stdout.read, 8192)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
+
+        return StreamingResponse(
+            _pump(),
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
         )
 
     @app.get("/spectrograms/{detection_id}.png")

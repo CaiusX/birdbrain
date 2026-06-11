@@ -102,6 +102,13 @@
           <td class="px-5 py-3 align-top text-right">
             <div class="flex items-center justify-end gap-2 flex-wrap">
               {% if r.gate_supported %}
+                <button type="button" data-name="{{ r.name }}" onclick="audition(this.dataset.name)"
+                        title="Listen live + spectrogram"
+                        class="px-2 py-1 rounded text-xs border border-sky-500/50 text-sky-300 hover:bg-sky-500/10">
+                  🔊 audition
+                </button>
+              {% endif %}
+              {% if r.gate_supported %}
                 <form hx-post="/api/sources/{{ r.name | urlencode }}/gate-highlights"
                       hx-target="#admin-table" hx-swap="outerHTML">
                   <input type="hidden" name="enabled" value="{{ 0 if r.gate_highlights else 1 }}">

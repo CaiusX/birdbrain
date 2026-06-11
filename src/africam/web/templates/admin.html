@@ -22,6 +22,24 @@
   </div>
 </section>
 
+{# Live audition — hidden until a site's 🔊 button is clicked. Lives outside
+   the 15s-refreshing table so playback survives table swaps. #}
+<section id="audition-panel" class="hidden bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Live audition · <span id="audition-site" class="text-zinc-100 normal-case"></span>
+      <span id="audition-status" class="text-zinc-500 text-xs ml-2 normal-case"></span>
+    </h2>
+    <button type="button" onclick="stopAudition()"
+            class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200">stop</button>
+  </div>
+  <div class="p-4 space-y-3">
+    <canvas id="audition-canvas" width="640" height="180"
+            class="w-full rounded bg-zinc-950 block"></canvas>
+    <audio id="audition-audio" controls class="w-full"></audio>
+  </div>
+</section>
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
   <div class="px-5 py-3 border-b border-zinc-800">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">Detection cutoffs</h2>
@@ -199,6 +217,79 @@
     </div>
   </form>
 </dialog>
+
+<script>
+  // Live per-site audition: play the server-proxied live audio and draw a
+  // rolling spectrogram from it with Web Audio. One site at a time — pointing
+  // at a new site reuses the same <audio>, which drops the previous stream
+  // (server kills that ffmpeg). The MediaElementSource can only be created
+  // once per element, so the graph is built lazily and reused.
+  (function () {
+    let G = null;  // {ctx, analyser, audio, data, raf}
+    function ensureGraph() {
+      if (G) return G;
+      const audio = document.getElementById('audition-audio');
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      const node = ctx.createMediaElementSource(audio);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.4;
+      node.connect(analyser);
+      analyser.connect(ctx.destination);
+      G = { ctx, analyser, audio, data: new Uint8Array(analyser.frequencyBinCount), raf: 0 };
+      return G;
+    }
+    function colour(v) {            // 0..255 → dark-purple → orange → white
+      const t = v / 255;
+      const r = Math.min(255, Math.floor(255 * Math.min(1, t * 1.7)));
+      const g = Math.floor(255 * Math.max(0, (t - 0.25) * 1.4));
+      const b = Math.floor(255 * Math.max(0, Math.sin(Math.PI * t) * 0.6));
+      return 'rgb(' + r + ',' + g + ',' + b + ')';
+    }
+    function draw() {
+      if (!G) return;
+      G.raf = requestAnimationFrame(draw);
+      G.analyser.getByteFrequencyData(G.data);
+      const c = document.getElementById('audition-canvas');
+      const cx = c.getContext('2d');
+      const w = c.width, h = c.height, bins = G.data.length;
+      cx.drawImage(c, -1, 0);       // scroll left 1px
+      for (let y = 0; y < h; y++) {
+        const bin = Math.floor((1 - y / h) * (bins - 1));   // low freq at bottom
+        cx.fillStyle = colour(G.data[bin]);
+        cx.fillRect(w - 1, y, 1, 1);
+      }
+    }
+    window.audition = function (name) {
+      const g = ensureGraph();
+      g.ctx.resume();
+      g.audio.src = '/api/sites/' + encodeURIComponent(name) + '/live.mp3';
+      g.audio.play().catch(function () {});
+      document.getElementById('audition-site').textContent = name;
+      document.getElementById('audition-status').textContent = 'connecting… (YouTube live runs ~15–30s behind)';
+      g.audio.onplaying = function () {
+        document.getElementById('audition-status').textContent = 'live';
+      };
+      g.audio.onerror = function () {
+        document.getElementById('audition-status').textContent = 'stream error — try again';
+      };
+      document.getElementById('audition-panel').classList.remove('hidden');
+      cancelAnimationFrame(g.raf);
+      draw();
+      document.getElementById('audition-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    };
+    window.stopAudition = function () {
+      if (G) {
+        cancelAnimationFrame(G.raf);
+        G.audio.pause();
+        G.audio.removeAttribute('src');
+        G.audio.load();             // drops the HTTP stream → server ffmpeg exits
+      }
+      document.getElementById('audition-panel').classList.add('hidden');
+    };
+  })();
+</script>
 
 <script>
   // Keep native <select> dropdowns usable in Firefox. The status table polls
