@@ -5011,7 +5011,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             ).current_url()
 
         try:
-            stream_url = await asyncio.to_thread(_resolve)
+            # Bound the yt-dlp resolve so a slow/rate-limited lookup fails the
+            # request fast instead of hanging it.
+            stream_url = await asyncio.wait_for(asyncio.to_thread(_resolve), timeout=25)
+        except TimeoutError as e:
+            raise HTTPException(504, "stream resolve timed out (try again)") from e
         except Exception as e:
             raise HTTPException(502, f"could not resolve stream: {e}") from e
 
@@ -5036,6 +5040,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         async def _pump():
             try:
                 while True:
+                    # Explicit disconnect check each loop — deterministic
+                    # cleanup rather than relying on cancellation propagating
+                    # through the read thread.
+                    if await request.is_disconnected():
+                        break
                     chunk = await asyncio.to_thread(proc.stdout.read, 8192)
                     if not chunk:
                         break
