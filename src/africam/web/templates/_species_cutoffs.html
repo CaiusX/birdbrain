@@ -6,12 +6,6 @@
     </p>
   {% endif %}
 
-  <datalist id="species-options">
-    {% for o in species_options %}
-      <option value="{{ o.scientific_name }}">{{ o.common_name }}</option>
-    {% endfor %}
-  </datalist>
-
   {% if species_cutoffs %}
     <table class="w-full text-sm">
       <tbody class="divide-y divide-zinc-800/70">
@@ -52,9 +46,13 @@
         class="flex items-end gap-2 flex-wrap border-t border-zinc-800 pt-3">
     <label class="block">
       <span class="text-[10px] uppercase tracking-wider text-zinc-500">Species</span>
-      <input name="scientific_name" list="species-options" required
-             placeholder="scientific name"
-             class="mt-1 w-56 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+      <select name="scientific_name" required
+              class="mt-1 w-64 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100">
+        <option value="" selected disabled>Select a species…</option>
+        {% for o in species_options %}
+          <option value="{{ o.scientific_name }}">{{ o.common_name }} — {{ o.scientific_name }}</option>
+        {% endfor %}
+      </select>
     </label>
     <label class="block">
       <span class="text-[10px] uppercase tracking-wider text-zinc-500">Min conf</span>
