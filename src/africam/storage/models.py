@@ -42,10 +42,21 @@ class DetectionRow(Base):
 
     __table_args__ = (
         Index("ix_detections_source_time", "source_name", "started_at"),
-        # Hot path for the replay predicate (NOT EXISTS earlier row at same
-        # source with same hash). The single-column index on audio_hash isn't
-        # selective enough on its own — most lookups are scoped per-source.
-        Index("ix_detections_source_hash", "source_name", "audio_hash"),
+        # Covering index for the replay predicate. The NOT EXISTS subquery
+        # filters on (source_name=, audio_hash=, started_at<) — matching
+        # exactly the column order here lets SQLite resolve it entirely
+        # inside the index, no table touch. Replaces the earlier 2-col
+        # ix_detections_source_hash, which the planner kept refusing in
+        # favour of ix_detections_source_time because of the started_at
+        # inequality (turning a ~ms lookup into a multi-second per-row
+        # scan). With ANALYZE seeded at boot, the planner picks this
+        # consistently.
+        Index(
+            "ix_detections_source_hash_time",
+            "source_name",
+            "audio_hash",
+            "started_at",
+        ),
     )
 
 

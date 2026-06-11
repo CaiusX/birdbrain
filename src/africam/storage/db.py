@@ -104,7 +104,19 @@ class Database:
         # here. SQLite treats these as cheap no-ops when the index already
         # exists, so it's safe to leave them in indefinitely.
         added_indexes: list[tuple[str, str, str]] = [
-            ("ix_detections_source_hash", "detections", "source_name, audio_hash"),
+            (
+                "ix_detections_source_hash_time",
+                "detections",
+                "source_name, audio_hash, started_at",
+            ),
+        ]
+        # Indexes that have been superseded by something better. Dropped here
+        # so old deployments don't drag along a redundant index forever.
+        dropped_indexes: list[str] = [
+            # Replaced by ix_detections_source_hash_time, which covers the
+            # same lookups AND the started_at< inequality the replay
+            # predicate needs.
+            "ix_detections_source_hash",
         ]
         with self.engine.begin() as conn:
             for table, col, ddl in added:
@@ -118,6 +130,15 @@ class Database:
                 conn.exec_driver_sql(
                     f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({cols})"
                 )
+            for name in dropped_indexes:
+                conn.exec_driver_sql(f"DROP INDEX IF EXISTS {name}")
+            # ANALYZE populates sqlite_stat1 so the query planner has real
+            # cardinality data when choosing between candidate indexes.
+            # Without it the replay predicate would still latch onto
+            # ix_detections_source_time for the started_at< inequality even
+            # though ix_detections_source_hash_time is the better choice.
+            # Cheap (~100 ms on this DB) and runs once per process boot.
+            conn.exec_driver_sql("ANALYZE detections")
 
     def session(self) -> Session:
         return self._Session()
