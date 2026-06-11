@@ -180,6 +180,10 @@ def _consume_stream(
     last_hb = 0.0
     last_species_floor_refresh = 0.0
     species_floor: dict[str, float] = {}
+    # Site-wide detection floor set from the admin UI. None = no override, so
+    # each source uses its own cfg.min_confidence. Polled on the same cadence
+    # as the per-species floors below.
+    global_min: float | None = None
     # How often to refresh per-species threshold overrides. Cheap query, but
     # we don't need millisecond freshness — once a minute is plenty given the
     # UI tweaks land seconds-to-minutes after the user wants them.
@@ -204,9 +208,12 @@ def _consume_stream(
         if now - last_species_floor_refresh > SPECIES_FLOOR_REFRESH_S:
             try:
                 species_floor = db.species_min_confidence_map()
+                global_min = db.global_min_confidence()
             except Exception:
                 slog.exception("worker.species_floor_refresh_failed")
             last_species_floor_refresh = now
+        # Site-wide floor overrides the source's own when set.
+        effective_min = global_min if global_min is not None else cfg.min_confidence
         resolved = resolver.current()
         try:
             detections = detector.analyze(
@@ -214,19 +221,19 @@ def _consume_stream(
                 lat=resolved.latitude,
                 lon=resolved.longitude,
                 week=cfg.week,
-                min_confidence=cfg.min_confidence,
+                min_confidence=effective_min,
             )
         except Exception:
             slog.exception("detect.failed")
             continue
 
         # Apply per-species overrides: a species' own floor can be ABOVE the
-        # source default (to suppress loud common species like Egyptian Goose
-        # / Hadada that otherwise drown out everything quieter).
+        # effective source floor (to suppress loud common species like Egyptian
+        # Goose / Hadada that otherwise drown out everything quieter).
         if species_floor and detections:
             detections = [
                 d for d in detections
-                if d.confidence >= species_floor.get(d.scientific_name, cfg.min_confidence)
+                if d.confidence >= species_floor.get(d.scientific_name, effective_min)
             ]
 
         if not detections:

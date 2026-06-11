@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, aliased, sessionmaker
 from africam.detector.birdnet import Detection
 from africam.storage.models import (
     AnomalyEventRow,
+    AppSettingRow,
     Base,
     DailyBriefRow,
     DetectionRow,
@@ -29,6 +30,9 @@ from africam.storage.models import (
 # Sentinel for "argument not supplied" — distinct from None, which means
 # "explicitly clear this field."
 _UNSET: Any = object()
+
+# app_settings key for the site-wide detection floor (see AppSettingRow).
+GLOBAL_MIN_CONFIDENCE_KEY = "global_min_confidence"
 
 
 class Database:
@@ -658,6 +662,50 @@ class Database:
                 )
                 s.add(row)
             row.min_confidence = value
+
+    # --- App-wide settings (key/value, polled cross-process) ---
+
+    def get_setting(self, key: str) -> str | None:
+        """Raw value for an app_settings key, or None if unset."""
+        with self._Session() as s:
+            row = s.get(AppSettingRow, key)
+            return row.value if row is not None else None
+
+    def set_setting(self, key: str, value: str | None) -> None:
+        """Upsert an app_settings value; ``None`` deletes the row (= unset)."""
+        with self._Session() as s, s.begin():
+            row = s.get(AppSettingRow, key)
+            if value is None:
+                if row is not None:
+                    s.delete(row)
+                return
+            if row is None:
+                row = AppSettingRow(key=key)
+                s.add(row)
+            row.value = value
+            row.updated_at = datetime.now(UTC)
+
+    def global_min_confidence(self) -> float | None:
+        """Site-wide detection floor, or None when no override is set. The
+        pipeline polls this (like the per-species floors) so a change in the
+        web UI lands on every worker within the refresh interval."""
+        raw = self.get_setting(GLOBAL_MIN_CONFIDENCE_KEY)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def set_global_min_confidence(self, value: float | None) -> None:
+        """Set/clear the site-wide detection floor. ``None`` clears it,
+        restoring each source's own ``min_confidence``."""
+        if value is not None and not (0.0 <= value <= 1.0):
+            raise ValueError("min_confidence must be in [0, 1]")
+        self.set_setting(
+            GLOBAL_MIN_CONFIDENCE_KEY,
+            None if value is None else repr(float(value)),
+        )
 
     def list_species_notes(self) -> list[SpeciesNoteRow]:
         with self._Session() as s:

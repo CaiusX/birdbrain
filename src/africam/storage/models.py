@@ -324,6 +324,25 @@ class WeatherObservationRow(Base):
     )
 
 
+class AppSettingRow(Base):
+    """Key-value store for app-wide tunables that BOTH the web process (the
+    writer) and the pipeline workers (readers, via polling) need to agree on
+    without a restart. Cross-process coordination is the shared DB, same as
+    runtime_sources / source_state. Values are stored as text and parsed by
+    the typed accessors on :class:`Database`; an absent row means "unset".
+
+    Current keys:
+      - ``global_min_confidence``: site-wide detection floor that overrides
+        every source's own ``min_confidence`` when present.
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class SourceStateRow(Base):
     """Mutable per-source runtime state. The pipeline reads it on every chunk
     and the web app writes manual overrides to it. Used to coordinate the

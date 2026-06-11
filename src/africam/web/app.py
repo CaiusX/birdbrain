@@ -989,6 +989,32 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             return sources_partial(request)
         return JSONResponse({"ok": True, "name": name})
 
+    @app.post("/api/settings/min-confidence", response_class=HTMLResponse)
+    def update_global_min_confidence(
+        request: Request, value: str = Form(default="")
+    ) -> Response:
+        """Set or clear the site-wide detection floor. An empty value clears
+        the override so each source falls back to its own min_confidence.
+        Workers pick up the change within the floor-refresh interval (~60s)."""
+        raw = value.strip()
+        if raw == "":
+            db.set_global_min_confidence(None)
+        else:
+            try:
+                parsed = float(raw)
+            except ValueError as e:
+                raise HTTPException(400, "min confidence must be a number") from e
+            if not (0.0 <= parsed <= 1.0):
+                raise HTTPException(400, "min confidence must be between 0 and 1")
+            db.set_global_min_confidence(parsed)
+        if request.headers.get("hx-request"):
+            return TEMPLATES.TemplateResponse(
+                request,
+                "_global_min_conf.html",
+                {"global_min_confidence": db.global_min_confidence()},
+            )
+        return JSONResponse({"ok": True, "global_min_confidence": db.global_min_confidence()})
+
     def _is_static_source(name: str) -> bool:
         """True if ``name`` matches a sources.toml entry — independent of any
         runtime row that might exist with the same name."""
@@ -2388,6 +2414,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "running": running,
             "total": len(rows),
             "now": now,
+            "global_min_confidence": db.global_min_confidence(),
             "default_tz": default_tz,
             "tz_options": tz_options,
             "existing_sites": existing_sites,

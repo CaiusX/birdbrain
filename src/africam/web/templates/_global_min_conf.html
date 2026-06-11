@@ -1,0 +1,25 @@
+<form id="global-conf-form"
+      hx-post="/api/settings/min-confidence"
+      hx-target="#global-conf-form" hx-swap="outerHTML"
+      class="flex items-end gap-3 flex-wrap">
+  <label class="block">
+    <span class="text-[10px] uppercase tracking-wider text-zinc-500">Site-wide min confidence</span>
+    <input name="value" type="number" step="0.05" min="0" max="1"
+           value="{{ '%.2f'|format(global_min_confidence) if global_min_confidence is not none else '' }}"
+           placeholder="per-source"
+           class="mt-1 w-32 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
+  </label>
+  <button type="submit"
+          class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium">
+    save
+  </button>
+  {% if global_min_confidence is not none %}
+    <span class="text-xs text-emerald-300">
+      Every source is held at ≥ {{ '%.2f'|format(global_min_confidence) }}, overriding its own threshold. Clear the field and save to restore per-source values.
+    </span>
+  {% else %}
+    <span class="text-xs text-zinc-500">
+      Blank: each source uses its own threshold. Enter a value to hold every source at the same floor at once. Takes effect within ~60s.
+    </span>
+  {% endif %}
+</form>
