@@ -531,6 +531,17 @@ class Database:
         with self._Session() as s:
             return {r.source_name: r for r in s.scalars(select(PlaybackStateRow))}
 
+    def clear_playback_state(self, source_name: str) -> None:
+        """Forget a source's playback state and close any open highlight
+        interval. Called when gating is switched off so /admin stops showing a
+        live/highlight badge promptly instead of waiting for staleness."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(PlaybackStateRow, source_name)
+            if row is not None:
+                s.delete(row)
+            self._close_open_highlight(s, source_name, now)
+
     def highlight_seconds_since(self, source_name: str, since: datetime) -> int:
         """Total seconds this source spent in highlights in [since, now)."""
         now = datetime.now(UTC)
@@ -755,6 +766,18 @@ class Database:
         with self._Session() as s:
             row = s.get(AppSettingRow, key)
             return row.value if row is not None else None
+
+    def list_settings_with_prefix(self, prefix: str) -> dict[str, str]:
+        """All app_settings rows whose key starts with ``prefix`` (non-null
+        values only), keyed by full key. Used to read per-source settings in
+        one query."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(AppSettingRow.key, AppSettingRow.value)
+                .where(AppSettingRow.key.like(f"{prefix}%"))
+                .where(AppSettingRow.value.is_not(None))
+            ).all()
+        return {k: v for k, v in rows}
 
     def set_setting(self, key: str, value: str | None) -> None:
         """Upsert an app_settings value; ``None`` deletes the row (= unset)."""

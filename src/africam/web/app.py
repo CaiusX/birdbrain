@@ -1119,6 +1119,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
         return JSONResponse({"ok": True, "scientific_name": sci})
 
+    @app.post("/api/sources/{name}/gate-highlights")
+    def set_gate_highlights(
+        request: Request, name: str, enabled: int = Form(...)
+    ) -> Response:
+        """Turn highlight-reel gating on/off for a source. The running worker
+        polls this setting (~60s) and starts/stops its frame watcher to match —
+        no restart needed. Returns the admin table so the toggle re-renders."""
+        db.set_setting(f"gate_highlights:{name}", "1" if enabled else None)
+        if request.headers.get("hx-request"):
+            return admin_partial(request)
+        return JSONResponse({"ok": True, "name": name, "enabled": bool(enabled)})
+
     def _is_static_source(name: str) -> bool:
         """True if ``name`` matches a sources.toml entry — independent of any
         runtime row that might exist with the same name."""
@@ -2474,6 +2486,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             r["min_conf_overridden"] = override is not None
             if override is not None:
                 r["min_confidence"] = override
+        # Per-source highlight-gating on/off (toggled from the admin table).
+        gate_on = {
+            key[len("gate_highlights:"):]
+            for key, val in db.list_settings_with_prefix("gate_highlights:").items()
+            if val
+        }
+        for r in rows:
+            # Only YouTube cams can carry the highlight banner / be watched.
+            r["gate_supported"] = r["kind"] == "youtube"
+            r["gate_highlights"] = r["name"] in gate_on
         # Live-vs-highlight playback state for monitored sources. A reading is
         # only trusted when fresh (the watcher checks every ~2 min); a stale
         # checked_at means the watcher isn't running, so show nothing.

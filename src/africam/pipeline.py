@@ -16,7 +16,7 @@ from africam.config import AppConfig, OcrConfig, SourceConfig
 from africam.detector import BirdNetDetector
 from africam.logging import get_logger
 from africam.notes import start_notes_worker
-from africam.highlight_watcher import HighlightWatcher
+from africam.highlight_watcher import HighlightGate
 from africam.site_ocr import SiteOcrWatcher
 from africam.site_resolver import SiteResolver
 from africam.sites import Site, load_sites
@@ -119,23 +119,22 @@ def run_source(
     except Exception:
         slog.exception("worker.heartbeat_started_failed")
 
-    # Optional highlight-reel gate (opt-in per source via the app_settings key
-    # ``gate_highlights:<name>``). When the source is showing a replayed
-    # highlight montage, its audio isn't live, so the watcher tells the consume
-    # loop to skip logging detections. YouTube only — that's where the banner is.
-    highlight_watcher: HighlightWatcher | None = None
-    try:
-        if cfg.kind == "youtube" and db.get_setting(f"gate_highlights:{cfg.name}"):
-            highlight_watcher = HighlightWatcher(
-                source_name=cfg.name,
-                url=cfg.url,
-                cookies_file=str(cfg.cookies_file) if cfg.cookies_file else None,
-                db=db,
-            )
-            highlight_watcher.start()
-    except Exception:
-        slog.exception("highlight.start_failed")
-        highlight_watcher = None
+    # Highlight-reel gate (per source, toggled live from /admin via the
+    # app_settings key ``gate_highlights:<name>``). When the source is showing a
+    # replayed highlight montage its audio isn't live, so the consume loop skips
+    # logging detections. The gate manager starts/stops the frame watcher to
+    # follow the setting, polled in the consume loop. YouTube only — that's
+    # where the banner is and where yt-dlp can resolve a video rendition.
+    highlight_gate = (
+        HighlightGate(
+            source_name=cfg.name,
+            url=cfg.url,
+            cookies_file=str(cfg.cookies_file) if cfg.cookies_file else None,
+            db=db,
+        )
+        if cfg.kind == "youtube"
+        else None
+    )
 
     backoff = NORMAL_BACKOFF_INITIAL
     while not stop_event.is_set():
@@ -144,7 +143,7 @@ def run_source(
         try:
             _consume_stream(
                 source, resolver, cfg, app, detector, db, slog, stop_event,
-                highlight_watcher,
+                highlight_gate,
             )
             if stop_event.is_set():
                 break
@@ -182,8 +181,8 @@ def run_source(
         # Use the event so the worker wakes immediately on stop_event rather than sleeping it out.
         if stop_event.wait(backoff):
             break
-    if highlight_watcher is not None:
-        highlight_watcher.stop()
+    if highlight_gate is not None:
+        highlight_gate.stop()
     slog.info("pipeline.stopped")
     try:
         db.worker_stopped(cfg.name)
@@ -200,7 +199,7 @@ def _consume_stream(
     db: Database,
     slog,
     stop_event: threading.Event,
-    highlight_watcher: HighlightWatcher | None = None,
+    highlight_gate: HighlightGate | None = None,
 ) -> None:
     last_hb = 0.0
     last_species_floor_refresh = 0.0
@@ -233,20 +232,26 @@ def _consume_stream(
             except Exception:
                 slog.exception("worker.heartbeat_update_failed")
             last_hb = now
-        # Skip chunks while the source is showing a replayed highlight reel:
-        # its audio isn't live, so any detection would be bogus. Heartbeat
-        # above still fires, so the worker stays healthy during the montage.
-        if highlight_watcher is not None and highlight_watcher.is_active():
-            prev_samples = None  # don't bleed highlight audio into live pre-roll
-            continue
         if now - last_species_floor_refresh > SPECIES_FLOOR_REFRESH_S:
             try:
                 species_floor = db.species_min_confidence_map()
                 global_min = db.global_min_confidence()
                 source_min = db.source_min_confidence(cfg.name)
+                # Follow the live on/off switch from /admin: start or stop the
+                # frame watcher to match the gate_highlights setting.
+                if highlight_gate is not None:
+                    highlight_gate.update(
+                        bool(db.get_setting(f"gate_highlights:{cfg.name}"))
+                    )
             except Exception:
                 slog.exception("worker.species_floor_refresh_failed")
             last_species_floor_refresh = now
+        # Skip chunks while the source is showing a replayed highlight reel:
+        # its audio isn't live, so any detection would be bogus. Heartbeat
+        # above still fires, so the worker stays healthy during the montage.
+        if highlight_gate is not None and highlight_gate.is_active():
+            prev_samples = None  # don't bleed highlight audio into live pre-roll
+            continue
         # Cutoff tiers, highest priority first: a site-wide floor overrides
         # everything; else a per-source override; else the source's own value.
         base_min = source_min if source_min is not None else cfg.min_confidence

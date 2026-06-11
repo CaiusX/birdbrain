@@ -215,3 +215,45 @@ class HighlightWatcher:
             if line:
                 return line
         return None
+
+
+class HighlightGate:
+    """Lifecycle manager that switches a source's HighlightWatcher on and off
+    to follow the ``gate_highlights:<name>`` setting, polled by the worker. A
+    fresh watcher is created on enable (threads are one-shot, so we can't
+    restart a stopped one) and torn down on disable, clearing the playback
+    state so /admin's badge disappears promptly."""
+
+    def __init__(self, source_name: str, url: str, cookies_file: str | None, db) -> None:
+        self.source_name = source_name
+        self.url = url
+        self.cookies_file = cookies_file
+        self.db = db
+        self._watcher: HighlightWatcher | None = None
+
+    def update(self, enabled: bool) -> None:
+        if enabled and self._watcher is None:
+            self._watcher = HighlightWatcher(
+                source_name=self.source_name,
+                url=self.url,
+                cookies_file=self.cookies_file,
+                db=self.db,
+            )
+            self._watcher.start()
+            log.info("highlight.gate_on", source=self.source_name)
+        elif not enabled and self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
+            try:
+                self.db.clear_playback_state(self.source_name)
+            except Exception:
+                log.exception("highlight.clear_failed", source=self.source_name)
+            log.info("highlight.gate_off", source=self.source_name)
+
+    def is_active(self) -> bool:
+        return self._watcher is not None and self._watcher.is_active()
+
+    def stop(self) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None

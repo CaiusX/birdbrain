@@ -100,20 +100,33 @@
             </dl>
           </td>
           <td class="px-5 py-3 align-top text-right">
-            {% if r.deleted %}
-              <button hx-post="/api/sources/{{ r.name | urlencode }}/enable"
-                      hx-target="#admin-table" hx-swap="outerHTML"
-                      class="px-2 py-1 rounded text-xs border border-emerald-500/60 text-emerald-300 hover:bg-emerald-500/10">
-                ▶ start
-              </button>
-            {% else %}
-              <button hx-post="/api/sources/{{ r.name | urlencode }}/disable"
-                      hx-target="#admin-table" hx-swap="outerHTML"
-                      hx-confirm="Stop the worker for {{ r.name }}?"
-                      class="px-2 py-1 rounded text-xs border border-amber-500/60 text-amber-300 hover:bg-amber-500/10">
-                ■ stop
-              </button>
-            {% endif %}
+            <div class="flex items-center justify-end gap-2 flex-wrap">
+              {% if r.gate_supported %}
+                <form hx-post="/api/sources/{{ r.name | urlencode }}/gate-highlights"
+                      hx-target="#admin-table" hx-swap="outerHTML">
+                  <input type="hidden" name="enabled" value="{{ 0 if r.gate_highlights else 1 }}">
+                  <button type="submit"
+                          title="Highlight-reel gating: skip detections while this cam shows a replayed highlight reel"
+                          class="px-2 py-1 rounded text-xs border {{ 'border-emerald-500/60 text-emerald-300 bg-emerald-500/10' if r.gate_highlights else 'border-zinc-700 text-zinc-500 hover:text-zinc-300' }}">
+                    HL gate {{ 'on' if r.gate_highlights else 'off' }}
+                  </button>
+                </form>
+              {% endif %}
+              {% if r.deleted %}
+                <button hx-post="/api/sources/{{ r.name | urlencode }}/enable"
+                        hx-target="#admin-table" hx-swap="outerHTML"
+                        class="px-2 py-1 rounded text-xs border border-emerald-500/60 text-emerald-300 hover:bg-emerald-500/10">
+                  ▶ start
+                </button>
+              {% else %}
+                <button hx-post="/api/sources/{{ r.name | urlencode }}/disable"
+                        hx-target="#admin-table" hx-swap="outerHTML"
+                        hx-confirm="Stop the worker for {{ r.name }}?"
+                        class="px-2 py-1 rounded text-xs border border-amber-500/60 text-amber-300 hover:bg-amber-500/10">
+                  ■ stop
+                </button>
+              {% endif %}
+            </div>
           </td>
         </tr>
       {% endfor %}
