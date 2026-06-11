@@ -201,6 +201,26 @@
 </dialog>
 
 <script>
+  // Keep native <select> dropdowns usable in Firefox. The status table polls
+  // every 15s and system-health every 30s (HTMX outerHTML/innerHTML swaps);
+  // Firefox dismisses an OPEN <select> popup whenever the page's DOM mutates
+  // like that, so dropdowns snapped shut mid-use (Chrome tolerates it). Pause
+  // those background polls while the user is in a form control or has the
+  // add-source dialog open; user-clicked requests are never gated.
+  document.body.addEventListener('htmx:beforeRequest', function (e) {
+    const elt = e.detail && e.detail.elt;
+    if (!elt || typeof elt.getAttribute !== 'function') return;
+    const trig = elt.getAttribute('hx-trigger') || '';
+    if (trig.indexOf('every ') === -1) return;   // only gate the periodic polls
+    const a = document.activeElement;
+    const editing = a && ['SELECT', 'INPUT', 'TEXTAREA', 'OPTION'].indexOf(a.tagName) !== -1;
+    if (editing || document.querySelector('dialog[open]')) {
+      e.preventDefault();
+    }
+  });
+</script>
+
+<script>
 (function () {
   const EXISTING = {{ existing_sites | tojson }};
   const dialog = document.getElementById('add-source-dialog');
