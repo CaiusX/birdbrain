@@ -210,8 +210,14 @@
 
 {# ---- 4. Site narrative (AI commentary) — moved below the video ---- #}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
-  <div class="px-5 py-3 border-b border-zinc-800">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline gap-2 flex-wrap">
     <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">site narrative</h3>
+    {% if note and note.generated_at %}
+      <span class="text-[10px] normal-case tracking-normal text-amber-300/70"
+            title="This commentary is a snapshot — figures in it reflect the data as of this date, not the live counts above.">
+        snapshot · {{ note.generated_at.strftime('%-d %b %Y') }}
+      </span>
+    {% endif %}
   </div>
   <div class="px-5 py-4">
     {% if note and note.note %}

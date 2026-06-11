@@ -136,6 +136,14 @@ def _salvage_truncated_json(raw: str) -> dict | None:
     return None
 
 
+# Brief bullets that carry no real content — the model emits these for sites
+# that were silent in the window. Matched at the start of a stripped bullet.
+_NO_DATA_RE = re.compile(
+    r"^(no data|no detections|no activity|none|n/?a|nothing|silent)\b",
+    re.IGNORECASE,
+)
+
+
 def _parse_brief(text: str | None) -> dict:
     """Parse a daily brief into {overall, sites:[{site, bullets}]}. New briefs
     are JSON (optionally fenced); legacy briefs are a plain paragraph, returned
@@ -158,12 +166,24 @@ def _parse_brief(text: str | None) -> dict:
     if not isinstance(data, dict):
         return {"overall": text.strip(), "sites": []}
     sites: list[dict] = []
+    seen: set[str] = set()
     for s in data.get("sites") or []:
         if not isinstance(s, dict):
             continue
         name = str(s.get("site") or "").strip()
-        bullets = [str(b).strip() for b in (s.get("bullets") or []) if str(b).strip()]
-        if name and bullets:
+        # Drop placeholder "no data" bullets the model emits for silent sites
+        # (e.g. Stony Point's "No data provided") so an empty site doesn't
+        # render a hollow card.
+        bullets = [
+            b
+            for b in (str(x).strip() for x in (s.get("bullets") or []))
+            if b and not _NO_DATA_RE.match(b)
+        ]
+        key = name.lower()
+        # Dedupe by site name — the model occasionally lists the same site
+        # twice (seen with Mara River).
+        if name and bullets and key not in seen:
+            seen.add(key)
             sites.append({"site": name, "bullets": bullets})
     return {"overall": str(data.get("overall") or "").strip(), "sites": sites}
 
@@ -4572,6 +4592,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     )
     # Canonical codes — guard against accidental matches on unrelated filenames.
     _IUCN_CODES = {"LC", "NT", "VU", "EN", "CR", "EW", "EX", "DD", "NE"}
+    # Extinct codes. A species we're detecting from live audio is by definition
+    # not extinct, so an EX/EW status icon in its article always belongs to an
+    # extinct subspecies or relative shown on the same page (e.g. the Common
+    # Buttonquail article carries both EX, for its extinct Andalusian race, and
+    # LC, for the species). The Wikipedia images API returns them alphabetically,
+    # so EX would otherwise win — skip extinct icons entirely.
+    _EXTINCT_CODES = {"EX", "EW"}
 
     def _wp_article_images(title: str) -> list[str]:
         """Fetch the list of image File: titles for a Wikipedia article. We
@@ -4606,7 +4633,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             m = _IUCN_STATUS_RE.search(t)
             if m:
                 code = m.group(1).upper()
-                if code in _IUCN_CODES:
+                if code in _IUCN_CODES and code not in _EXTINCT_CODES:
                     return code
         return None
 
