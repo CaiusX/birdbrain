@@ -1015,6 +1015,90 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
         return JSONResponse({"ok": True, "global_min_confidence": db.global_min_confidence()})
 
+    def _parse_cutoff(value: str) -> float | None:
+        """Parse a cutoff form value: empty string → None (clear the override),
+        otherwise a float validated into [0, 1]."""
+        raw = value.strip()
+        if raw == "":
+            return None
+        try:
+            parsed = float(raw)
+        except ValueError as e:
+            raise HTTPException(400, "min confidence must be a number") from e
+        if not (0.0 <= parsed <= 1.0):
+            raise HTTPException(400, "min confidence must be between 0 and 1")
+        return parsed
+
+    def _site_cutoffs_ctx() -> dict:
+        """Context for the per-site cutoffs panel — the source rows (with
+        override-aware min_confidence) plus the active site-wide floor."""
+        return {
+            "rows": _admin_view()["rows"],
+            "global_min_confidence": db.global_min_confidence(),
+        }
+
+    def _species_cutoffs_ctx() -> dict:
+        """Context for the per-species cutoffs panel — current overrides, the
+        species picker options, and the active site-wide floor (for the note)."""
+        cutoffs = sorted(
+            (
+                {
+                    "scientific_name": n.scientific_name,
+                    "common_name": n.common_name or n.scientific_name,
+                    "value": n.min_confidence,
+                }
+                for n in db.list_species_notes()
+                if n.min_confidence is not None
+            ),
+            key=lambda c: c["common_name"].lower(),
+        )
+        options = [
+            {"scientific_name": sci, "common_name": common}
+            for sci, common in db.list_detected_species()
+        ]
+        return {
+            "species_cutoffs": cutoffs,
+            "species_options": options,
+            "global_min_confidence": db.global_min_confidence(),
+        }
+
+    @app.post("/api/source-cutoff", response_class=HTMLResponse)
+    def update_source_cutoff(
+        request: Request,
+        source_name: str = Form(...),
+        value: str = Form(default=""),
+    ) -> Response:
+        """Set or clear a per-source detection floor. Empty value clears it,
+        restoring the source's configured threshold. Workers apply it within
+        the floor-refresh interval (~60s)."""
+        name = source_name.strip()
+        if not name:
+            raise HTTPException(400, "source_name is required")
+        db.set_source_min_confidence(name, _parse_cutoff(value))
+        if request.headers.get("hx-request"):
+            return TEMPLATES.TemplateResponse(
+                request, "_site_cutoffs.html", _site_cutoffs_ctx()
+            )
+        return JSONResponse({"ok": True, "name": name})
+
+    @app.post("/api/species-cutoff", response_class=HTMLResponse)
+    def update_species_cutoff(
+        request: Request,
+        scientific_name: str = Form(...),
+        value: str = Form(default=""),
+    ) -> Response:
+        """Set or clear a per-species detection floor. Empty value clears it.
+        Creates a minimal species-note row to hang the override on if needed."""
+        sci = scientific_name.strip()
+        if not sci:
+            raise HTTPException(400, "scientific_name is required")
+        db.set_species_min_confidence(sci, _parse_cutoff(value))
+        if request.headers.get("hx-request"):
+            return TEMPLATES.TemplateResponse(
+                request, "_species_cutoffs.html", _species_cutoffs_ctx()
+            )
+        return JSONResponse({"ok": True, "scientific_name": sci})
+
     def _is_static_source(name: str) -> bool:
         """True if ``name`` matches a sources.toml entry — independent of any
         runtime row that might exist with the same name."""
@@ -2359,6 +2443,17 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             ))
 
         rows.sort(key=lambda r: r["name"].lower())
+        # Layer per-source cutoff overrides over each source's configured value
+        # so the table and the cutoffs panel both show the value the pipeline
+        # actually applies. ``min_conf_base`` keeps the configured fallback for
+        # the editor's placeholder.
+        source_overrides = db.source_min_confidence_map()
+        for r in rows:
+            r["min_conf_base"] = r["min_confidence"]
+            override = source_overrides.get(r["name"])
+            r["min_conf_overridden"] = override is not None
+            if override is not None:
+                r["min_confidence"] = override
         running = sum(1 for r in rows if r["status"] == "running")
         # Defaults for the add-source form: pick the most common timezone
         # already in use so the user doesn't have to retype it. Fall back to
@@ -2550,7 +2645,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
-            request, "admin.html", {**_admin_view(), **_health_view()}
+            request,
+            "admin.html",
+            {**_admin_view(), **_species_cutoffs_ctx(), **_health_view()},
         )
 
     @app.get("/admin/replays", response_class=HTMLResponse)

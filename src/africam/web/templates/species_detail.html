@@ -307,49 +307,14 @@
   </script>
 
   <div class="border-t border-zinc-800 px-5 py-3 flex items-center gap-3 flex-wrap text-xs">
-    <label class="flex items-center gap-2 text-zinc-400">
-      <span class="uppercase tracking-wider text-[10px]">min confidence for this species</span>
-      <input id="species-min-conf-input" type="number" min="0" max="1" step="0.05"
-             value="{{ '%.2f'|format(note.min_confidence) if note and note.min_confidence is not none else '' }}"
-             placeholder="(site default)"
-             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 w-24 tabular-nums text-zinc-100">
-    </label>
-    <button id="species-min-conf-save"
-            class="px-3 py-1 rounded bg-zinc-100 text-zinc-900 font-medium hover:bg-white">save</button>
-    <button id="species-min-conf-clear"
-            class="px-2.5 py-1 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200">clear</button>
-    <span id="species-min-conf-status" class="text-zinc-500"></span>
-    <span class="text-zinc-500 ml-auto">applied per-detection within ~60s; raise it for loud common species drowning out quieter ones</span>
+    <span class="uppercase tracking-wider text-[10px] text-zinc-500">min confidence for this species</span>
+    {% if note and note.min_confidence is not none %}
+      <span class="tabular-nums text-emerald-300">{{ '%.2f'|format(note.min_confidence) }}</span>
+    {% else %}
+      <span class="text-zinc-500">site default</span>
+    {% endif %}
+    <a href="/admin" class="text-zinc-400 hover:text-emerald-300 underline decoration-dotted ml-auto">edit cutoffs on admin →</a>
   </div>
-  <script>
-  (function () {
-    const sci = {{ scientific | tojson }};
-    const input = document.getElementById('species-min-conf-input');
-    const status = document.getElementById('species-min-conf-status');
-    async function save(value) {
-      const params = new URLSearchParams();
-      params.set('min_confidence', value);
-      const resp = await fetch('/api/species_notes/' + encodeURIComponent(sci), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: params.toString(),
-      });
-      if (!resp.ok) {
-        status.textContent = 'failed to save (HTTP ' + resp.status + ')';
-        status.className = 'text-rose-400';
-        return;
-      }
-      const data = await resp.json();
-      input.value = (data.min_confidence !== null && data.min_confidence !== undefined)
-        ? Number(data.min_confidence).toFixed(2) : '';
-      status.textContent = 'saved ' + new Date().toLocaleTimeString();
-      status.className = 'text-emerald-400';
-    }
-    document.getElementById('species-min-conf-save').addEventListener('click', () => save(input.value));
-    document.getElementById('species-min-conf-clear').addEventListener('click', () => save(''));
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save(input.value); } });
-  })();
-  </script>
 
   <div class="grid grid-cols-2 md:grid-cols-5 gap-px bg-zinc-800/50">
     <div class="bg-zinc-900 px-5 py-3">

@@ -1,0 +1,38 @@
+{# expects: rows (list[dict]), global_min_confidence (float|None) #}
+<div id="site-cutoffs" class="space-y-2">
+  {% if global_min_confidence is not none %}
+    <p class="text-xs text-amber-300/80">
+      A site-wide floor of {{ '%.2f'|format(global_min_confidence) }} is currently overriding every per-site cutoff below.
+    </p>
+  {% endif %}
+  <table class="w-full text-sm">
+    <tbody class="divide-y divide-zinc-800/70">
+      {% for r in rows %}
+        <tr>
+          <td class="py-1.5 pr-4 align-middle">
+            <span class="text-zinc-200">{{ r.name }}</span>
+            <span class="text-zinc-600 text-xs ml-1">{{ 'runtime' if r.is_runtime else 'file' }}</span>
+          </td>
+          <td class="py-1.5 align-middle">
+            <form hx-post="/api/source-cutoff" hx-target="#site-cutoffs" hx-swap="outerHTML"
+                  class="flex items-center gap-2">
+              <input type="hidden" name="source_name" value="{{ r.name }}">
+              <input name="value" type="number" step="0.05" min="0" max="1"
+                     value="{{ '%.2f'|format(r.min_confidence) if r.min_conf_overridden else '' }}"
+                     placeholder="{{ '%.2f'|format(r.min_conf_base) }}"
+                     class="w-24 bg-zinc-950 border rounded px-2 py-1 text-sm tabular-nums text-zinc-100 {{ 'border-emerald-600/60' if r.min_conf_overridden else 'border-zinc-800' }}">
+              <button type="submit"
+                      class="text-xs px-2.5 py-1 rounded bg-zinc-100 text-zinc-900 font-medium hover:bg-white">save</button>
+              {% if r.min_conf_overridden %}
+                <span class="text-xs text-emerald-300">override</span>
+              {% else %}
+                <span class="text-xs text-zinc-600">configured {{ '%.2f'|format(r.min_conf_base) }}</span>
+              {% endif %}
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="text-xs text-zinc-500">Blank the field and save to drop the override and fall back to the source's configured threshold. Edits apply within ~60s, no restart.</p>
+</div>

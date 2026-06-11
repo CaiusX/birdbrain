@@ -71,7 +71,7 @@
           <td class="px-5 py-3 align-top hidden md:table-cell">
             <dl class="text-xs text-zinc-400 grid grid-cols-2 gap-x-3 gap-y-0.5 max-w-xs">
               <dt class="text-zinc-500">min conf</dt>
-                <dd class="tabular-nums">{{ "%.2f"|format(r.min_confidence) }}</dd>
+                <dd class="tabular-nums {{ 'text-emerald-300' if r.min_conf_overridden else '' }}">{{ "%.2f"|format(r.min_confidence) }}{% if r.min_conf_overridden %}<span title="per-site override (configured {{ '%.2f'|format(r.min_conf_base) }})"> *</span>{% endif %}</dd>
               <dt class="text-zinc-500">lat / lon</dt>
                 <dd class="tabular-nums">
                   {% if r.lat is not none and r.lon is not none %}

@@ -24,10 +24,22 @@
 
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
   <div class="px-5 py-3 border-b border-zinc-800">
-    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Detection settings</h2>
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Detection cutoffs</h2>
+    <p class="text-xs text-zinc-500 mt-0.5">The confidence floors the pipeline applies. Priority: site-wide overrides per-site, which overrides each source's own value; a per-species cutoff applies on top for that species.</p>
   </div>
-  <div class="p-4">
-    {% include "_global_min_conf.html" %}
+  <div class="divide-y divide-zinc-800">
+    <div class="p-4">
+      <h3 class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Site-wide</h3>
+      {% include "_global_min_conf.html" %}
+    </div>
+    <div class="p-4">
+      <h3 class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Per site</h3>
+      {% include "_site_cutoffs.html" %}
+    </div>
+    <div class="p-4">
+      <h3 class="text-[11px] uppercase tracking-wider text-zinc-500 mb-2">Per species</h3>
+      {% include "_species_cutoffs.html" %}
+    </div>
   </div>
 </section>
 

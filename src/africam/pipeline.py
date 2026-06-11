@@ -184,6 +184,9 @@ def _consume_stream(
     # each source uses its own cfg.min_confidence. Polled on the same cadence
     # as the per-species floors below.
     global_min: float | None = None
+    # Per-source detection-floor override for THIS source (admin UI). None =
+    # use cfg.min_confidence. Polled on the same cadence.
+    source_min: float | None = None
     # How often to refresh per-species threshold overrides. Cheap query, but
     # we don't need millisecond freshness — once a minute is plenty given the
     # UI tweaks land seconds-to-minutes after the user wants them.
@@ -209,11 +212,14 @@ def _consume_stream(
             try:
                 species_floor = db.species_min_confidence_map()
                 global_min = db.global_min_confidence()
+                source_min = db.source_min_confidence(cfg.name)
             except Exception:
                 slog.exception("worker.species_floor_refresh_failed")
             last_species_floor_refresh = now
-        # Site-wide floor overrides the source's own when set.
-        effective_min = global_min if global_min is not None else cfg.min_confidence
+        # Cutoff tiers, highest priority first: a site-wide floor overrides
+        # everything; else a per-source override; else the source's own value.
+        base_min = source_min if source_min is not None else cfg.min_confidence
+        effective_min = global_min if global_min is not None else base_min
         resolved = resolver.current()
         try:
             detections = detector.analyze(

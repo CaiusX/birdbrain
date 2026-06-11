@@ -33,6 +33,12 @@ _UNSET: Any = object()
 
 # app_settings key for the site-wide detection floor (see AppSettingRow).
 GLOBAL_MIN_CONFIDENCE_KEY = "global_min_confidence"
+# app_settings key prefix for per-source detection-floor overrides. The full
+# key is this prefix + the source name, so each source's override is its own
+# row, polled by that source's worker. Applies to both file (sources.toml) and
+# runtime sources uniformly, so editing a cutoff on /admin is live for any
+# source without a worker restart.
+SOURCE_MIN_CONFIDENCE_PREFIX = "source_min_confidence:"
 
 
 class Database:
@@ -706,6 +712,61 @@ class Database:
             GLOBAL_MIN_CONFIDENCE_KEY,
             None if value is None else repr(float(value)),
         )
+
+    def source_min_confidence(self, source_name: str) -> float | None:
+        """Per-source detection-floor override for one source, or None when
+        unset. A worker polls its own source's key so an /admin edit lands
+        without a restart."""
+        raw = self.get_setting(SOURCE_MIN_CONFIDENCE_PREFIX + source_name)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def source_min_confidence_map(self) -> dict[str, float]:
+        """All per-source overrides, keyed by source name. Used by the web UI
+        to show which sources carry an override."""
+        out: dict[str, float] = {}
+        with self._Session() as s:
+            rows = s.execute(
+                select(AppSettingRow.key, AppSettingRow.value)
+                .where(AppSettingRow.key.like(f"{SOURCE_MIN_CONFIDENCE_PREFIX}%"))
+                .where(AppSettingRow.value.is_not(None))
+            ).all()
+        for key, value in rows:
+            try:
+                out[key[len(SOURCE_MIN_CONFIDENCE_PREFIX):]] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def set_source_min_confidence(
+        self, source_name: str, value: float | None
+    ) -> None:
+        """Set/clear a per-source detection-floor override. ``None`` clears it,
+        restoring the source's configured ``min_confidence``."""
+        if value is not None and not (0.0 <= value <= 1.0):
+            raise ValueError("min_confidence must be in [0, 1]")
+        self.set_setting(
+            SOURCE_MIN_CONFIDENCE_PREFIX + source_name,
+            None if value is None else repr(float(value)),
+        )
+
+    def list_detected_species(self) -> list[tuple[str, str]]:
+        """Distinct (scientific_name, common_name) ever detected, ordered by
+        common name. Feeds the species picker on the admin cutoffs panel."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    func.min(DetectionRow.common_name),
+                )
+                .group_by(DetectionRow.scientific_name)
+                .order_by(func.min(DetectionRow.common_name))
+            ).all()
+        return [(sci, common or sci) for sci, common in rows]
 
     def list_species_notes(self) -> list[SpeciesNoteRow]:
         with self._Session() as s:
