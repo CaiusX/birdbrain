@@ -48,8 +48,32 @@
             class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
   </div>
   <div class="p-5">
+    <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none">
+      <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-cover">
+      <div id="spec-modal-locators"
+           class="absolute inset-0 pointer-events-none transition-opacity duration-150"
+           style="opacity: 0.85;"></div>
+      <div id="spec-modal-playhead"
+           class="absolute top-0 bottom-0 w-px bg-emerald-300 shadow-[0_0_6px_2px_rgba(110,231,183,0.7)] pointer-events-none"
+           style="left: 0%; display: none;"></div>
+    </div>
+    <div id="spec-modal-locator-legend"
+         class="hidden mt-2 flex items-center gap-3 flex-wrap text-[11px] text-zinc-400">
+      <span class="uppercase tracking-wider text-zinc-500">where each species likely called:</span>
+      <span id="spec-modal-locator-chips" class="flex items-center gap-2 flex-wrap"></span>
+      <label class="ml-auto flex items-center gap-1 cursor-pointer">
+        <input type="checkbox" id="spec-modal-locator-toggle" checked
+               class="accent-emerald-500">
+        <span>show overlay</span>
+      </label>
+    </div>
+    <audio id="spec-modal-audio" src="" controls preload="metadata" class="w-full mt-3"></audio>
+
+    {# Species note sits below the player: a visitor opens a clip to HEAR it,
+       so spectrogram + audio lead; the curator's ID note is context that
+       follows. #}
     <div id="spec-modal-note"
-         class="hidden mb-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40">
+         class="hidden mt-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40">
       <div class="flex items-center justify-between gap-2">
         <span id="spec-modal-note-tag"
               class="uppercase tracking-wider text-[10px] font-medium px-1.5 py-0.5 rounded border"></span>
@@ -62,7 +86,7 @@
     </div>
 
     <div id="spec-modal-note-edit-form"
-         class="hidden mb-3 rounded border border-zinc-800 px-3 py-2 bg-zinc-950/40">
+         class="hidden mt-3 rounded border border-zinc-800 px-3 py-2 bg-zinc-950/40">
       <div class="flex items-center justify-between mb-2">
         <span class="uppercase tracking-wider text-[10px] font-medium text-zinc-400">
           Species note · <span id="spec-modal-note-edit-species" class="normal-case text-zinc-200"></span>
@@ -92,27 +116,6 @@
         </button>
       </div>
     </div>
-
-    <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none">
-      <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-cover">
-      <div id="spec-modal-locators"
-           class="absolute inset-0 pointer-events-none transition-opacity duration-150"
-           style="opacity: 0.85;"></div>
-      <div id="spec-modal-playhead"
-           class="absolute top-0 bottom-0 w-px bg-emerald-300 shadow-[0_0_6px_2px_rgba(110,231,183,0.7)] pointer-events-none"
-           style="left: 0%; display: none;"></div>
-    </div>
-    <div id="spec-modal-locator-legend"
-         class="hidden mt-2 flex items-center gap-3 flex-wrap text-[11px] text-zinc-400">
-      <span class="uppercase tracking-wider text-zinc-500">where each species likely called:</span>
-      <span id="spec-modal-locator-chips" class="flex items-center gap-2 flex-wrap"></span>
-      <label class="ml-auto flex items-center gap-1 cursor-pointer">
-        <input type="checkbox" id="spec-modal-locator-toggle" checked
-               class="accent-emerald-500">
-        <span>show overlay</span>
-      </label>
-    </div>
-    <audio id="spec-modal-audio" src="" controls preload="metadata" class="w-full mt-3"></audio>
 
     <div class="mt-4 flex items-center justify-between gap-3 flex-wrap">
       <p class="text-xs text-zinc-500">click the spectrogram to seek</p>

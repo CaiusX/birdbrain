@@ -380,10 +380,14 @@
     markers[s.name] = m;
   });
 
-  // Frame Africa proper rather than the site bounding box. Cape Agulhas (~−35°)
-  // to the Atlas / Tunisian rim (~38°), Senegal (~−18°) to the Horn (~52°).
-  // Fits the network into the larger continental context — the welcome view.
-  map.fitBounds([[-35, -18], [38, 52]]);
+  // Default welcome view: frame Africa, not the site cluster. The map box is
+  // wide (full-width × 460px) while the continent is portrait, so fitting the
+  // FULL continent (to ~38°N) left big ocean margins and pulled the Arabian
+  // Peninsula into the right edge. Instead frame Cape Agulhas (~−35°) up to the
+  // Sahel (~13°N) and Senegal (~−16°) across to the Horn (~48°E): a wider box
+  // whose aspect ratio better matches the container, so Africa fills the frame
+  // with little dead space and no Middle East. Every camera sits inside it.
+  map.fitBounds([[-35, -16], [13, 48]]);
 
   // ``ago`` in JS for the popup's per-species age tags. Same buckets as the
   // Jinja macro at the top of the template so server and client agree.
