@@ -56,6 +56,21 @@ New findings:
 
 Mobile (from templates, unverified on device): stat grids and panels stack properly (`grid-cols-2 md:grid-cols-4`, `lg:grid-cols-2`) and the Label column hides, but the feed table keeps time + site + species + clip at `w-full` with no overflow-x wrapper — at 390 px those four columns will be severely cramped. Worth a real phone test; likely needs a card layout under ~640 px.
 
+## /diurnal click-through critique (tested in Chrome)
+
+What works: the day-phase bands visually unite the two charts; the popup's 24-h clock dial with the clicked hour outlined is a lovely hour-in-context touch; computing the cell from click geometry instead of 288 DOM handlers is Pi-friendly.
+
+1. **Inconsistent affordances.** The bar chart and heatmap look like siblings, but only the heatmap is clickable (`diurnal.html` attaches the handler to the heat SVG only). I clicked a bar first — nothing. Users who try the bars will conclude the graphics are static and never find the heatmap drill-down. Either make bars open the same popup (all-species for that hour) or visually differentiate.
+2. **The only hint is below the fold.** "Tip: click a cell…" sits in small grey text *under* the heatmap. By the time you've read the chart you've already decided whether it's interactive. Add a hover highlight + tooltip with the cell value — that teaches clickability instantly and fixes blind aiming.
+3. **The tip's promise breaks on the default view.** It says "species & weather for that hour", but with Site = "any" the popup says "Pick a single source to see weather." The default state can't deliver the advertised payoff.
+4. **Popup leads with the generic species essay**, not the clicked hour. The AI note (UTC conversions, mean-confidence talk) fills the entire first screen; the hour-specific dial is below it, and the actual value of the clicked cell ("Scops-Owl, 09:00: N detections") is never stated. Invert it: cell stats → dial → weather → collapsed note.
+5. **No audio.** The natural next step — *hear this species at this hour* — is missing. There are real detections behind every cell; surface 2–3 sample clips in the popup. "Full species page →" discards the hour context.
+6. **No feedback on which cell you hit.** I aimed at one row, got the adjacent species, and nothing marked the clicked cell in the heatmap. Geometric hit-testing with hard-coded margins (`mL=200…`) plus responsive rescaling makes near-misses easy; a hover outline would fix both this and #2.
+7. **No way to step between cells.** Comparing 08:00 vs 09:00 means close → re-aim → re-click. Prev/next-hour arrows (or ←/→ keys) in the popup header would make it explorable.
+8. **The decorative night-sky constellations read as data.** Dotted points joined by lines inside a chart area are the visual grammar of a scatter plot; I initially tried to interpret them. Lower their opacity further, or drop them from the bar chart where real marks live.
+
+Heaviness note: this page repeatedly froze Chrome's screenshot capture for 30 s+ — the big Plot SVGs plus per-cell rects make for expensive paints. Worth profiling once on a mid-range phone.
+
 ## Pi 5 constraints to respect
 
 Pre-generate species thumbnails at fetch time (no on-the-fly resizing), keep HTMX over heavy JS, paginate instead of caching giant pages, and keep the 5 s feed refresh payload small (it already re-sends spectrogram `<img>`s — make sure browsers can cache them with long-lived headers).
