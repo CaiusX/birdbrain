@@ -381,6 +381,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     _PUBLIC_BLOCKED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 
     @app.middleware("http")
+    async def no_store_html(request: Request, call_next):
+        """Stop browsers caching page HTML. Without this, a template change
+        deployed to the Pi wouldn't show until the user hard-reloaded — the
+        browser happily served a stale copy (this bit us repeatedly on /admin).
+        Only HTML is affected; spectrograms/clips/static stay cacheable."""
+        response = await call_next(request)
+        ctype = response.headers.get("content-type", "")
+        if ctype.startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.middleware("http")
     async def restrict_public(request: Request, call_next):
         is_public = request.headers.get("cf-connecting-ip") is not None
         request.state.is_public = is_public
