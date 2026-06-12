@@ -81,7 +81,16 @@ class YouTubeSource(AudioSource):
         cmd += [self.url]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            # Bound the resolve. Without a timeout a hung yt-dlp (seen when
+            # YouTube rate-limits the IP) blocks the worker thread forever; the
+            # supervisor's is_alive() check then can't tell it apart from a
+            # healthy worker, so the source stays dark indefinitely. A timeout
+            # turns that into a normal failure → backoff → retry → recovery.
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=False, timeout=90
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"yt-dlp timed out resolving {self.url}") from e
         finally:
             if tmp_cookies is not None:
                 try:
