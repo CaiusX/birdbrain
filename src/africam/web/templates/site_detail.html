@@ -151,6 +151,39 @@
   </div>
 </section>
 
+{# ---- Audio quality: current score + dominant issue + 24h trend ---- #}
+{% if audio_quality %}
+{% set aqc = 'text-zinc-400' if audio_quality.stale
+     else ('text-emerald-300' if audio_quality.score >= 70
+     else ('text-amber-300' if audio_quality.score >= 40 else 'text-rose-300')) %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline gap-2 flex-wrap">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">audio quality</h3>
+    <span class="text-[10px] normal-case tracking-normal text-zinc-500">how usable this feed's audio is for detection</span>
+  </div>
+  <div class="px-5 py-4 flex items-center gap-6 flex-wrap">
+    <div>
+      <div class="text-3xl font-semibold tabular-nums {{ aqc }}">{{ audio_quality.score }}<span class="text-base text-zinc-600">/100</span></div>
+      <div class="text-xs {{ aqc }}">{{ audio_quality.issue }}{{ ' · stale' if audio_quality.stale else '' }}</div>
+    </div>
+    <dl class="text-xs text-zinc-400 grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
+      <dt class="text-zinc-500">level</dt><dd class="tabular-nums">{{ '%.1f'|format(audio_quality.level_dbfs) }} dBFS</dd>
+      <dt class="text-zinc-500">structure</dt><dd class="tabular-nums">{{ '%.2f'|format(audio_quality.structure) }}</dd>
+    </dl>
+    {% if audio_sparkline %}
+      <div class="ml-auto">
+        <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">last 24h</div>
+        <svg viewBox="0 0 100 30" preserveAspectRatio="none" class="w-56 h-10">
+          <line x1="0" y1="9" x2="100" y2="9" stroke="#3f3f46" stroke-width="0.4" stroke-dasharray="2 2"/>
+          <polyline points="{{ audio_sparkline }}" fill="none" stroke="{{ source_color }}" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
+        </svg>
+        <div class="text-[10px] text-zinc-600 text-right">dashed = score 70</div>
+      </div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
 {# ---- 3. Live video (half) + recent unique species (half, scroll) ---- #}
 {% if src_cfg and src_cfg.url %}
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-stretch">

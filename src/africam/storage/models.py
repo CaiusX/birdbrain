@@ -357,6 +357,47 @@ class PlaybackStateRow(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class AudioQualityMetricRow(Base):
+    """Current audio-quality snapshot per source, written by the pipeline
+    (~every 60s) and read by /admin and the site page. Pure acoustic — how
+    usable the feed's audio is for detection — see africam.audio.quality.
+    ``updated_at`` doubles as a freshness signal: a stale row means the worker
+    isn't running, so the UI shows it greyed rather than current."""
+
+    __tablename__ = "audio_quality_metrics"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    score: Mapped[int] = mapped_column(Integer)            # 0..100 composite
+    level_score: Mapped[float] = mapped_column(Float)      # sub-scores, 0..1
+    avail_score: Mapped[float] = mapped_column(Float)
+    structure_score: Mapped[float] = mapped_column(Float)
+    level_dbfs: Mapped[float] = mapped_column(Float)       # EMA RMS level
+    silence_fraction: Mapped[float] = mapped_column(Float)
+    clip_fraction: Mapped[float] = mapped_column(Float)
+    flatness: Mapped[float] = mapped_column(Float)         # raw diagnostic
+    fraction_good: Mapped[float] = mapped_column(Float)
+    issue_label: Mapped[str] = mapped_column(String(32))   # dominant issue
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AudioQualitySampleRow(Base):
+    """Time-series of the audio-quality score per source (one sample every
+    ~10 min) for the 24h trend sparkline on the site page. Pruned to ~7 days."""
+
+    __tablename__ = "audio_quality_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_name: Mapped[str] = mapped_column(String(128), index=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    score: Mapped[int] = mapped_column(Integer)
+    level_dbfs: Mapped[float] = mapped_column(Float)
+    structure_score: Mapped[float] = mapped_column(Float)
+
+    __table_args__ = (
+        Index("ix_audio_quality_samples_src_time", "source_name", "recorded_at"),
+    )
+
+
 class AppSettingRow(Base):
     """Key-value store for app-wide tunables that BOTH the web process (the
     writer) and the pipeline workers (readers, via polling) need to agree on

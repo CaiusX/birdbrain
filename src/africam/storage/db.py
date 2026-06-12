@@ -13,6 +13,8 @@ from africam.detector.birdnet import Detection
 from africam.storage.models import (
     AnomalyEventRow,
     AppSettingRow,
+    AudioQualityMetricRow,
+    AudioQualitySampleRow,
     Base,
     DailyBriefRow,
     HighlightIntervalRow,
@@ -530,6 +532,71 @@ class Database:
         """Map source_name → its current playback-state row (for /admin)."""
         with self._Session() as s:
             return {r.source_name: r for r in s.scalars(select(PlaybackStateRow))}
+
+    # --- Audio quality metric (written by the pipeline, read by the UI) ---
+
+    def upsert_audio_quality(self, source_name: str, snap: dict) -> None:
+        """Write a source's current audio-quality snapshot (the dict returned
+        by QualityAccumulator.snapshot()). Called ~every 60s per worker."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(AudioQualityMetricRow, source_name)
+            if row is None:
+                row = AudioQualityMetricRow(source_name=source_name)
+                s.add(row)
+            row.score = int(snap["score"])
+            row.level_score = float(snap["level_score"])
+            row.avail_score = float(snap["avail_score"])
+            row.structure_score = float(snap["structure_score"])
+            row.level_dbfs = float(snap["level_dbfs"])
+            row.silence_fraction = float(snap["silence_fraction"])
+            row.clip_fraction = float(snap["clip_fraction"])
+            row.flatness = float(snap["flatness"])
+            row.fraction_good = float(snap["fraction_good"])
+            row.issue_label = str(snap["issue_label"])[:32]
+            row.updated_at = now
+
+    def audio_quality_by_source(self) -> dict[str, AudioQualityMetricRow]:
+        """Map source_name → its current audio-quality row (for /admin)."""
+        with self._Session() as s:
+            return {r.source_name: r for r in s.scalars(select(AudioQualityMetricRow))}
+
+    def append_audio_quality_sample(
+        self, source_name: str, score: int, level_dbfs: float, structure_score: float
+    ) -> None:
+        """Append one point to the 24h-trend time-series (~every 10 min)."""
+        with self._Session() as s, s.begin():
+            s.add(AudioQualitySampleRow(
+                source_name=source_name,
+                recorded_at=datetime.now(UTC),
+                score=int(score),
+                level_dbfs=float(level_dbfs),
+                structure_score=float(structure_score),
+            ))
+
+    def audio_quality_samples_since(
+        self, source_name: str, since: datetime
+    ) -> list[tuple[datetime, int]]:
+        """(recorded_at, score) points for a source in [since, now), oldest
+        first — feeds the site-page trend sparkline."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(AudioQualitySampleRow.recorded_at, AudioQualitySampleRow.score)
+                .where(AudioQualitySampleRow.source_name == source_name)
+                .where(AudioQualitySampleRow.recorded_at >= since)
+                .order_by(AudioQualitySampleRow.recorded_at)
+            ).all()
+        return [(r[0], r[1]) for r in rows]
+
+    def prune_audio_quality_samples(self, older_than: datetime) -> int:
+        """Delete trend samples older than ``older_than``. Returns row count."""
+        from sqlalchemy import delete
+        with self._Session() as s, s.begin():
+            res = s.execute(
+                delete(AudioQualitySampleRow)
+                .where(AudioQualitySampleRow.recorded_at < older_than)
+            )
+        return res.rowcount or 0
 
     def clear_playback_state(self, source_name: str) -> None:
         """Forget a source's playback state and close any open highlight

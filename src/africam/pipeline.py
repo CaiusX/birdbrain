@@ -4,11 +4,12 @@ import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 
 from africam.audio import AudioSource, RtspSource, YouTubeSource
+from africam.audio.quality import QualityAccumulator, chunk_features
 from africam.audio.source import AudioChunk
 from africam.audio_hash import clip_hash
 from africam.clips import save_chunk
@@ -215,6 +216,14 @@ def _consume_stream(
     # we don't need millisecond freshness — once a minute is plenty given the
     # UI tweaks land seconds-to-minutes after the user wants them.
     SPECIES_FLOOR_REFRESH_S = 60.0
+    # Audio-quality metric: EMA of per-chunk acoustic features, flushed to the
+    # DB on the same 60s cadence; a trend sample logged every 10 min; old
+    # samples pruned hourly.
+    quality = QualityAccumulator()
+    last_quality_sample = 0.0
+    last_quality_prune = 0.0
+    QUALITY_SAMPLE_S = 600.0
+    QUALITY_PRUNE_S = 3600.0
     # Rolling pre-roll buffer: keep the previous chunk's PCM samples per
     # worker so saved clips include the 3 s before the BirdNET window. Calls
     # that straddle a chunk boundary used to be cut at the start (we'd save
@@ -243,15 +252,46 @@ def _consume_stream(
                     highlight_gate.update(
                         bool(db.get_setting(f"gate_highlights:{cfg.name}"))
                     )
+                # Flush the current audio-quality snapshot (once enough audio
+                # has accumulated to be meaningful).
+                if quality.ready:
+                    snap = quality.snapshot()
+                    if snap is not None:
+                        db.upsert_audio_quality(cfg.name, snap)
             except Exception:
                 slog.exception("worker.species_floor_refresh_failed")
             last_species_floor_refresh = now
+        # Trend sample every ~10 min + hourly prune (separate slow cadences).
+        if quality.ready and now - last_quality_sample > QUALITY_SAMPLE_S:
+            try:
+                snap = quality.snapshot()
+                if snap is not None:
+                    db.append_audio_quality_sample(
+                        cfg.name, snap["score"], snap["level_dbfs"],
+                        snap["structure_score"],
+                    )
+            except Exception:
+                slog.exception("quality.sample_failed")
+            last_quality_sample = now
+        if now - last_quality_prune > QUALITY_PRUNE_S:
+            try:
+                db.prune_audio_quality_samples(datetime.now(UTC) - timedelta(days=7))
+            except Exception:
+                slog.exception("quality.prune_failed")
+            last_quality_prune = now
         # Skip chunks while the source is showing a replayed highlight reel:
         # its audio isn't live, so any detection would be bogus. Heartbeat
         # above still fires, so the worker stays healthy during the montage.
         if highlight_gate is not None and highlight_gate.is_active():
             prev_samples = None  # don't bleed highlight audio into live pre-roll
             continue
+        # Audio-quality metric: accumulate from this live (non-gated) chunk
+        # before detection, so quiet/silent chunks that never fire a detection
+        # still count toward the metric.
+        try:
+            quality.update(chunk_features(chunk.samples))
+        except Exception:
+            slog.exception("quality.update_failed")
         # Cutoff tiers, highest priority first: a site-wide floor overrides
         # everything; else a per-source override; else the source's own value.
         base_min = source_min if source_min is not None else cfg.min_confidence

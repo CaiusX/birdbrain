@@ -2390,6 +2390,37 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         local_now = datetime.now(local_tz).strftime("%H:%M")
         tz_abbr = _tz_abbr(tz_name)
 
+        # Audio-quality: current readout + 24h trend sparkline.
+        aq_now = datetime.now(UTC)
+        aq_row = db.audio_quality_by_source().get(name)
+        audio_quality = None
+        if aq_row is not None:
+            upd = aq_row.updated_at
+            if upd.tzinfo is None:
+                upd = upd.replace(tzinfo=UTC)
+            audio_quality = {
+                "score": aq_row.score,
+                "issue": aq_row.issue_label,
+                "level_dbfs": aq_row.level_dbfs,
+                "structure": aq_row.structure_score,
+                "stale": (aq_now - upd).total_seconds() > 180,
+            }
+        aq_samples = db.audio_quality_samples_since(name, aq_now - timedelta(hours=24))
+        audio_sparkline = ""
+        if len(aq_samples) >= 2:
+            t0 = aq_samples[0][0]
+            if t0.tzinfo is None:
+                t0 = t0.replace(tzinfo=UTC)
+            span = max((aq_samples[-1][0].replace(tzinfo=UTC) if aq_samples[-1][0].tzinfo is None
+                        else aq_samples[-1][0]) .timestamp() - t0.timestamp(), 1.0)
+            pts = []
+            for ts, sc in aq_samples:
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                x = (ts.timestamp() - t0.timestamp()) / span * 100.0
+                y = 30.0 - (max(0, min(100, sc)) / 100.0) * 30.0
+                pts.append(f"{x:.1f},{y:.1f}")
+            audio_sparkline = " ".join(pts)
         return TEMPLATES.TemplateResponse(
             request,
             "site_detail.html",
@@ -2398,6 +2429,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "src_cfg": src_cfg,
                 "source_color": SOURCE_COLORS.get(name, "#10b981"),
                 "video_id": video_id,
+                "audio_quality": audio_quality,
+                "audio_sparkline": audio_sparkline,
                 "multisite": bool(src_cfg and src_cfg.multisite),
                 "note": site_note,
                 "total": total,
@@ -2533,6 +2566,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     r["highlight_secs_24h"] = db.highlight_seconds_since(
                         r["name"], last_24h
                     )
+        # Audio-quality metric. Trust it only when fresh (the worker flushes
+        # ~every 60s); a stale row means the worker isn't running, so grey it.
+        audio_q = db.audio_quality_by_source()
+        AUDIO_STALE_S = 180
+        for r in rows:
+            aq = audio_q.get(r["name"])
+            r["audio_score"] = None
+            r["audio_issue"] = None
+            r["audio_stale"] = False
+            if aq is not None:
+                upd = aq.updated_at
+                if upd.tzinfo is None:
+                    upd = upd.replace(tzinfo=UTC)
+                r["audio_score"] = aq.score
+                r["audio_issue"] = aq.issue_label
+                r["audio_stale"] = (now - upd).total_seconds() > AUDIO_STALE_S
         running = sum(1 for r in rows if r["status"] == "running")
         # Defaults for the add-source form: pick the most common timezone
         # already in use so the user doesn't have to retype it. Fall back to
