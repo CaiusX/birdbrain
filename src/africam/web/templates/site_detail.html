@@ -162,10 +162,11 @@
     <span class="text-[10px] normal-case tracking-normal text-zinc-500">how usable this feed's audio is for detection</span>
   </div>
   <div class="px-5 py-4 flex items-center gap-6 flex-wrap">
-    <div>
-      <div class="text-3xl font-semibold tabular-nums {{ aqc }}">{{ audio_quality.score }}<span class="text-base text-zinc-600">/100</span></div>
-      <div class="text-xs {{ aqc }}">{{ audio_quality.issue }}{{ ' · stale' if audio_quality.stale else '' }}</div>
-    </div>
+    <button type="button" onclick="document.getElementById('audio-detail').showModal()"
+            class="text-left group" title="See how this score is calculated">
+      <div class="text-3xl font-semibold tabular-nums {{ aqc }} group-hover:underline decoration-dotted underline-offset-4">{{ audio_quality.score }}<span class="text-base text-zinc-600">/100</span></div>
+      <div class="text-xs {{ aqc }}">{{ audio_quality.issue }}{{ ' · stale' if audio_quality.stale else '' }} <span class="text-zinc-600 group-hover:text-zinc-400">· details ›</span></div>
+    </button>
     <dl class="text-xs text-zinc-400 grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
       <dt class="text-zinc-500">level</dt><dd class="tabular-nums">{{ '%.1f'|format(audio_quality.level_dbfs) }} dBFS</dd>
       <dt class="text-zinc-500" title="recent detection yield — the masking signal">yield</dt><dd class="tabular-nums">{{ '%.2f'|format(audio_quality.structure) }}</dd>
@@ -181,7 +182,54 @@
       </div>
     {% endif %}
   </div>
+
+  {# Click-through breakdown: the components that build the score #}
+  <dialog id="audio-detail"
+          class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-full max-w-lg
+                 backdrop:bg-black/70 backdrop:backdrop-blur-sm">
+    <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3">
+      <h3 class="text-sm font-semibold uppercase tracking-wider text-zinc-200">audio quality · how the score is built</h3>
+      <button type="button" onclick="document.getElementById('audio-detail').close()"
+              class="text-zinc-500 hover:text-zinc-100 text-xl leading-none px-2" aria-label="Close">×</button>
+    </div>
+    <div class="px-5 py-4 space-y-4">
+      <p class="text-xs text-zinc-500">score = (0.35·level + 0.25·availability + 0.40·yield) × clip-penalty × yield-gate</p>
+      {% set comps = [
+        ('Level', audio_quality.level_score, '0.35', audio_quality.w_level, '%.1f dBFS'|format(audio_quality.level_dbfs), '#10b981'),
+        ('Availability', audio_quality.avail_score, '0.25', audio_quality.w_avail, '%d%% silent'|format(audio_quality.silence_pct), '#0ea5e9'),
+        ('Yield (detections)', audio_quality.yield_score, '0.40', audio_quality.w_yield, '%.1f/h'|format(audio_quality.det_per_h), '#f59e0b'),
+      ] %}
+      {% for label, sub, w, contrib, raw, col in comps %}
+        <div>
+          <div class="flex items-baseline justify-between text-xs mb-1">
+            <span class="text-zinc-300">{{ label }} <span class="text-zinc-600">({{ raw }})</span></span>
+            <span class="tabular-nums text-zinc-400">{{ '%.2f'|format(sub) }} × {{ w }} = <span class="text-zinc-200">{{ '%.2f'|format(contrib) }}</span></span>
+          </div>
+          <div class="h-2 rounded bg-zinc-800 overflow-hidden">
+            <div class="h-full rounded" style="width: {{ (sub * 100) | int }}%; background: {{ col }};"></div>
+          </div>
+        </div>
+      {% endfor %}
+      <div class="border-t border-zinc-800 pt-3 text-xs space-y-1 tabular-nums text-zinc-400">
+        <div class="flex justify-between"><span>weighted sum</span><span class="text-zinc-200">{{ '%.2f'|format(audio_quality.weighted_sum) }}</span></div>
+        <div class="flex justify-between"><span>× clip penalty <span class="text-zinc-600">({{ audio_quality.clip_pct }}% clipped)</span></span><span>×{{ '%.2f'|format(audio_quality.clip_penalty) }}</span></div>
+        <div class="flex justify-between"><span>× yield gate <span class="text-zinc-600">(low yield ⇒ masked)</span></span><span>×{{ '%.2f'|format(audio_quality.yield_gate) }}</span></div>
+        <div class="flex justify-between text-sm font-semibold text-zinc-100 pt-1 border-t border-zinc-800 mt-1"><span>score</span><span>{{ audio_quality.score }} / 100 · {{ audio_quality.issue }}</span></div>
+      </div>
+      <p class="text-[11px] text-zinc-600 leading-relaxed">
+        Level &amp; availability are measured from the live audio; yield is recent detections/hour
+        (the masking signal — loud audio with ~no detections scores low). The yield gate pulls the
+        whole score down when there's adequate audio but nothing's being detected.
+      </p>
+    </div>
+  </dialog>
 </section>
+<script>
+  (function () {
+    var d = document.getElementById('audio-detail');
+    if (d) d.addEventListener('click', function (e) { if (e.target === d) d.close(); });
+  })();
+</script>
 {% endif %}
 
 {# ---- 3. Live video (half) + recent unique species (half, scroll) ---- #}

@@ -2398,12 +2398,30 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             upd = aq_row.updated_at
             if upd.tzinfo is None:
                 upd = upd.replace(tzinfo=UTC)
+            yld = aq_row.structure_score                      # repurposed: yield score
+            clip_pen = max(0.3, min(1.0, 1.0 - aq_row.clip_fraction / 0.05))
+            yld_gate = max(0.0, min(1.0, yld / 0.30))
+            det_6h = db.detection_count_since(name, aq_now - timedelta(hours=6))
             audio_quality = {
                 "score": aq_row.score,
                 "issue": aq_row.issue_label,
                 "level_dbfs": aq_row.level_dbfs,
-                "structure": aq_row.structure_score,
+                "structure": yld,
                 "stale": (aq_now - upd).total_seconds() > 180,
+                # breakdown of the score calculation, for the click-through chart
+                "level_score": aq_row.level_score,
+                "avail_score": aq_row.avail_score,
+                "yield_score": yld,
+                "silence_pct": round(aq_row.silence_fraction * 100),
+                "clip_pct": round(aq_row.clip_fraction * 100, 2),
+                "det_per_h": round(det_6h / 6.0, 1),
+                "clip_penalty": round(clip_pen, 2),
+                "yield_gate": round(yld_gate, 2),
+                "w_level": round(0.35 * aq_row.level_score, 3),
+                "w_avail": round(0.25 * aq_row.avail_score, 3),
+                "w_yield": round(0.40 * yld, 3),
+                "weighted_sum": round(
+                    0.35 * aq_row.level_score + 0.25 * aq_row.avail_score + 0.40 * yld, 3),
             }
         aq_samples = db.audio_quality_samples_since(name, aq_now - timedelta(hours=24))
         audio_sparkline = ""
