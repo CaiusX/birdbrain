@@ -2422,6 +2422,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "w_yield": round(0.40 * yld, 3),
                 "weighted_sum": round(
                     0.35 * aq_row.level_score + 0.25 * aq_row.avail_score + 0.40 * yld, 3),
+                # Frequency band (Hz). band_limited = upper edge well below the
+                # ~16 kHz YouTube codec ceiling → mic/source limitation.
+                "band_hz_low": aq_row.band_hz_low,
+                "band_hz_high": aq_row.band_hz_high,
+                "band_limited": (
+                    aq_row.band_hz_high is not None and aq_row.band_hz_high < 9000
+                ),
             }
         aq_samples = db.audio_quality_samples_since(name, aq_now - timedelta(hours=24))
         audio_sparkline = ""

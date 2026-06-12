@@ -34,6 +34,27 @@ _YIELD_SAT_PER_H = 3.0   # >= this many detections/hour ⇒ yield_score 1.0
 EMA_ALPHA = 1.0 - 0.5 ** (1.0 / 100.0)
 MIN_CHUNKS = 20
 
+# Frequency-band analysis: STFT bin frequencies (1025 bins, 0..24 kHz @48k),
+# and the dB margin below the in-band level that still counts as "carries
+# energy". A sharp upper edge well below the ~16 kHz YouTube-AAC ceiling means
+# the source (mic/encoder) is band-limited — loses high-frequency bird calls.
+_FREQS = librosa.fft_frequencies(sr=48_000, n_fft=2048)
+_BAND_MARGIN_DB = 25.0
+
+
+def _band_edges(psd: np.ndarray) -> tuple[float | None, float | None]:
+    """(low_hz, high_hz) where the averaged power spectrum carries energy,
+    relative to the in-band (0.5–4 kHz) level. None when indeterminate."""
+    psd_db = 10.0 * np.log10(psd + 1e-12)
+    inband = (_FREQS >= 500) & (_FREQS <= 4000)
+    ref = float(np.median(psd_db[inband]))
+    keep = _FREQS[psd_db >= ref - _BAND_MARGIN_DB]
+    if keep.size == 0:
+        return None, None
+    above = keep[keep >= 40.0]  # skip DC/sub-bass rumble for the low edge
+    low = float(above.min()) if above.size else float(keep.min())
+    return low, float(keep.max())
+
 
 def _dbfs(x: float) -> float:
     return 20.0 * float(np.log10(x + 1e-12))
@@ -44,20 +65,26 @@ def chunk_features(y: np.ndarray) -> dict:
     y = np.asarray(y, dtype=np.float32)
     if y.size == 0:
         return {"rms_dbfs": -120.0, "peak_dbfs": -120.0, "crest_db": 0.0,
-                "clip_frac": 0.0, "flatness": 1.0}
+                "clip_frac": 0.0, "flatness": 1.0, "psd": None}
     rms_dbfs = _dbfs(float(np.sqrt(np.mean(y * y) + 1e-12)))
     peak_dbfs = _dbfs(float(np.max(np.abs(y))))
     clip_frac = float(np.mean(np.abs(y) >= 0.999))
+    psd = None
+    flatness = 1.0
     try:
-        flatness = float(
-            np.median(librosa.feature.spectral_flatness(y=y, n_fft=2048, hop_length=2048))
-        )
+        # One STFT → both the spectral flatness (diagnostic) and the mean power
+        # spectrum (for the frequency-band edges).
+        power = np.abs(librosa.stft(y, n_fft=2048, hop_length=2048)) ** 2
+        psd = power.mean(axis=1)
+        gm = np.exp(np.mean(np.log(power + 1e-12), axis=0))
+        am = np.mean(power, axis=0) + 1e-12
+        flatness = float(np.median(gm / am))
     except Exception:
-        flatness = 1.0
+        pass
     return {
         "rms_dbfs": rms_dbfs, "peak_dbfs": peak_dbfs,
         "crest_db": peak_dbfs - rms_dbfs, "clip_frac": clip_frac,
-        "flatness": flatness,
+        "flatness": flatness, "psd": psd,
     }
 
 
@@ -90,11 +117,13 @@ class QualityAccumulator:
     folds in detection yield to produce the 0-100 score + issue label."""
 
     def __init__(self, alpha: float = EMA_ALPHA) -> None:
+        self._alpha = alpha
         self._rms = _Ema(alpha)
         self._clip = _Ema(alpha)
         self._flat = _Ema(alpha)
         self._silent = _Ema(alpha)
         self._good = _Ema(alpha)
+        self._psd: np.ndarray | None = None   # EMA of the mean power spectrum
         self.chunk_count = 0
 
     def update(self, f: dict) -> None:
@@ -104,6 +133,12 @@ class QualityAccumulator:
         self._flat.update(f["flatness"])
         self._silent.update(1.0 if label == "silent" else 0.0)
         self._good.update(1.0 if label == "good" else 0.0)
+        psd = f.get("psd")
+        if psd is not None:
+            self._psd = (
+                psd if self._psd is None
+                else (1.0 - self._alpha) * self._psd + self._alpha * psd
+            )
         self.chunk_count += 1
 
     @property
@@ -144,6 +179,12 @@ class QualityAccumulator:
         else:
             issue = "marginal"
 
+        # Frequency band — only meaningful when there's actual content to
+        # measure (skip when the feed is silent / near-dead).
+        band_lo = band_hi = None
+        if self._psd is not None and frac_silent <= 0.6 and level_score >= 0.15:
+            band_lo, band_hi = _band_edges(self._psd)
+
         return {
             "score": score,
             "level_score": round(level_score, 3),
@@ -156,4 +197,6 @@ class QualityAccumulator:
             "flatness": round(self._flat.value or 0.0, 3),
             "fraction_good": round(self._good.value or 0.0, 3),
             "issue_label": issue,
+            "band_hz_low": int(round(band_lo)) if band_lo else None,
+            "band_hz_high": int(round(band_hi)) if band_hi else None,
         }

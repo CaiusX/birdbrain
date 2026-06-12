@@ -377,6 +377,11 @@ class AudioQualityMetricRow(Base):
     flatness: Mapped[float] = mapped_column(Float)         # raw diagnostic
     fraction_good: Mapped[float] = mapped_column(Float)
     issue_label: Mapped[str] = mapped_column(String(32))   # dominant issue
+    # Effective frequency band (Hz) the feed carries — a sharp upper edge well
+    # below the ~16 kHz YouTube codec ceiling means a band-limited mic/source.
+    # NULL when too quiet to measure.
+    band_hz_low: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    band_hz_high: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

@@ -170,6 +170,12 @@
     <dl class="text-xs text-zinc-400 grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
       <dt class="text-zinc-500">level</dt><dd class="tabular-nums">{{ '%.1f'|format(audio_quality.level_dbfs) }} dBFS</dd>
       <dt class="text-zinc-500" title="recent detection yield — the masking signal">yield</dt><dd class="tabular-nums">{{ '%.2f'|format(audio_quality.structure) }}</dd>
+      <dt class="text-zinc-500" title="effective frequency band the feed carries; a low upper edge = band-limited mic/source that loses high-pitched calls">freq range</dt>
+      <dd class="tabular-nums {{ 'text-amber-300' if audio_quality.band_limited else '' }}">
+        {%- if audio_quality.band_hz_high -%}
+          {{ audio_quality.band_hz_low }} Hz – {{ '%.1f'|format(audio_quality.band_hz_high / 1000) }} kHz{% if audio_quality.band_limited %} · band-limited{% endif %}
+        {%- else -%}— <span class="text-zinc-600">(too quiet)</span>{%- endif -%}
+      </dd>
     </dl>
     {% if audio_sparkline %}
       <div class="ml-auto">
@@ -216,6 +222,23 @@
         <div class="flex justify-between"><span>× yield gate <span class="text-zinc-600">(low yield ⇒ masked)</span></span><span>×{{ '%.2f'|format(audio_quality.yield_gate) }}</span></div>
         <div class="flex justify-between text-sm font-semibold text-zinc-100 pt-1 border-t border-zinc-800 mt-1"><span>score</span><span>{{ audio_quality.score }} / 100 · {{ audio_quality.issue }}</span></div>
       </div>
+      {% if audio_quality.band_hz_high %}
+      <div class="border-t border-zinc-800 pt-3 text-xs">
+        <div class="flex justify-between {{ 'text-amber-300' if audio_quality.band_limited else 'text-zinc-300' }}">
+          <span>frequency band carried</span>
+          <span class="tabular-nums">{{ audio_quality.band_hz_low }} Hz – {{ '%.1f'|format(audio_quality.band_hz_high / 1000) }} kHz</span>
+        </div>
+        <p class="text-[11px] text-zinc-600 mt-1 leading-relaxed">
+          {% if audio_quality.band_limited %}
+            Band-limited well below the ~16 kHz YouTube codec ceiling — the mic/source caps the high
+            end, so high-pitched calls (sunbirds, white-eyes, many cisticolas) are lost here.
+          {% else %}
+            Full usable range up to the ~16 kHz YouTube-AAC ceiling (the codec limit shared by every
+            stream). Not a per-site limitation.
+          {% endif %}
+        </p>
+      </div>
+      {% endif %}
       <p class="text-[11px] text-zinc-600 leading-relaxed">
         Level &amp; availability are measured from the live audio; yield is recent detections/hour
         (the masking signal — loud audio with ~no detections scores low). The yield gate pulls the

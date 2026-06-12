@@ -111,6 +111,8 @@ class Database:
             ("species_notes", "range_map_page_url", "TEXT"),
             ("species_notes", "media_fetched_at", "TIMESTAMP"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
+            ("audio_quality_metrics", "band_hz_low", "INTEGER"),
+            ("audio_quality_metrics", "band_hz_high", "INTEGER"),
         ]
         # Indexes to create on existing tables. ``Base.metadata.create_all``
         # only creates indexes for tables it creates, so any index attached to
@@ -554,6 +556,8 @@ class Database:
             row.flatness = float(snap["flatness"])
             row.fraction_good = float(snap["fraction_good"])
             row.issue_label = str(snap["issue_label"])[:32]
+            row.band_hz_low = snap.get("band_hz_low")
+            row.band_hz_high = snap.get("band_hz_high")
             row.updated_at = now
 
     def audio_quality_by_source(self) -> dict[str, AudioQualityMetricRow]:
