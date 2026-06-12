@@ -22,23 +22,26 @@
   </div>
 </section>
 
-{# Live audition — hidden until a site's 🔊 button is clicked. Lives outside
-   the 15s-refreshing table so playback survives table swaps. #}
-<section id="audition-panel" class="hidden bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+{# Live audition popup — opened by a site's 🔊 button. Native <dialog> so ESC
+   and the close button work for free; closing (any way) stops the stream. #}
+<dialog id="audition-panel"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0
+               w-full max-w-2xl backdrop:bg-black/70 backdrop:backdrop-blur-sm">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">
       Live audition · <span id="audition-site" class="text-zinc-100 normal-case"></span>
       <span id="audition-status" class="text-zinc-500 text-xs ml-2 normal-case"></span>
     </h2>
     <button type="button" onclick="stopAudition()"
-            class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200">stop</button>
+            class="text-zinc-500 hover:text-zinc-100 text-xl leading-none px-2 py-0.5"
+            aria-label="Close">×</button>
   </div>
   <div class="p-4 space-y-3">
     <canvas id="audition-canvas" width="640" height="180"
             class="w-full rounded bg-zinc-950 block"></canvas>
     <audio id="audition-audio" controls class="w-full"></audio>
   </div>
-</section>
+</dialog>
 
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
   <div class="px-5 py-3 border-b border-zinc-800">
@@ -274,20 +277,30 @@
       g.audio.onerror = function () {
         document.getElementById('audition-status').textContent = 'stream error — try again';
       };
-      document.getElementById('audition-panel').classList.remove('hidden');
+      const panel = document.getElementById('audition-panel');
+      if (!panel.open) panel.showModal();
       cancelAnimationFrame(g.raf);
       draw();
-      document.getElementById('audition-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     };
+    function teardown() {
+      if (!G) return;
+      cancelAnimationFrame(G.raf);
+      G.audio.pause();
+      G.audio.removeAttribute('src');
+      G.audio.load();               // drops the HTTP stream → server ffmpeg exits
+    }
     window.stopAudition = function () {
-      if (G) {
-        cancelAnimationFrame(G.raf);
-        G.audio.pause();
-        G.audio.removeAttribute('src');
-        G.audio.load();             // drops the HTTP stream → server ffmpeg exits
-      }
-      document.getElementById('audition-panel').classList.add('hidden');
+      const panel = document.getElementById('audition-panel');
+      if (panel.open) panel.close(); else teardown();
     };
+    // Closing the popup by any route (×, ESC, backdrop click) stops the stream.
+    (function () {
+      const panel = document.getElementById('audition-panel');
+      panel.addEventListener('close', teardown);
+      panel.addEventListener('click', function (e) {
+        if (e.target === panel) panel.close();   // click on the backdrop
+      });
+    })();
   })();
 </script>
 
