@@ -65,20 +65,24 @@ class Database:
         )
         self.engine = create_engine(url, future=True, connect_args=connect_args)
         if url.startswith("sqlite:"):
-            # WAL lets the live pipeline insert detections while the notes
-            # worker / backfill CLI / web app are reading or writing. In
-            # classic rollback-journal mode (the SQLite default) any writer
-            # blocks every reader and we'd see ``database is locked``
-            # whenever two workloads collided — even with a generous
-            # busy_timeout. Setting WAL once flips it persistently for the
-            # database file; subsequent opens stay in WAL automatically.
-            # ``synchronous=NORMAL`` is the conventional WAL pairing —
-            # crash-safe, and the last few committed transactions can be
-            # lost only on a power-cut (not a process crash), which is fine
-            # here since detections re-arrive constantly anyway.
-            with self.engine.begin() as conn:
-                conn.exec_driver_sql("PRAGMA journal_mode = WAL")
-                conn.exec_driver_sql("PRAGMA synchronous = NORMAL")
+            # WAL lets the live pipeline insert detections while readers/writers
+            # work concurrently without "database is locked". These are
+            # per-connection pragmas (except WAL, which is file-persistent), so
+            # set them on EVERY pooled connection via a connect hook — not just
+            # once at init, which left pooled connections on the SQLite
+            # defaults. ``journal_size_limit`` is the important one: after a
+            # checkpoint SQLite truncates the WAL back to this size instead of
+            # leaving it at its high-water mark — without it the WAL had
+            # ballooned to ~100 MB and slowed every read.
+            from sqlalchemy import event
+
+            @event.listens_for(self.engine, "connect")
+            def _sqlite_pragmas(dbapi_conn, _record):  # noqa: ANN001
+                cur = dbapi_conn.cursor()
+                cur.execute("PRAGMA journal_mode=WAL")
+                cur.execute("PRAGMA synchronous=NORMAL")
+                cur.execute("PRAGMA journal_size_limit=16777216")  # 16 MB cap
+                cur.close()
         self._Session = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
         self._migrate_in_place()
