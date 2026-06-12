@@ -561,6 +561,16 @@ class Database:
         with self._Session() as s:
             return {r.source_name: r for r in s.scalars(select(AudioQualityMetricRow))}
 
+    def detection_count_since(self, source_name: str, since: datetime) -> int:
+        """Raw detection count for a source in [since, now). Feeds the audio-
+        quality 'yield' term (loud audio + near-zero detections = masked)."""
+        with self._Session() as s:
+            return int(s.scalar(
+                select(func.count(DetectionRow.id))
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at >= since)
+            ) or 0)
+
     def append_audio_quality_sample(
         self, source_name: str, score: int, level_dbfs: float, structure_score: float
     ) -> None:

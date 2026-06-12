@@ -253,9 +253,13 @@ def _consume_stream(
                         bool(db.get_setting(f"gate_highlights:{cfg.name}"))
                     )
                 # Flush the current audio-quality snapshot (once enough audio
-                # has accumulated to be meaningful).
+                # has accumulated to be meaningful). Detection yield over the
+                # last 6h is the masking signal — loud audio with ~no detections.
                 if quality.ready:
-                    snap = quality.snapshot()
+                    det_6h = db.detection_count_since(
+                        cfg.name, datetime.now(UTC) - timedelta(hours=6)
+                    )
+                    snap = quality.snapshot(detections_per_h=det_6h / 6.0)
                     if snap is not None:
                         db.upsert_audio_quality(cfg.name, snap)
             except Exception:
@@ -264,7 +268,10 @@ def _consume_stream(
         # Trend sample every ~10 min + hourly prune (separate slow cadences).
         if quality.ready and now - last_quality_sample > QUALITY_SAMPLE_S:
             try:
-                snap = quality.snapshot()
+                det_6h = db.detection_count_since(
+                    cfg.name, datetime.now(UTC) - timedelta(hours=6)
+                )
+                snap = quality.snapshot(detections_per_h=det_6h / 6.0)
                 if snap is not None:
                     db.append_audio_quality_sample(
                         cfg.name, snap["score"], snap["level_dbfs"],
