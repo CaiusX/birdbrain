@@ -56,6 +56,23 @@ def _band_edges(psd: np.ndarray) -> tuple[float | None, float | None]:
     return low, float(keep.max())
 
 
+# Band penalty: feeds whose upper edge is well below the codec ceiling lose the
+# upper bird band. Ramp from the floor at 4 kHz up to 1.0 at 10 kHz; unknown
+# (too quiet to measure) or >=10 kHz is unpenalised.
+_BAND_FULL_HZ = 10_000.0
+_BAND_NARROW_HZ = 4_000.0
+_BAND_PENALTY_FLOOR = 0.6
+
+
+def _band_penalty(band_hi: float | None) -> float:
+    if band_hi is None or band_hi >= _BAND_FULL_HZ:
+        return 1.0
+    frac = (band_hi - _BAND_NARROW_HZ) / (_BAND_FULL_HZ - _BAND_NARROW_HZ)
+    return float(np.clip(
+        _BAND_PENALTY_FLOOR + (1.0 - _BAND_PENALTY_FLOOR) * frac,
+        _BAND_PENALTY_FLOOR, 1.0))
+
+
 def _dbfs(x: float) -> float:
     return 20.0 * float(np.log10(x + 1e-12))
 
@@ -156,13 +173,23 @@ class QualityAccumulator:
 
         level_score = float(np.clip(
             (ema_rms - _LEVEL_LO_DBFS) / (_LEVEL_HI_DBFS - _LEVEL_LO_DBFS), 0.0, 1.0))
+        # Frequency band — only meaningful when there's actual content to
+        # measure (skip when the feed is silent / near-dead).
+        band_lo = band_hi = None
+        if self._psd is not None and frac_silent <= 0.6 and level_score >= 0.15:
+            band_lo, band_hi = _band_edges(self._psd)
+
         avail_score = 1.0 - frac_silent
         yield_score = float(np.clip(detections_per_h / _YIELD_SAT_PER_H, 0.0, 1.0))
         clip_penalty = float(np.clip(1.0 - ema_clip / 0.05, 0.3, 1.0))
         yield_gate = float(np.clip(yield_score / 0.30, 0.0, 1.0))
+        # Band penalty: a feed cut well below the codec ceiling loses the upper
+        # bird band (sunbirds, white-eyes, high cisticolas). Ramps 4 kHz→0.6 up
+        # to 10 kHz→1.0; full-range/codec-limited feeds (>=10 kHz) are unpenalised.
+        band_penalty = _band_penalty(band_hi)
         composite = (
             (0.35 * level_score + 0.25 * avail_score + 0.40 * yield_score)
-            * clip_penalty * (0.4 + 0.6 * yield_gate)
+            * clip_penalty * (0.4 + 0.6 * yield_gate) * band_penalty
         )
         score = int(round(100.0 * composite))
 
@@ -174,16 +201,12 @@ class QualityAccumulator:
             issue = "too quiet"
         elif yield_score < 0.30:
             issue = "noise-masked"
+        elif band_hi is not None and band_hi < 9000:
+            issue = "band-limited"
         elif score >= 70:
             issue = "good"
         else:
             issue = "marginal"
-
-        # Frequency band — only meaningful when there's actual content to
-        # measure (skip when the feed is silent / near-dead).
-        band_lo = band_hi = None
-        if self._psd is not None and frac_silent <= 0.6 and level_score >= 0.15:
-            band_lo, band_hi = _band_edges(self._psd)
 
         return {
             "score": score,

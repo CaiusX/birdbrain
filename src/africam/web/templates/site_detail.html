@@ -199,7 +199,7 @@
               class="text-zinc-500 hover:text-zinc-100 text-xl leading-none px-2" aria-label="Close">×</button>
     </div>
     <div class="px-5 py-4 space-y-4">
-      <p class="text-xs text-zinc-500">score = (0.35·level + 0.25·availability + 0.40·yield) × clip-penalty × yield-gate</p>
+      <p class="text-xs text-zinc-500">score = (0.35·level + 0.25·availability + 0.40·yield) × clip-penalty × yield-gate × band-penalty</p>
       {% set comps = [
         ('Level', audio_quality.level_score, '0.35', audio_quality.w_level, '%.1f dBFS'|format(audio_quality.level_dbfs), '#10b981'),
         ('Availability', audio_quality.avail_score, '0.25', audio_quality.w_avail, '%d%% silent'|format(audio_quality.silence_pct), '#0ea5e9'),
@@ -220,6 +220,9 @@
         <div class="flex justify-between"><span>weighted sum</span><span class="text-zinc-200">{{ '%.2f'|format(audio_quality.weighted_sum) }}</span></div>
         <div class="flex justify-between"><span>× clip penalty <span class="text-zinc-600">({{ audio_quality.clip_pct }}% clipped)</span></span><span>×{{ '%.2f'|format(audio_quality.clip_penalty) }}</span></div>
         <div class="flex justify-between"><span>× yield gate <span class="text-zinc-600">(low yield ⇒ masked)</span></span><span>×{{ '%.2f'|format(audio_quality.yield_gate) }}</span></div>
+        {% if audio_quality.band_penalty < 1.0 %}
+        <div class="flex justify-between text-amber-300"><span>× band penalty <span class="text-amber-300/60">({{ '%.1f'|format(audio_quality.band_hz_high / 1000) }} kHz — loses highs)</span></span><span>×{{ '%.2f'|format(audio_quality.band_penalty) }}</span></div>
+        {% endif %}
         <div class="flex justify-between text-sm font-semibold text-zinc-100 pt-1 border-t border-zinc-800 mt-1"><span>score</span><span>{{ audio_quality.score }} / 100 · {{ audio_quality.issue }}</span></div>
       </div>
       {% if audio_quality.band_hz_high %}

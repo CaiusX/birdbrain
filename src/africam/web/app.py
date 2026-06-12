@@ -2401,6 +2401,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             yld = aq_row.structure_score                      # repurposed: yield score
             clip_pen = max(0.3, min(1.0, 1.0 - aq_row.clip_fraction / 0.05))
             yld_gate = max(0.0, min(1.0, yld / 0.30))
+            bh = aq_row.band_hz_high
+            band_pen = (
+                1.0 if (bh is None or bh >= 10000)
+                else max(0.6, min(1.0, 0.6 + 0.4 * (bh - 4000) / 6000))
+            )
             det_6h = db.detection_count_since(name, aq_now - timedelta(hours=6))
             audio_quality = {
                 "score": aq_row.score,
@@ -2417,6 +2422,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "det_per_h": round(det_6h / 6.0, 1),
                 "clip_penalty": round(clip_pen, 2),
                 "yield_gate": round(yld_gate, 2),
+                "band_penalty": round(band_pen, 2),
                 "w_level": round(0.35 * aq_row.level_score, 3),
                 "w_avail": round(0.25 * aq_row.avail_score, 3),
                 "w_yield": round(0.40 * yld, 3),
