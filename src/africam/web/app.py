@@ -1570,6 +1570,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         # Sample clips: top by max conf, plus a spread (low/mid/high), plus labeled good.
         with_clips = [r for r in all_rows if r.clip_path]
+        # all_rows is ordered started_at DESC, so the first clip is the most
+        # recent capture — drives the "latest spectrogram" tile.
+        latest_clip = with_clips[0] if with_clips else None
         top_clips = sorted(with_clips, key=lambda r: -r.confidence)[:5]
         if len(with_clips) >= 6:
             sorted_by_conf = sorted(with_clips, key=lambda r: r.confidence)
@@ -1625,6 +1628,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "top_clips": top_clips,
                 "spread_clips": spread_clips,
                 "good_clips": good_clips,
+                "latest_clip": latest_clip,
                 "source_tz": {
                     name: cfg.timezone for name, cfg in sources_by_name.items()
                 },

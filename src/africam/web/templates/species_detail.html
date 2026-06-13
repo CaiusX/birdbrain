@@ -116,12 +116,35 @@
       <div id="species-range-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no range map</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">where it's heard <span class="normal-case text-zinc-600">· detection sites</span></div>
+      {% if sites_for_map %}
+        <div id="species-heard-mini" class="w-full rounded border border-zinc-800 overflow-hidden bg-zinc-950" style="height: 11rem;"></div>
+      {% else %}
+        <div class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">not mapped yet</div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# Row 2: distinctive (best example) + latest (most recent) spectrograms. #}
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-px bg-zinc-800/50 border-t border-zinc-800">
+    <div class="bg-zinc-900 px-5 py-3">
       <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">
         distinctive spectrogram
         {% if feature_clip %}<span class="normal-case text-zinc-600">· {{ 'labelled good' if good_clips else 'highest confidence' }}</span>{% endif %}
       </div>
       {% if feature_clip %}
         {{ spectrogram_button(feature_clip, big=true) }}
+      {% else %}
+        <div class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no audio captured yet</div>
+      {% endif %}
+    </div>
+    <div class="bg-zinc-900 px-5 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">
+        latest spectrogram
+        {% if latest_clip %}<span class="normal-case text-zinc-600">· {{ latest_clip.source_name }} {{ latest_clip.started_at | localtime(source_tz.get(latest_clip.source_name, 'UTC'), '%b %-d %H:%M') }}</span>{% endif %}
+      </div>
+      {% if latest_clip %}
+        {{ spectrogram_button(latest_clip, big=true) }}
       {% else %}
         <div class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no audio captured yet</div>
       {% endif %}
@@ -442,6 +465,33 @@
   // continents around them) reads at a glance. Click-to-interact unlocks
   // pan/zoom; the locked map widget defaults to the whole world.
   map.setView([10, 0], 1);
+})();
+</script>
+
+{# Compact header map: same site bubbles, but zoomed to where it's actually
+   heard (fit to the markers) rather than a world overview. #}
+<script>
+(function () {
+  const el = document.getElementById('species-heard-mini');
+  if (!el) return;
+  const SITES = {{ sites_for_map | tojson }};
+  const SOURCE_COLORS = {{ source_colors | tojson }};
+  const map = L.map('species-heard-mini', { worldCopyJump: false });
+  lockMap(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OSM', maxZoom: 18, noWrap: true,
+  }).addTo(map);
+  const pts = [];
+  SITES.forEach(s => {
+    const fill = SOURCE_COLORS[s.name] || '#10b981';
+    L.circleMarker([s.lat, s.lon], {
+      radius: 5, color: fill, weight: 1, fillColor: fill, fillOpacity: 0.85,
+    }).bindTooltip(`${s.name} · ${s.count}`, { direction: 'top', className: 'site-label' }).addTo(map);
+    pts.push([s.lat, s.lon]);
+  });
+  if (pts.length === 1) map.setView(pts[0], 6);
+  else if (pts.length > 1) map.fitBounds(pts, { padding: [22, 22], maxZoom: 9 });
+  else map.setView([10, 20], 2);
 })();
 </script>
 {% endif %}
