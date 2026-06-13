@@ -379,119 +379,46 @@
   </div>
 </section>
 
-<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
-  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3 flex-wrap">
-    <h3 class="text-sm uppercase tracking-wider text-zinc-400">
-      Where it's heard
-      <span class="text-zinc-500 normal-case text-xs ml-1">bubble size = detections per site · click to filter</span>
-    </h3>
-    <div class="flex items-center gap-3 text-xs">
-      <span class="text-zinc-400">
-        {% if active_source %}<a href="/site/{{ active_source | urlencode }}" class="text-emerald-300 hover:text-emerald-200" title="open {{ active_source }} site page">{{ active_source }}</a>{% else %}all sites{% endif %}
-      </span>
-      {% if all_sources %}
-        <form method="get" action="/species/{{ scientific | urlencode }}" onchange="this.submit()">
-          {% set filters = {'source': active_source} %}
-          {% include "_source_filter.html" %}
-        </form>
-      {% endif %}
-    </div>
-  </div>
-  {% if sites_for_map %}
-    <div id="species-map" class="w-full" style="height: 340px;"></div>
-  {% else %}
-    <p class="text-zinc-500 text-sm px-5 py-6">No mapped locations for this species.</p>
-  {% endif %}
-</section>
-
 {% if sites_for_map %}
+{# Compact header map. Matches the distribution map's frame (fit to the
+   African continent) rather than tightly zooming the markers, so the two
+   header maps read at the same scale. All detection sites shown as small
+   bubbles, no labels; the active-filter site is ringed in white. Clicking a
+   bubble filters the page to that site (clicking the active one clears it) —
+   this is the only site filter now that the big map below is gone. #}
 <script>
 (function () {
+  const el = document.getElementById('species-heard-mini');
+  if (!el) return;
   const SITES = {{ sites_for_map | tojson }};
   const ACTIVE = {{ active_source | tojson }};
   const SCI = {{ scientific | tojson }};
   const SOURCE_COLORS = {{ source_colors | tojson }};
-  const DEFAULT_COLOR = '#10b981';
 
   function speciesUrl(source) {
     const base = '/species/' + encodeURIComponent(SCI);
     return source ? base + '?source=' + encodeURIComponent(source) : base;
   }
 
-  const map = L.map('species-map', {
-    scrollWheelZoom: true,
-    worldCopyJump: false,
-    // Constrain panning to one world so you can't slide off into the void;
-    // viscosity 1 makes the bounce hard.
-    maxBounds: [[-85, -180], [85, 180]],
-    maxBoundsViscosity: 1.0,
-  });
-  lockMap(map);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap',
-    maxZoom: 18,
-    // noWrap stops Leaflet from rendering a second copy of the world to
-    // the east/west — at z=1 the globe is only 512 px wide so without
-    // this you see two duplicate continents side by side.
-    noWrap: true,
-  }).addTo(map);
-
-  // One small, uniform bubble per site that recorded this species. Colour
-  // comes from the per-site biome palette so the marker matches the legend
-  // on /species and /confidence. The active-filter site gets a thick white
-  // ring around its bubble (same fill colour) so it stands out without
-  // changing its identity.
-  const RADIUS = 7;
-  const markers = [];
-  SITES.forEach(s => {
-    const isActive = ACTIVE && s.name === ACTIVE;
-    const fill = SOURCE_COLORS[s.name] || DEFAULT_COLOR;
-    const m = L.circleMarker([s.lat, s.lon], {
-      radius: RADIUS,
-      color: isActive ? '#fafafa' : fill,
-      weight: isActive ? 3 : 1,
-      fillColor: fill,
-      fillOpacity: 0.85,
-    }).addTo(map);
-    m.bindTooltip(`${s.name} · ${s.count}`, {
-      permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
-    });
-    // Clicking the active site clears the filter; any other site applies it.
-    m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
-    markers.push(m);
-  });
-
-  // Default to a global overview so the spread of sites (and the empty
-  // continents around them) reads at a glance. Click-to-interact unlocks
-  // pan/zoom; the locked map widget defaults to the whole world.
-  map.setView([10, 0], 1);
-})();
-</script>
-
-{# Compact header map: same site bubbles, but zoomed to where it's actually
-   heard (fit to the markers) rather than a world overview. #}
-<script>
-(function () {
-  const el = document.getElementById('species-heard-mini');
-  if (!el) return;
-  const SITES = {{ sites_for_map | tojson }};
-  const SOURCE_COLORS = {{ source_colors | tojson }};
   const map = L.map('species-heard-mini', { worldCopyJump: false });
   lockMap(map);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OSM', maxZoom: 18, noWrap: true,
   }).addTo(map);
-  const pts = [];
   SITES.forEach(s => {
+    const isActive = ACTIVE && s.name === ACTIVE;
     const fill = SOURCE_COLORS[s.name] || '#10b981';
-    L.circleMarker([s.lat, s.lon], {
-      radius: 5, color: fill, weight: 1, fillColor: fill, fillOpacity: 0.85,
-    }).bindTooltip(`${s.name} · ${s.count}`, { direction: 'top', className: 'site-label' }).addTo(map);
-    pts.push([s.lat, s.lon]);
+    const m = L.circleMarker([s.lat, s.lon], {
+      radius: 5,
+      color: isActive ? '#fafafa' : fill,
+      weight: isActive ? 3 : 1,
+      fillColor: fill, fillOpacity: 0.85,
+    }).addTo(map);
+    m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
   });
-  if (pts.length === 1) map.setView(pts[0], 6);
-  else if (pts.length > 1) map.fitBounds(pts, { padding: [22, 22], maxZoom: 9 });
-  else map.setView([10, 20], 2);
+  // Same extent as the GBIF distribution map's African frame
+  // (CONTINENT_BBOX.AF) so the two maps line up visually.
+  map.fitBounds([[-35, -20], [38, 55]], { padding: [8, 8] });
 })();
 </script>
 {% endif %}
