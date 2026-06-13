@@ -476,7 +476,7 @@
             fillColor: fill, fillOpacity: 0.85,
           }).addTo(big);
           m.bindTooltip(`${s.name} · ${s.count}`, {
-            permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
+            direction: 'top', offset: [0, -4], className: 'site-label',
           });
           m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
         });
