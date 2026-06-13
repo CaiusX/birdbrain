@@ -380,12 +380,27 @@
 </section>
 
 {% if sites_for_map %}
-{# Compact header map. Matches the distribution map's frame (fit to the
-   African continent) rather than tightly zooming the markers, so the two
-   header maps read at the same scale. All detection sites shown as small
-   bubbles, no labels; the active-filter site is ringed in white. Clicking a
-   bubble filters the page to that site (clicking the active one clears it) —
-   this is the only site filter now that the big map below is gone. #}
+{# Enlarged "where it's heard" map, opened by clicking the header thumbnail.
+   Zoomed to the spread of detection sites; each bubble is clickable to filter
+   the page to that site (active one clears the filter), labelled with name +
+   count. #}
+<dialog id="heard-map-modal"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 max-w-4xl w-full max-h-[92vh] overflow-hidden backdrop:bg-black/70">
+  <div class="flex items-center justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <h3 class="text-sm uppercase tracking-wider text-zinc-400">
+      Where it's heard
+      <span class="text-zinc-500 normal-case text-xs ml-1">click a site to filter this page to it</span>
+    </h3>
+    <button type="button" id="heard-map-close"
+            class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
+  </div>
+  <div id="heard-map-big" class="w-full" style="height: 70vh;"></div>
+</dialog>
+
+{# Header thumbnail map. Static (not pannable) and framed on the African
+   continent so it lines up with the distribution map beside it; all detection
+   sites shown as small bubbles, no labels, the active-filter site ringed in
+   white. The whole thumbnail is a button that opens the enlarged map above. #}
 <script>
 (function () {
   const el = document.getElementById('species-heard-mini');
@@ -399,26 +414,86 @@
     const base = '/species/' + encodeURIComponent(SCI);
     return source ? base + '?source=' + encodeURIComponent(source) : base;
   }
+  function fitSites(map) {
+    const pts = SITES.map(s => [s.lat, s.lon]);
+    if (pts.length === 1) map.setView(pts[0], 9);
+    else if (pts.length > 1) map.fitBounds(pts, { padding: [40, 40], maxZoom: 10 });
+    else map.setView([10, 20], 3);
+  }
 
-  const map = L.map('species-heard-mini', { worldCopyJump: false });
-  lockMap(map);
+  // --- Header thumbnail: a non-interactive snapshot framed on Africa. Every
+  // handler is off so a click bubbles up to open the modal instead of
+  // panning the map.
+  const mini = L.map('species-heard-mini', {
+    zoomControl: false, attributionControl: false, worldCopyJump: false,
+    dragging: false, scrollWheelZoom: false, doubleClickZoom: false,
+    boxZoom: false, keyboard: false, touchZoom: false, tap: false,
+  });
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OSM', maxZoom: 18, noWrap: true,
-  }).addTo(map);
+  }).addTo(mini);
   SITES.forEach(s => {
     const isActive = ACTIVE && s.name === ACTIVE;
     const fill = SOURCE_COLORS[s.name] || '#10b981';
-    const m = L.circleMarker([s.lat, s.lon], {
+    L.circleMarker([s.lat, s.lon], {
       radius: 5,
       color: isActive ? '#fafafa' : fill,
       weight: isActive ? 3 : 1,
       fillColor: fill, fillOpacity: 0.85,
-    }).addTo(map);
-    m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
+      interactive: false,  // clicks pass through to the container → open modal
+    }).addTo(mini);
   });
-  // Same extent as the GBIF distribution map's African frame
-  // (CONTINENT_BBOX.AF) so the two maps line up visually.
-  map.fitBounds([[-35, -20], [38, 55]], { padding: [8, 8] });
+  // Same extent as the GBIF distribution map's African frame so the two
+  // header maps line up visually.
+  mini.fitBounds([[-35, -20], [38, 55]], { padding: [8, 8] });
+  const miniEl = mini.getContainer();
+  miniEl.style.cursor = 'zoom-in';
+  miniEl.title = 'Click to enlarge';
+
+  // --- Enlarged interactive map in a dialog. Leaflet must measure a visible,
+  // sized container, so the map is created/refreshed AFTER showModal() puts
+  // the dialog on screen (an invisible 0×0 container yields nonsense zoom).
+  const dialog = document.getElementById('heard-map-modal');
+  const closeBtn = document.getElementById('heard-map-close');
+  let big = null;
+
+  function openModal() {
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+    requestAnimationFrame(() => {
+      if (!big) {
+        big = L.map('heard-map-big', { worldCopyJump: false });
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap', maxZoom: 18, noWrap: true,
+        }).addTo(big);
+        SITES.forEach(s => {
+          const isActive = ACTIVE && s.name === ACTIVE;
+          const fill = SOURCE_COLORS[s.name] || '#10b981';
+          const m = L.circleMarker([s.lat, s.lon], {
+            radius: 8,
+            color: isActive ? '#fafafa' : fill,
+            weight: isActive ? 3 : 1,
+            fillColor: fill, fillOpacity: 0.85,
+          }).addTo(big);
+          m.bindTooltip(`${s.name} · ${s.count}`, {
+            permanent: true, direction: 'right', offset: [8, 0], className: 'site-label',
+          });
+          m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
+        });
+      }
+      big.invalidateSize();
+      fitSites(big);
+    });
+  }
+  function closeModal() {
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+  }
+
+  miniEl.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  dialog.addEventListener('cancel', closeModal);
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) closeModal(); });
 })();
 </script>
 {% endif %}
