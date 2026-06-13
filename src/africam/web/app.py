@@ -211,6 +211,9 @@ SOURCE_COLORS: dict[str, str] = {
     "Mpala Watering Hole": "#4d7c0f",  # Laikipia acacia plateau — lime-700
     "Stony Point":         "#1d4ed8",  # Coastal Atlantic colony — blue-700
     "Elephant Pan":        "#7c2d12",  # Tuli rusty riparian     — orange-900
+    "Kalahari":            "#92400e",  # Kalahari red dune sand  — amber-800
+    "Namib Desert":        "#fdba74",  # Namib pale dune sand    — orange-300
+    "Okaukuejo":           "#d6d3d1",  # Etosha white salt pan   — stone-300
 }
 
 
