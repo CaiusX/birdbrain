@@ -1,25 +1,28 @@
 {% extends "base.html" %}
 {% from "_macros.html" import species_link %}
-{% block title %}BirdBrain · rollup{% endblock %}
+{% block title %}BirdBrain · scoreboard{% endblock %}
 
 {% block content %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Rollup
+      Site scoreboard
       <span class="text-zinc-200 ml-2">{{ total }}</span>
-      <span class="text-zinc-500 text-xs ml-1">detections in last {{ hours }}h</span>
+      <span class="text-zinc-500 text-xs ml-1">detections in last {{ hours }}h · busiest first</span>
     </h2>
-    <div class="flex gap-1 text-xs">
-      <span class="text-zinc-500 self-center mr-1">window:</span>
-      {% for w in windows %}
-        {% set label = (w ~ 'h') if w < 48 else ((w // 24) ~ 'd') %}
-        {% if w == hours %}
-          <span class="px-2 py-0.5 rounded bg-zinc-700 text-zinc-100">{{ label }}</span>
-        {% else %}
-          <a href="/rollup?hours={{ w }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">{{ label }}</a>
-        {% endif %}
-      {% endfor %}
+    <div class="flex items-center gap-3 text-xs">
+      <a href="/diurnal" class="text-zinc-500 hover:text-emerald-300">hour-of-day patterns →</a>
+      <div class="flex gap-1">
+        <span class="text-zinc-500 self-center mr-1">window:</span>
+        {% for w in windows %}
+          {% set label = (w ~ 'h') if w < 48 else ((w // 24) ~ 'd') %}
+          {% if w == hours %}
+            <span class="px-2 py-0.5 rounded bg-zinc-700 text-zinc-100">{{ label }}</span>
+          {% else %}
+            <a href="/scoreboard?hours={{ w }}" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800">{{ label }}</a>
+          {% endif %}
+        {% endfor %}
+      </div>
     </div>
   </div>
 
@@ -27,20 +30,22 @@
     <table class="w-full text-sm">
       <thead class="text-zinc-400 text-xs uppercase tracking-wider">
         <tr class="border-b border-zinc-800">
-          <th class="text-left font-medium px-5 py-2">Site</th>
-          <th class="text-right font-medium px-5 py-2">Count</th>
+          <th class="text-right font-medium pl-5 pr-2 py-2 w-8">#</th>
+          <th class="text-left font-medium px-3 py-2">Site</th>
+          <th class="text-right font-medium px-5 py-2">Detections</th>
           <th class="text-right font-medium px-5 py-2">Species</th>
           <th class="text-right font-medium px-5 py-2">Mean conf</th>
-          <th class="text-left font-medium px-5 py-2">Hourly</th>
+          <th class="text-left font-medium px-5 py-2">Activity <span class="normal-case text-zinc-600">· last {{ hours }}h</span></th>
         </tr>
       </thead>
       <tbody class="divide-y divide-zinc-800">
         {% for r in rollup_rows %}
           <tr class="hover:bg-zinc-800/40">
-            <td class="px-5 py-3 font-medium">
+            <td class="pl-5 pr-2 py-3 text-right tabular-nums text-zinc-500">{{ loop.index }}</td>
+            <td class="px-3 py-3 font-medium">
               <a href="/site/{{ r.source }}" class="hover:text-emerald-300">{{ r.source }}</a>
             </td>
-            <td class="px-5 py-3 text-right tabular-nums">{{ r.count }}</td>
+            <td class="px-5 py-3 text-right tabular-nums text-zinc-100">{{ "{:,}".format(r.count) }}</td>
             <td class="px-5 py-3 text-right tabular-nums">{{ r.species }}</td>
             <td class="px-5 py-3 text-right tabular-nums">{{ "%.2f"|format(r.mean_conf) }}</td>
             <td class="px-5 py-3">
@@ -104,40 +109,6 @@
           {% endfor %}
         </tbody>
       </table>
-
-      <div class="border-t border-zinc-800 px-5 py-3">
-        <h4 class="text-xs uppercase tracking-wider text-zinc-500 mb-2">
-          Diurnal activity
-          <span class="text-zinc-600 normal-case ml-1">(hour of day in {{ s.tz | tz_abbr }} · cell shade = relative within species)</span>
-        </h4>
-        <div class="overflow-x-auto">
-          <table class="text-[10px] tabular-nums">
-            <thead class="text-zinc-600">
-              <tr>
-                <th class="text-left pr-3"></th>
-                {% for h in range(24) %}
-                  <th class="px-0.5 w-5 text-center {% if h in [0, 6, 12, 18] %}text-zinc-400{% endif %}">{{ "%02d"|format(h) }}</th>
-                {% endfor %}
-              </tr>
-            </thead>
-            <tbody>
-              {% for sp in s.species %}
-                <tr>
-                  <td class="pr-3 py-0.5 whitespace-nowrap text-zinc-300">{{ species_link(sp.common, sp.scientific, cls="hover:text-emerald-300") }}</td>
-                  {% for c in sp.hours %}
-                    {% set alpha = (c / sp.peak_hour) if c > 0 else 0 %}
-                    <td class="w-5 h-4 px-0.5 py-0.5 text-center text-zinc-200"
-                        style="background-color: rgba(16, 185, 129, {{ alpha }});"
-                        title="{{ sp.common }} · {{ "%02d"|format(loop.index0) }}:00 · {{ c }} detection{{ '' if c == 1 else 's' }}">
-                      {% if c > 0 %}{{ c }}{% endif %}
-                    </td>
-                  {% endfor %}
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
     {% else %}
       <p class="text-zinc-500 text-sm px-5 py-4">No species in window.</p>
     {% endif %}

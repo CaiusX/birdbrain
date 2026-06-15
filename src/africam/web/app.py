@@ -3135,8 +3135,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             request, "_system_health.html", _health_view()
         )
 
-    @app.get("/rollup", response_class=HTMLResponse)
-    def rollup(
+    @app.get("/scoreboard", response_class=HTMLResponse)
+    def scoreboard(
         request: Request,
         hours: int = Query(default=24, ge=1, le=24 * 14),
         top: int = Query(default=8, ge=1, le=50),
@@ -3183,7 +3183,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             # computed in the source's local timezone (so dawn-chorus peaks
             # land on the morning hours regardless of where the camera is).
             cfg_for_src = sources_by_name.get(src_name)
-            src_tz = _zone_info(cfg_for_src.timezone if cfg_for_src else "UTC")
             stats: dict[str, dict] = {}
             for r in src_rows:
                 d = stats.setdefault(
@@ -3195,7 +3194,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         "max_conf": 0.0,
                         "best_id": r.id,
                         "best_at": r.started_at,
-                        "hours": [0] * 24,
                     },
                 )
                 d["count"] += 1
@@ -3203,13 +3201,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     d["max_conf"] = r.confidence
                     d["best_id"] = r.id
                     d["best_at"] = r.started_at
-                ts = r.started_at
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=UTC)
-                d["hours"][ts.astimezone(src_tz).hour] += 1
+            # Hour-of-day patterns live on /diurnal; here we just rank species.
             ordered = sorted(stats.values(), key=lambda d: d["count"], reverse=True)[:top]
-            for d in ordered:
-                d["peak_hour"] = max(d["hours"]) or 1
             per_source_top.append(
                 {
                     "source": src_name,
@@ -3218,10 +3211,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 }
             )
 
+        # Rank busiest site first — it's a scoreboard. Keep the per-site
+        # species sections in the same order.
+        rollup_rows.sort(key=lambda r: r["count"], reverse=True)
+        rank = {r["source"]: i for i, r in enumerate(rollup_rows)}
+        per_source_top.sort(key=lambda x: rank.get(x["source"], 1 << 30))
+
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         return TEMPLATES.TemplateResponse(
             request,
-            "rollup.html",
+            "scoreboard.html",
             {
                 "hours": hours,
                 "top": top,
@@ -3232,6 +3231,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "source_tz": source_tz,
                 "windows": [1, 6, 24, 48, 168],
             },
+        )
+
+    @app.get("/rollup")
+    def rollup_redirect(request: Request) -> RedirectResponse:
+        """Old name for the site scoreboard — keep the URL working."""
+        q = request.url.query
+        return RedirectResponse(
+            "/scoreboard" + (("?" + q) if q else ""), status_code=307
         )
 
     def _detections_context(
