@@ -31,10 +31,14 @@
 {% set st = front_stats %}
 
 {# ---- 1. headline stats ---- #}
-<section class="grid grid-cols-2 md:grid-cols-4 gap-px bg-zinc-800/50 rounded-xl overflow-hidden border border-zinc-800 mb-6">
+<section class="grid grid-cols-2 md:grid-cols-5 gap-px bg-zinc-800/50 rounded-xl overflow-hidden border border-zinc-800 mb-6">
   <div class="bg-zinc-900 px-5 py-3">
     <div class="text-[10px] uppercase tracking-wider text-zinc-500">species · 24h</div>
     <div class="text-2xl font-semibold tabular-nums text-emerald-300">{{ st.species_24h }}</div>
+  </div>
+  <div class="bg-zinc-900 px-5 py-3">
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">species · all time</div>
+    <div class="text-2xl font-semibold tabular-nums text-emerald-300">{{ "{:,}".format(st.species_all) }}</div>
   </div>
   <div class="bg-zinc-900 px-5 py-3">
     <div class="text-[10px] uppercase tracking-wider text-zinc-500">detections · 24h</div>

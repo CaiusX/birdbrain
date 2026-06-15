@@ -489,6 +489,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 .where(DetectionRow.started_at >= since)
             ).all()
             last_det = s.execute(select(func.max(DetectionRow.started_at))).scalar()
+            # Distinct species ever recorded (matches the 24h metric's counting
+            # — no replay filter — so the two species numbers are comparable).
+            species_all = s.execute(
+                select(func.count(func.distinct(DetectionRow.scientific_name)))
+            ).scalar()
 
         # tz per source (cached) — drives source-local hour bucketing + bands.
         tz_cache: dict[str, ZoneInfo] = {}
@@ -575,6 +580,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         )
         stats = {
             "species_24h": len(species_seen),
+            "species_all": int(species_all or 0),
             "det_24h": det_24h,
             "cams_live": cams_live,
             "cams_total": len(ordered),
