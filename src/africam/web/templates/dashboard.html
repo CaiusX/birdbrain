@@ -80,23 +80,32 @@
       <h2 class="text-base font-medium text-zinc-200 leading-snug">
         Listening to {{ sites_activity | length }} African wildlife cameras
       </h2>
-      <p class="mt-3 text-sm text-zinc-300 leading-relaxed max-w-md">
-        BirdBrain pulls the audio from
-        <a href="https://africam.com/" target="_blank" rel="noopener"
-           class="text-emerald-300 hover:text-emerald-200">Africam</a>
-        and <a href="https://explore.org/" target="_blank" rel="noopener"
-           class="text-emerald-300 hover:text-emerald-200">explore.org</a>
-        live cams across Southern and East Africa, runs
+      <p class="mt-2 text-sm text-zinc-400 leading-relaxed max-w-md">
         <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener"
            class="text-emerald-300 hover:text-emerald-200">BirdNET</a>
-        on rolling three-second windows, and logs what it hears.
+        on live <a href="https://africam.com/" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">Africam</a>
+        /<a href="https://explore.org/" target="_blank" rel="noopener"
+           class="text-emerald-300 hover:text-emerald-200">explore.org</a>
+        cams across Southern &amp; East Africa — logging what it hears, as it hears it.
       </p>
-      <p class="mt-3 text-sm text-zinc-300 leading-relaxed max-w-md">
-        Each dot on the map is a camera. The threads between them weigh
-        species heard at both sites over the last 30 days — a rough read
-        on which cameras share their soundscape. Click a dot for that
-        site's 24-hour activity clock and most-recently-heard species.
-      </p>
+      {# Recently heard: most-recent distinct species across the network. #}
+      <div class="mt-5 border-t border-zinc-800 pt-4">
+        <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">recently heard</div>
+        {% if recently_heard %}
+          <ul class="space-y-1.5">
+            {% for sp in recently_heard %}
+              <li class="flex items-baseline justify-between gap-3 text-sm">
+                <a href="/species/{{ sp.scientific | urlencode }}"
+                   class="text-zinc-200 hover:text-emerald-300 truncate" title="{{ sp.scientific }}">{{ sp.common }}</a>
+                <span class="text-xs text-zinc-500 tabular-nums shrink-0">{{ ago(sp.age_s) }} ago</span>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="text-sm text-zinc-600">nothing yet</p>
+        {% endif %}
+      </div>
       <p class="mt-auto pt-4 text-xs text-zinc-500">
         Hosted on a Raspberry Pi 5. Non-commercial; BirdNET models
         <a href="/about" class="text-zinc-400 hover:text-zinc-200">CC&nbsp;BY-NC-SA&nbsp;4.0</a>.

@@ -796,6 +796,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             )
             rows = _group_detections(raw, group_minutes * 60)[:50]
+            # Most-recently-heard distinct species across the network (replays
+            # excluded), for the "recently heard" panel beside the map.
+            recent_sp = s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    func.max(DetectionRow.common_name),
+                    func.max(DetectionRow.started_at),
+                )
+                .where(Database.not_replay_predicate())
+                .group_by(DetectionRow.scientific_name)
+                .order_by(desc(func.max(DetectionRow.started_at)))
+                .limit(8)
+            ).all()
+        _now = datetime.now(UTC)
+        recently_heard = []
+        for sci, common, last in recent_sp:
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=UTC)
+            recently_heard.append({
+                "scientific": sci,
+                "common": common or sci,
+                "age_s": max(0, int((_now - last).total_seconds())) if last else None,
+            })
 
         sites_activity, front_stats, site_pairs = _front_activity(sources_by_name)
         tiles_for_js = [
@@ -816,6 +839,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "dashboard.html",
             {
                 "rows": rows,
+                "recently_heard": recently_heard,
                 "tiles": tiles,
                 "tiles_json": tiles_for_js,
                 "sites": sorted(sites.values(), key=lambda s: s.name),
