@@ -5163,25 +5163,43 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         MP3. Async so client disconnect cancels the generator and kills ffmpeg
         promptly; a 10-min ffmpeg cap is the backstop for a forgotten tab."""
         cfg_src = _all_sources()[1].get(name)
-        if cfg_src is None or cfg_src.kind != "youtube":
-            raise HTTPException(404, "No live audio for this site")
-        from africam.audio.youtube import YouTubeSource
+        if cfg_src is None:
+            raise HTTPException(404, "No such source")
 
-        def _resolve() -> str:
-            return YouTubeSource(
-                name=cfg_src.name,
-                url=cfg_src.url,
-                cookies_file=str(cfg_src.cookies_file) if cfg_src.cookies_file else None,
-            ).current_url()
+        if cfg_src.kind == "youtube":
+            from africam.audio.youtube import YouTubeSource
 
-        try:
-            # Bound the yt-dlp resolve so a slow/rate-limited lookup fails the
-            # request fast instead of hanging it.
-            stream_url = await asyncio.wait_for(asyncio.to_thread(_resolve), timeout=25)
-        except TimeoutError as e:
-            raise HTTPException(504, "stream resolve timed out (try again)") from e
-        except Exception as e:
-            raise HTTPException(502, f"could not resolve stream: {e}") from e
+            def _resolve() -> str:
+                return YouTubeSource(
+                    name=cfg_src.name,
+                    url=cfg_src.url,
+                    cookies_file=str(cfg_src.cookies_file) if cfg_src.cookies_file else None,
+                ).current_url()
+
+            try:
+                # Bound the yt-dlp resolve so a slow/rate-limited lookup fails
+                # the request fast instead of hanging it.
+                stream_url = await asyncio.wait_for(asyncio.to_thread(_resolve), timeout=25)
+            except TimeoutError as e:
+                raise HTTPException(504, "stream resolve timed out (try again)") from e
+            except Exception as e:
+                raise HTTPException(502, f"could not resolve stream: {e}") from e
+            input_args = [
+                "-reconnect", "1", "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5", "-i", stream_url,
+            ]
+        elif cfg_src.kind == "device":
+            # Local mic. A PipeWire/pulse source ("pulse:…") can be read live
+            # alongside the detection worker (PipeWire shares the capture); raw
+            # ALSA is exclusive, so audition only works for the pulse form.
+            if cfg_src.url.startswith("pulse:"):
+                input_args = ["-f", "pulse", "-i", cfg_src.url[len("pulse:"):]]
+            else:
+                raise HTTPException(
+                    409, "mic is on raw ALSA (exclusive) — route it via pulse: to audition"
+                )
+        else:
+            raise HTTPException(404, "No live audio for this source")
 
         # Plain Popen (asyncio subprocesses are unreliable under uvicorn), read
         # off the event loop via to_thread so the request can still be cancelled
@@ -5190,10 +5208,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         proc = subprocess.Popen(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-reconnect", "1", "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "5",
                 "-t", "600",  # 10-min safety cap so a forgotten tab can't stream forever
-                "-i", stream_url,
+                *input_args,
                 "-vn", "-ac", "1", "-ar", "44100", "-b:a", "96k",
                 "-f", "mp3", "-",
             ],

@@ -26,15 +26,25 @@ class AlsaSource(AudioSource):
         self.url = url
 
     def _ffmpeg_command(self) -> list[str]:
+        # url is either a raw ALSA device ("plughw:CARD=...") or a PipeWire/
+        # PulseAudio source prefixed "pulse:" (e.g. "pulse:alsa_input.usb-...").
+        # Raw ALSA is exclusive (one client); routing through PipeWire lets the
+        # capture be SHARED — e.g. so the admin can audition the mic live while
+        # the worker keeps detecting. Needs XDG_RUNTIME_DIR in the env (the
+        # systemd --user services have it).
+        if self.url.startswith("pulse:"):
+            fmt, dev = "pulse", self.url[len("pulse:"):]
+        else:
+            fmt, dev = "alsa", self.url
         return [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "error",
-            "-f", "alsa",
-            # Decouple the ALSA capture thread from downstream so a momentary
-            # stall doesn't drop samples ("ALSA buffer xrun").
+            "-f", fmt,
+            # Decouple the capture thread from downstream so a momentary stall
+            # doesn't drop samples ("ALSA buffer xrun").
             "-thread_queue_size", "1024",
-            "-i", self.url,
+            "-i", dev,
             "-ac", "1",
             "-ar", str(self.sample_rate),
             "-f", "s16le",
