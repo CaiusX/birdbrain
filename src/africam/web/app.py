@@ -718,6 +718,19 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         through the tunnel (middleware only blocks /admin + mutating verbs)."""
         return TEMPLATES.TemplateResponse(request, "about.html", {})
 
+    @app.get("/api/species/list")
+    def species_list() -> JSONResponse:
+        """All detected species (scientific + common) — feeds the header search
+        box, which fetches this once and filters client-side."""
+        return JSONResponse(
+            {
+                "species": [
+                    {"scientific": sci, "common": common}
+                    for sci, common in db.list_detected_species()
+                ]
+            }
+        )
+
     @app.get("/sandbox", response_class=HTMLResponse)
     def sandbox_page(request: Request) -> HTMLResponse:
         """Live monitor for sources in sandbox (test) mode: detections appear as

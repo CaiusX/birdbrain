@@ -131,15 +131,96 @@
           {% endif %}
         </nav>
       </div>
-      <div class="text-xs text-zinc-500 flex items-center gap-1.5 flex-wrap justify-end">
-        <span>data via <a href="https://africam.com/" target="_blank" rel="noopener" class="hover:text-zinc-200">Africam</a> + <a href="https://explore.org/" target="_blank" rel="noopener" class="hover:text-zinc-200">explore.org</a></span>
-        <span class="text-zinc-700">·</span>
-        <span>detection by <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="hover:text-zinc-200">BirdNET</a></span>
-        <span class="text-zinc-700">·</span>
-        <a href="/about" class="hover:text-zinc-200">about</a>
+      <div class="flex items-center gap-4">
+        {# Header species search: fetches the detected-species list once, filters
+           client-side, arrow/enter to navigate to a species page. #}
+        <div class="relative" id="bird-search">
+          <input id="bird-search-input" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="Search species…" aria-label="Search species"
+                 class="w-40 lg:w-56 bg-zinc-900 border border-zinc-800 rounded px-2.5 py-1 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-600">
+          <ul id="bird-search-results" role="listbox"
+              class="hidden absolute right-0 mt-1 w-72 max-h-80 overflow-y-auto bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl z-50 py-1 text-sm"></ul>
+        </div>
+        <div class="hidden lg:flex text-xs text-zinc-500 items-center gap-1.5 flex-wrap justify-end">
+          <span>data via <a href="https://africam.com/" target="_blank" rel="noopener" class="hover:text-zinc-200">Africam</a> + <a href="https://explore.org/" target="_blank" rel="noopener" class="hover:text-zinc-200">explore.org</a></span>
+          <span class="text-zinc-700">·</span>
+          <span>detection by <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="hover:text-zinc-200">BirdNET</a></span>
+          <span class="text-zinc-700">·</span>
+          <a href="/about" class="hover:text-zinc-200">about</a>
+        </div>
       </div>
     </div>
   </header>
+  <script>
+  (function () {
+    const input = document.getElementById('bird-search-input');
+    const results = document.getElementById('bird-search-results');
+    if (!input || !results) return;
+    let species = null, loading = false, items = [], active = -1;
+    function load() {
+      if (species || loading) return;
+      loading = true;
+      fetch('/api/species/list')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { species = (d && d.species) || []; render(); })
+        .catch(function () { species = []; });
+    }
+    function esc(t) { const d = document.createElement('div'); d.textContent = t || ''; return d.innerHTML; }
+    function filter(q) {
+      q = q.trim().toLowerCase();
+      if (!q || !species) return [];
+      const pre = [], sub = [];
+      for (const s of species) {
+        const c = (s.common || '').toLowerCase(), sci = (s.scientific || '').toLowerCase();
+        if (c.startsWith(q) || sci.startsWith(q)) pre.push(s);
+        else if (c.indexOf(q) !== -1 || sci.indexOf(q) !== -1) sub.push(s);
+      }
+      return pre.concat(sub).slice(0, 12);
+    }
+    function render() {
+      const q = input.value;
+      if (!q.trim()) { results.classList.add('hidden'); results.innerHTML = ''; items = []; return; }
+      items = filter(q);
+      active = items.length ? 0 : -1;
+      if (!items.length) {
+        results.innerHTML = '<li class="px-3 py-2 text-zinc-600">' + (species ? 'no match' : 'loading…') + '</li>';
+      } else {
+        results.innerHTML = items.map(function (s, i) {
+          return '<li role="option" data-i="' + i + '" class="px-3 py-1.5 cursor-pointer ' +
+            (i === active ? 'bg-zinc-800' : 'hover:bg-zinc-800/60') + '">' +
+            '<span class="text-zinc-100">' + esc(s.common || s.scientific) + '</span> ' +
+            '<span class="italic text-zinc-500 text-xs">' + esc(s.scientific) + '</span></li>';
+        }).join('');
+      }
+      results.classList.remove('hidden');
+    }
+    function go(i) { if (items[i]) window.location.href = '/species/' + encodeURIComponent(items[i].scientific); }
+    function setActive(i) {
+      active = (i + items.length) % items.length;
+      Array.prototype.forEach.call(results.children, function (el, idx) {
+        el.classList.toggle('bg-zinc-800', idx === active);
+        el.classList.toggle('hover:bg-zinc-800/60', idx !== active);
+      });
+    }
+    input.addEventListener('focus', load);
+    input.addEventListener('input', render);
+    input.addEventListener('keydown', function (e) {
+      if (!items.length) { if (e.key === 'Enter') e.preventDefault(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setActive(active + 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(active - 1); }
+      else if (e.key === 'Enter') { e.preventDefault(); go(active >= 0 ? active : 0); }
+      else if (e.key === 'Escape') { results.classList.add('hidden'); }
+    });
+    results.addEventListener('mousedown', function (e) {
+      const li = e.target.closest('li[data-i]');
+      if (li) { e.preventDefault(); go(parseInt(li.dataset.i, 10)); }
+    });
+    document.addEventListener('click', function (e) {
+      const box = document.getElementById('bird-search');
+      if (box && !box.contains(e.target)) results.classList.add('hidden');
+    });
+  })();
+  </script>
   <main class="max-w-6xl mx-auto px-6 py-8">
     {% block content %}{% endblock %}
   </main>
