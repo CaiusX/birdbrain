@@ -40,6 +40,13 @@
     <canvas id="audition-canvas" width="640" height="180"
             class="w-full rounded bg-zinc-950 block"></canvas>
     <audio id="audition-audio" controls class="w-full"></audio>
+    {# Mic gain — shown only for local-mic (pulse) sources. Adjusts the hardware
+       capture gain live via PipeWire; lower it to cut the noise floor. #}
+    <div id="audition-gain-row" class="hidden items-center gap-3 text-xs text-zinc-400">
+      <span class="uppercase tracking-wider text-[10px] text-zinc-500 shrink-0">mic gain</span>
+      <input id="audition-gain" type="range" min="0" max="100" step="1" class="flex-1 accent-sky-400">
+      <span id="audition-gain-val" class="tabular-nums w-9 text-right text-zinc-300">—</span>
+    </div>
   </div>
 </dialog>
 
@@ -282,6 +289,27 @@
       if (!panel.open) panel.showModal();
       cancelAnimationFrame(g.raf);
       draw();
+      // Mic gain control — only for pulse-routed local mics.
+      const gainRow = document.getElementById('audition-gain-row');
+      const gainEl = document.getElementById('audition-gain');
+      const gainVal = document.getElementById('audition-gain-val');
+      gainRow.classList.add('hidden');
+      fetch('/api/sources/' + encodeURIComponent(name) + '/mic-gain')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || !d.supported) return;
+          gainEl.value = Math.round((d.gain || 0) * 100);
+          gainVal.textContent = gainEl.value + '%';
+          gainRow.classList.remove('hidden');
+          gainRow.classList.add('flex');
+          gainEl.oninput = function () { gainVal.textContent = gainEl.value + '%'; };
+          gainEl.onchange = function () {
+            var body = new URLSearchParams({ gain: (gainEl.value / 100).toFixed(2) });
+            fetch('/api/sources/' + encodeURIComponent(name) + '/mic-gain',
+                  { method: 'POST', body: body }).catch(function () {});
+          };
+        })
+        .catch(function () {});
     };
     function teardown() {
       if (!G) return;

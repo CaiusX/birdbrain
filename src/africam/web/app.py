@@ -1198,6 +1198,61 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name, "lat": latv, "lon": lonv})
 
+    def _pw_mic_node(name: str) -> tuple[int | None, str]:
+        """Resolve a device source's PipeWire capture-node id (by node.name, so
+        it survives id reshuffles). Returns (id_or_None, reason)."""
+        cfg = _all_sources()[1].get(name)
+        if cfg is None or cfg.kind != "device" or not cfg.url.startswith("pulse:"):
+            return None, "not a pulse mic source"
+        target = cfg.url[len("pulse:"):]
+        try:
+            out = subprocess.run(
+                ["pw-dump"], capture_output=True, text=True, timeout=6
+            ).stdout
+            for o in json.loads(out):
+                props = (o.get("info") or {}).get("props") or {}
+                if props.get("node.name") == target and str(
+                    props.get("media.class", "")
+                ).startswith("Audio/Source"):
+                    return int(o["id"]), "ok"
+        except Exception as e:  # pw-dump missing / not running / parse error
+            return None, f"pipewire query failed: {e}"
+        return None, "mic not found in PipeWire (check it's connected)"
+
+    @app.get("/api/sources/{name}/mic-gain")
+    def get_mic_gain(name: str) -> JSONResponse:
+        """Current capture gain (0–1, where 1.0 = the device's max hardware gain)
+        for a pulse-routed mic. supported=False for anything else."""
+        node, reason = _pw_mic_node(name)
+        if node is None:
+            return JSONResponse({"supported": False, "reason": reason})
+        try:
+            out = subprocess.run(
+                ["wpctl", "get-volume", str(node)],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            gain = float(out.strip().split()[1])  # "Volume: 0.45"
+        except Exception:
+            return JSONResponse({"supported": False, "reason": "could not read volume"})
+        return JSONResponse({"supported": True, "gain": gain})
+
+    @app.post("/api/sources/{name}/mic-gain")
+    def set_mic_gain(name: str, gain: float = Form(...)) -> JSONResponse:
+        """Set a pulse mic's capture gain via PipeWire (maps to the hardware
+        preamp gain — lowering it cuts the noise floor). 0–1.0."""
+        node, reason = _pw_mic_node(name)
+        if node is None:
+            raise HTTPException(400, reason)
+        g = max(0.0, min(1.0, gain))
+        try:
+            subprocess.run(
+                ["wpctl", "set-volume", str(node), f"{g:.2f}"],
+                check=True, timeout=5,
+            )
+        except Exception as e:
+            raise HTTPException(500, f"set-volume failed: {e}") from e
+        return JSONResponse({"ok": True, "gain": g})
+
     @app.get("/api/sandbox/{name}")
     def sandbox_feed(name: str) -> JSONResponse:
         """Recent sandbox detections for a source — live monitor feed. In-memory
