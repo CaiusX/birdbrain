@@ -24,6 +24,11 @@ class AlsaSource(AudioSource):
     ) -> None:
         super().__init__(name=name, sample_rate=sample_rate, chunk_seconds=chunk_seconds)
         self.url = url
+        # Optional high-pass cutoff (Hz) applied at capture to cut low-frequency
+        # noise (rumble, wind, mains hum) below most bird calls. None/0 = off.
+        # Set live by the worker from the per-source setting; changing it
+        # relaunches ffmpeg (a filter is fixed for the life of the process).
+        self.highpass_hz: int | None = None
 
     def _ffmpeg_command(self) -> list[str]:
         # url is either a raw ALSA device ("plughw:CARD=...") or a PipeWire/
@@ -36,7 +41,7 @@ class AlsaSource(AudioSource):
             fmt, dev = "pulse", self.url[len("pulse:"):]
         else:
             fmt, dev = "alsa", self.url
-        return [
+        cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "error",
@@ -45,8 +50,8 @@ class AlsaSource(AudioSource):
             # doesn't drop samples ("ALSA buffer xrun").
             "-thread_queue_size", "1024",
             "-i", dev,
-            "-ac", "1",
-            "-ar", str(self.sample_rate),
-            "-f", "s16le",
-            "-",
         ]
+        if self.highpass_hz:
+            cmd += ["-af", f"highpass=f={int(self.highpass_hz)}"]
+        cmd += ["-ac", "1", "-ar", str(self.sample_rate), "-f", "s16le", "-"]
+        return cmd

@@ -1253,6 +1253,31 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(500, f"set-volume failed: {e}") from e
         return JSONResponse({"ok": True, "gain": g})
 
+    @app.get("/api/sources/{name}/highpass")
+    def get_highpass(name: str) -> JSONResponse:
+        """Current high-pass cutoff (Hz) for a device source; 0 = off."""
+        cfg = _all_sources()[1].get(name)
+        raw = db.get_setting(f"highpass_hz:{name}")
+        try:
+            hz = int(float(raw)) if raw else 0
+        except (TypeError, ValueError):
+            hz = 0
+        return JSONResponse(
+            {"supported": cfg is not None and cfg.kind == "device", "hz": hz}
+        )
+
+    @app.post("/api/sources/{name}/highpass")
+    def set_highpass(name: str, hz: int = Form(...)) -> JSONResponse:
+        """Set the capture high-pass cutoff (Hz) for a device source; 0 disables.
+        The worker relaunches ffmpeg with the new filter within ~60s; the
+        audition stream applies it on the next (re)fetch."""
+        cfg = _all_sources()[1].get(name)
+        if cfg is None or cfg.kind != "device":
+            raise HTTPException(400, "not a device source")
+        hz = max(0, min(20000, int(hz)))
+        db.set_setting(f"highpass_hz:{name}", str(hz) if hz > 0 else None)
+        return JSONResponse({"ok": True, "hz": hz})
+
     @app.get("/api/sandbox/{name}")
     def sandbox_feed(name: str) -> JSONResponse:
         """Recent sandbox detections for a source — live monitor feed. In-memory
@@ -5256,6 +5281,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         else:
             raise HTTPException(404, "No live audio for this source")
 
+        # Mirror the source's high-pass cutoff so the audition sounds like what
+        # the detector hears (and so the cutoff slider previews live on re-fetch).
+        filter_args: list[str] = []
+        if cfg_src.kind == "device":
+            hp_raw = db.get_setting(f"highpass_hz:{name}")
+            try:
+                hp = int(float(hp_raw)) if hp_raw else 0
+            except (TypeError, ValueError):
+                hp = 0
+            if hp > 0:
+                filter_args = ["-af", f"highpass=f={hp}"]
+
         # Plain Popen (asyncio subprocesses are unreliable under uvicorn), read
         # off the event loop via to_thread so the request can still be cancelled
         # on disconnect. The finally kills ffmpeg, which closes the pipe and
@@ -5265,6 +5302,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
                 "-t", "600",  # 10-min safety cap so a forgotten tab can't stream forever
                 *input_args,
+                *filter_args,
                 "-vn", "-ac", "1", "-ar", "44100", "-b:a", "96k",
                 "-f", "mp3", "-",
             ],

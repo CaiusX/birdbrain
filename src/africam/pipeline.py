@@ -90,6 +90,19 @@ def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
     raise ValueError(f"Unknown source kind: {cfg.kind!r}")
 
 
+def _source_highpass(db: Database, name: str) -> int | None:
+    """Per-source high-pass cutoff in Hz from app_settings (key
+    ``highpass_hz:<name>``), or None when unset/0. Polled live by the worker."""
+    raw = db.get_setting(f"highpass_hz:{name}")
+    if not raw:
+        return None
+    try:
+        hz = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return hz if hz > 0 else None
+
+
 def _build_resolver(
     cfg: SourceConfig,
     source: AudioSource,
@@ -166,6 +179,11 @@ def run_source(
     while not stop_event.is_set():
         started = time.monotonic()
         last_err = ""
+        # Apply the current high-pass cutoff before (re)launching capture. A
+        # change in /admin makes _consume_stream return so we relaunch here with
+        # the new value (ffmpeg filters are fixed for the process's lifetime).
+        if isinstance(source, AlsaSource):
+            source.highpass_hz = _source_highpass(db, cfg.name)
         try:
             _consume_stream(
                 source, resolver, cfg, app, detector, db, slog, stop_event,
@@ -282,6 +300,12 @@ def _consume_stream(
                         bool(db.get_setting(f"gate_highlights:{cfg.name}"))
                     )
                 sandbox_mode = bool(db.get_setting(f"sandbox:{cfg.name}"))
+                # If the high-pass cutoff changed in /admin, exit so run_source
+                # relaunches ffmpeg with the new filter (≤60s to take effect).
+                if isinstance(source, AlsaSource) and \
+                        _source_highpass(db, cfg.name) != source.highpass_hz:
+                    slog.info("highpass.relaunch", to=_source_highpass(db, cfg.name))
+                    return
                 # Flush the current audio-quality snapshot (once enough audio
                 # has accumulated to be meaningful). Detection yield over the
                 # last 6h is the masking signal — loud audio with ~no detections.

@@ -56,6 +56,18 @@
       <input id="audition-gain" type="range" min="0" max="100" step="1" class="flex-1 accent-sky-400">
       <span id="audition-gain-val" class="tabular-nums w-9 text-right text-zinc-300">—</span>
     </div>
+    {# High-pass cutoff — cuts low-frequency noise (rumble/hum/wind) below bird
+       calls. Affects the recording/detection; the audition previews it live. #}
+    <div id="audition-hp-row" class="hidden items-center gap-3 text-xs text-zinc-400">
+      <label class="flex items-center gap-1.5 shrink-0">
+        <input type="checkbox" id="audition-hp-on" class="accent-sky-400">
+        <span class="uppercase tracking-wider text-[10px] text-zinc-500">high-pass</span>
+      </label>
+      <input id="audition-hp-hz" type="number" min="0" max="2000" step="10"
+             class="w-20 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-xs tabular-nums">
+      <span class="text-zinc-500 shrink-0">Hz</span>
+      <span class="text-zinc-600 text-[10px]">applies to detection in ≤60s</span>
+    </div>
     <audio id="audition-audio" class="hidden"></audio>
   </div>
 </dialog>
@@ -324,6 +336,32 @@
             fetch('/api/sources/' + encodeURIComponent(name) + '/mic-gain',
                   { method: 'POST', body: body }).catch(function () {});
           };
+        })
+        .catch(function () {});
+      // High-pass cutoff (device sources). Re-fetches the audition stream so
+      // the filter is audible at once; the worker applies it to detection ≤60s.
+      var hpRow = document.getElementById('audition-hp-row');
+      var hpOn = document.getElementById('audition-hp-on');
+      var hpHz = document.getElementById('audition-hp-hz');
+      hpRow.classList.add('hidden'); hpRow.classList.remove('flex');
+      fetch('/api/sources/' + encodeURIComponent(name) + '/highpass')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d || !d.supported) return;
+          hpOn.checked = d.hz > 0;
+          hpHz.value = d.hz > 0 ? d.hz : 300;
+          hpRow.classList.remove('hidden'); hpRow.classList.add('flex');
+          function applyHp() {
+            var hz = hpOn.checked ? (parseInt(hpHz.value, 10) || 0) : 0;
+            fetch('/api/sources/' + encodeURIComponent(name) + '/highpass',
+                  { method: 'POST', body: new URLSearchParams({ hz: String(hz) }) })
+              .then(function () {
+                g.audio.src = '/api/sites/' + encodeURIComponent(name) + '/live.mp3?t=' + Date.now();
+                g.audio.play().catch(function () {});
+              }).catch(function () {});
+          }
+          hpOn.onchange = applyHp;
+          hpHz.onchange = applyHp;
         })
         .catch(function () {});
     };
