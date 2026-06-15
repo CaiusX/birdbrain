@@ -120,6 +120,14 @@ class YouTubeSource(AudioSource):
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "10",
+            # Bound the reconnect so ffmpeg can't loop forever on a dead/expired
+            # manifest (YouTube live URLs expire after a few hours). After a few
+            # failed retries, or rw_timeout with no data, ffmpeg exits cleanly;
+            # the worker's retry loop then re-resolves a FRESH URL via yt-dlp.
+            # Without these a stalled stream wedges ffmpeg indefinitely, leaking
+            # processes and memory that never EOF.
+            "-reconnect_max_retries", "5",
+            "-rw_timeout", "30000000",  # 30s (microseconds) with no data → fail
             "-i", stream_url,
             "-vn",
             "-ac", "1",

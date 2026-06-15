@@ -512,9 +512,15 @@
         thumbLink.href = data.page_url || '#';
         thumbLink.classList.remove('hidden');
       }
-      if (data.range_map) {
-        rangeImg.src = data.range_map;
-        rangeLink.href = data.range_map_page || data.page_url || '#';
+      // Prefer the static natural-range image (clean IUCN/BirdLife polygon);
+      // fall back to the GBIF/iNat occurrence tile, whose zoom-0 URL is itself
+      // a valid whole-world PNG that renders fine as a plain <img>.
+      const rangeSrc = data.range_map || data.range_tile;
+      if (rangeSrc) {
+        rangeImg.src = rangeSrc;
+        rangeLink.href = data.range_map
+          ? (data.range_map_page || data.page_url || '#')
+          : (data.range_tile_page || '#');
         rangeLink.classList.remove('hidden');
       }
       if (data.conservation_status) {

@@ -128,6 +128,12 @@ class SpeciesNoteRow(Base):
     image_page_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     range_map_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     range_map_page_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Geo-referenced occurrence tile (GBIF, iNat fallback) for the live Leaflet
+    # range map that carries our site dots. Stored separately from the static
+    # range_map_url image so a species can show both the IUCN polygon (as a
+    # small reference thumbnail) and the dotted occurrence map.
+    range_tile_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    range_tile_page_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     media_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

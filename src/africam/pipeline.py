@@ -29,6 +29,14 @@ log = get_logger(__name__)
 # How often the supervisor reconciles desired sources (toml + DB) with running threads.
 SUPERVISOR_INTERVAL = 15.0
 
+# Spacing between worker starts within a single reconcile pass. On a full
+# restart all ~11 YouTube workers become desired at once; starting them
+# simultaneously fires a burst of yt-dlp resolves from one IP, which trips
+# YouTube's "confirm you're not a bot" block and takes every source down.
+# Each worker waits start_delay = (its index in the batch) * this, so the
+# resolves spread out. Steady-state (0–1 new workers/tick) is unaffected.
+WORKER_START_STAGGER_S = 6.0
+
 # A worker that hasn't heartbeat in this long is presumed stuck (e.g. ffmpeg
 # blocked on a dead HLS stream). The watchdog kicks it and lets reconcile()
 # spawn a replacement. Generous vs. the 15 s heartbeat cadence so a slow
@@ -105,11 +113,14 @@ def run_source(
     db: Database,
     sites: dict[str, Site],
     stop_event: threading.Event,
+    start_delay: float = 0.0,
 ) -> None:
     """Pull chunks from one source and write detections, restarting on errors.
 
     Wrapped in a retry loop so that a transient failure doesn't kill the
-    worker. Exits cleanly when ``stop_event`` is set.
+    worker. Exits cleanly when ``stop_event`` is set. ``start_delay`` staggers
+    the first stream resolve so a batch start (e.g. full restart) doesn't fire
+    every source's yt-dlp call at once — see WORKER_START_STAGGER_S.
     """
     source = build_source(cfg, app)
     resolver = _build_resolver(cfg, source, sites, db)
@@ -119,6 +130,16 @@ def run_source(
         db.worker_started(cfg.name)
     except Exception:
         slog.exception("worker.heartbeat_started_failed")
+    # Stagger the first resolve. Interruptible so a stop during startup exits
+    # promptly; the delay (≤ ~1 min across the fleet) stays well under
+    # STALE_HEARTBEAT_S so the worker isn't kicked while waiting.
+    if start_delay and stop_event.wait(start_delay):
+        slog.info("pipeline.stopped")
+        try:
+            db.worker_stopped(cfg.name)
+        except Exception:
+            slog.exception("worker.heartbeat_stopped_failed")
+        return
 
     # Highlight-reel gate (per source, toggled live from /admin via the
     # app_settings key ``gate_highlights:<name>``). When the source is showing a
@@ -457,7 +478,9 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
                 # Don't join here — joining can block if ffmpeg is mid-read.
                 # The thread will exit once it notices the event.
                 del workers[name]
-        # Start workers for newly-desired sources.
+        # Start workers for newly-desired sources, staggering their first
+        # resolve so a batch start doesn't burst yt-dlp from one IP.
+        batch_idx = 0
         for name, cfg in desired.items():
             if name in workers and workers[name].thread.is_alive():
                 continue
@@ -465,12 +488,14 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
             t = threading.Thread(
                 target=run_source,
                 args=(cfg, app, detector, db, sites, stop_event),
+                kwargs={"start_delay": batch_idx * WORKER_START_STAGGER_S},
                 name=f"src-{name}",
                 daemon=True,
             )
             t.start()
             workers[name] = _Worker(cfg=cfg, thread=t, stop_event=stop_event)
             log.info("supervisor.started", source=name, kind=cfg.kind)
+            batch_idx += 1
 
     def kick_stale() -> None:
         """Drop stuck workers from the registry so reconcile() respawns them.

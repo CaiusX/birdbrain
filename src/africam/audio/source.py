@@ -84,6 +84,15 @@ class AudioSource(ABC):
                 if stop_event is not None and stop_event.is_set():
                     if proc.poll() is None:
                         proc.terminate()
+                        # A wedged ffmpeg (stuck retrying a dead/expired URL)
+                        # can ignore SIGTERM; escalate to SIGKILL so it can't
+                        # linger and leak. Without this the worker thread stays
+                        # blocked in _read_exact, so the finally-block's kill
+                        # never runs and the process survives for hours.
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
                     return
 
         if stop_event is not None:

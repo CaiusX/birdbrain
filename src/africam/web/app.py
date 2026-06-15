@@ -4524,9 +4524,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return None
 
     def _gbif_range_map(scientific: str) -> dict | None:
-        """GBIF fallback: when Wikipedia and Wikidata both have no range map,
-        GBIF's occurrence-density tile (CC-BY 4.0) is the next licence-clean
-        rung. Two cheap HTTPs — species/match to resolve the scientific name
+        """GBIF occurrence-density tile (CC-BY 4.0) — the geo-referenced range
+        layer we always try, since it's the basemap our site dots sit on.
+        Two cheap HTTPs — species/match to resolve the scientific name
         to a usageKey, then occurrence/count so we don't store a deterministic
         URL that renders as an empty world tile for taxa GBIF has no records
         for. Returns ``{range_map, range_map_page}`` or None.
@@ -4573,9 +4573,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         }
 
     def _inat_range_map(scientific: str) -> dict | None:
-        """iNaturalist fallback: when even GBIF has nothing, iNat sometimes
-        does (citizen-science observations cover taxa where research-grade
-        records are sparse). API is open, rate-limited ~100 req/min, content
+        """iNaturalist tile fallback for the geo-referenced range layer: when
+        GBIF has nothing, iNat sometimes does (citizen-science observations
+        cover taxa where research-grade records are sparse). API is open,
+        rate-limited ~100 req/min, content
         is CC BY-NC which composes cleanly with BirdNET's CC BY-NC-SA.
 
         Two HTTPs: /v1/taxa search to resolve a scientific name to a numeric
@@ -4640,6 +4641,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "page_url": row.image_page_url,
                     "range_map": row.range_map_url,
                     "range_map_page": row.range_map_page_url,
+                    "range_tile": row.range_tile_url,
+                    "range_tile_page": row.range_tile_page_url,
                     "conservation_status": row.conservation_status,
                 }
                 _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
@@ -4665,6 +4668,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if status:
                 payload["conservation_status"] = status
             break
+        # Static natural-range image (Wikipedia → Wikidata). This is the clean
+        # IUCN/BirdLife range polygon, shown as a small reference thumbnail.
         # Wikidata fallback: many species (Barn Owl, Common Bulbul, …) have a
         # P181 range-map image on their Wikidata item even though it isn't
         # transcluded in the en.wiki article. One extra HTTP per species, only
@@ -4673,27 +4678,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             wd = _wikidata_range_map(payload.get("wikidata_qid"))
             if wd:
                 payload = {**payload, **wd}
-        # GBIF fallback (CC-BY 4.0): when Wikipedia *and* Wikidata both have
-        # nothing, GBIF almost always does — it covers ~all bird species via
-        # the occurrence density tile. Two extra HTTPs, only when nothing
-        # else hit. Persisted to species_notes.range_map_url like the others.
-        if not payload.get("range_map"):
-            gb = _gbif_range_map(scientific)
-            if gb:
-                payload = {**payload, **gb}
-        # iNaturalist fallback (CC BY-NC, composes with our BirdNET CC
-        # BY-NC-SA): citizen-science observation density. Last rung — fires
-        # only when Wikipedia, Wikidata, AND GBIF have all come back empty.
-        if not payload.get("range_map"):
-            inat = _inat_range_map(scientific)
-            if inat:
-                payload = {**payload, **inat}
+        # Geo-referenced occurrence tile (GBIF → iNat), ALWAYS attempted and
+        # stored separately from the static image: this is the live Leaflet map
+        # that carries our site dots, so we want it even when a clean IUCN
+        # polygon image already exists. GBIF (CC-BY 4.0) covers ~all bird
+        # species via the occurrence-density tile; iNat (CC BY-NC) is the
+        # fallback for taxa GBIF has no records for.
+        tile = _gbif_range_map(scientific) or _inat_range_map(scientific)
+        if tile:
+            payload["range_tile"] = tile["range_map"]
+            payload["range_tile_page"] = tile["range_map_page"]
         # Persist only when we actually reached Wikipedia and got something —
         # otherwise a transient hiccup would poison both caches (and stamp
         # media_fetched_at, suppressing retries for 30 days).
         useful = (
             payload.get("thumbnail")
             or payload.get("range_map")
+            or payload.get("range_tile")
             or payload.get("conservation_status")
         )
         if useful:
@@ -4706,6 +4707,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 image_page_url=payload.get("page_url"),
                 range_map_url=payload.get("range_map"),
                 range_map_page_url=payload.get("range_map_page"),
+                range_tile_url=payload.get("range_tile"),
+                range_tile_page_url=payload.get("range_tile_page"),
             )
             _wp_cache[key] = (now + _WP_TTL_SECONDS, payload)
         return payload

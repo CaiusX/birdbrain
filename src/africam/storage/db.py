@@ -113,6 +113,8 @@ class Database:
             ("species_notes", "image_page_url", "TEXT"),
             ("species_notes", "range_map_url", "TEXT"),
             ("species_notes", "range_map_page_url", "TEXT"),
+            ("species_notes", "range_tile_url", "TEXT"),
+            ("species_notes", "range_tile_page_url", "TEXT"),
             ("species_notes", "media_fetched_at", "TIMESTAMP"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
             ("audio_quality_metrics", "band_hz_low", "INTEGER"),
@@ -750,6 +752,8 @@ class Database:
         image_page_url: str | None = None,
         range_map_url: str | None = None,
         range_map_page_url: str | None = None,
+        range_tile_url: str | None = None,
+        range_tile_page_url: str | None = None,
     ) -> None:
         """Cache Wikipedia photo + range-map URLs on the species row and stamp
         media_fetched_at. Creates a minimal note row if needed (mirrors
@@ -771,6 +775,8 @@ class Database:
             row.image_page_url = image_page_url
             row.range_map_url = range_map_url
             row.range_map_page_url = range_map_page_url
+            row.range_tile_url = range_tile_url
+            row.range_tile_page_url = range_tile_page_url
             row.media_fetched_at = datetime.now(UTC)
 
     def species_needing_media(

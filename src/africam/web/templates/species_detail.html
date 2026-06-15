@@ -95,18 +95,12 @@
       <div id="species-photo-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no photo</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
-      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">distribution <span class="normal-case text-zinc-600">· natural range</span></div>
-      {# Static-image slot: Wikipedia/Wikidata range maps include their own
-         continent outlines. Shown via <img> wrapped in an attribution link. #}
-      <a id="species-range-link" href="#" target="_blank" rel="noopener" class="inline-block" style="display:none">
-        <img id="species-range" alt="" loading="lazy"
-             class="max-w-full max-h-44 rounded border border-zinc-800 bg-zinc-950">
-      </a>
-      {# Live Leaflet slot: GBIF tiles are transparent overlays — they need
-         a basemap or you're staring at dots in space. JS swaps between this
-         and the <img> based on the range_map URL. #}
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">distribution <span class="normal-case text-zinc-600">· range + our sites</span></div>
+      {# Live Leaflet map: geo-referenced occurrence range (GBIF/iNat, toned
+         down) under our detection sites as prominent coloured dots. Click to
+         open the enlarged, interactive popup. #}
       <div id="species-range-map"
-           class="w-full rounded border border-zinc-800 overflow-hidden"
+           class="w-full rounded border border-zinc-800 overflow-hidden bg-zinc-950"
            style="display:none; height: 11rem;"></div>
       <div id="species-range-attrib" class="text-[10px] text-zinc-500 mt-1" style="display:none;">
         from <a id="species-range-attrib-link" href="#" target="_blank" rel="noopener" class="text-emerald-400 hover:text-emerald-300">source</a>
@@ -116,12 +110,15 @@
       <div id="species-range-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no range map</div>
     </div>
     <div class="bg-zinc-900 px-5 py-3">
-      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">where it's heard <span class="normal-case text-zinc-600">· detection sites</span></div>
-      {% if sites_for_map %}
-        <div id="species-heard-mini" class="w-full rounded border border-zinc-800 overflow-hidden bg-zinc-950" style="height: 11rem;"></div>
-      {% else %}
-        <div class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">not mapped yet</div>
-      {% endif %}
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">natural range <span class="normal-case text-zinc-600">· published map</span></div>
+      {# The static Wikipedia/Wikidata range image — often the clean
+         IUCN/BirdLife polygon. Replaces the old "where it's heard" panel now
+         that our sites live on the distribution map beside it. #}
+      <a id="species-range-link" href="#" target="_blank" rel="noopener" title="natural range (source)" class="inline-block" style="display:none">
+        <img id="species-range" alt="natural range" loading="lazy"
+             class="max-w-full max-h-44 rounded border border-zinc-800 bg-zinc-950">
+      </a>
+      <div id="species-natural-empty" class="h-28 rounded border border-dashed border-zinc-800 flex items-center justify-center text-xs text-zinc-600">no range map</div>
     </div>
   </div>
 
@@ -150,6 +147,51 @@
       {% endif %}
     </div>
   </div>
+  {# Shared site-marker layer: SITES + biome colours + a helper that drops our
+     detection sites as coloured dots onto any Leaflet map. Used by the range
+     map (overlaid on the occurrence tiles) and by the "where it's heard"
+     thumbnail + enlarged modal further down. #}
+  <script>
+  window.SP = (function () {
+    const SITES = {{ sites_for_map | tojson }};
+    const ACTIVE = {{ active_source | tojson }};
+    const SCI = {{ scientific | tojson }};
+    const SOURCE_COLORS = {{ source_colors | tojson }};
+    function speciesUrl(source) {
+      const base = '/species/' + encodeURIComponent(SCI);
+      return source ? base + '?source=' + encodeURIComponent(source) : base;
+    }
+    // Draw every detection site as a circle marker coloured by its biome
+    // palette; the active-filter site is ringed in white. Interactive markers
+    // (the default) carry a "name · count" tooltip and filter the page on
+    // click; pass interactive:false for a static snapshot whose clicks pass
+    // through to the container.
+    function addSiteMarkers(map, opts) {
+      opts = opts || {};
+      const radius = opts.radius || 6;
+      const interactive = opts.interactive !== false;
+      SITES.forEach(s => {
+        const isActive = ACTIVE && s.name === ACTIVE;
+        const fill = SOURCE_COLORS[s.name] || '#10b981';
+        const m = L.circleMarker([s.lat, s.lon], {
+          radius,
+          color: isActive ? '#fafafa' : fill,
+          weight: isActive ? 3 : 1,
+          fillColor: fill, fillOpacity: 0.85,
+          interactive,
+        }).addTo(map);
+        if (interactive) {
+          m.bindTooltip(`${s.name} · ${s.count}`, {
+            direction: 'top', offset: [0, -4], className: 'site-label',
+          });
+          m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
+        }
+      });
+    }
+    return { SITES, ACTIVE, SCI, SOURCE_COLORS, speciesUrl, addSiteMarkers };
+  })();
+  </script>
+
   <script>
   (function () {
     const qs = new URLSearchParams({ scientific: {{ scientific | tojson }} });
@@ -174,148 +216,118 @@
     const GBIF_RE = /^https:\/\/api\.gbif\.org\/v2\/map\/occurrence\/density\/\d+\/\d+\/\d+@2x\.png\?taxonKey=(\d+)/;
     const INAT_RE = /^https:\/\/api\.inaturalist\.org\/v1\/colored_heatmap\/\d+\/\d+\/\d+\.png\?taxon_id=(\d+)/;
 
-    // Continent lookups for fitting GBIF range maps to a sensible startup
-    // extent. We tally the country facet, pick the continent with the most
-    // occurrences, and fit that bbox — provided the winner is clearly
-    // dominant (≥ 70% of total). Widespread species (Tyto alba, etc.) keep
-    // the default world view.
-    const CC_CONTINENT = {
-      // Africa
-      AO:'AF',BF:'AF',BI:'AF',BJ:'AF',BW:'AF',CD:'AF',CF:'AF',CG:'AF',CI:'AF',CM:'AF',
-      CV:'AF',DJ:'AF',DZ:'AF',EG:'AF',EH:'AF',ER:'AF',ET:'AF',GA:'AF',GH:'AF',GM:'AF',
-      GN:'AF',GQ:'AF',GW:'AF',KE:'AF',KM:'AF',LR:'AF',LS:'AF',LY:'AF',MA:'AF',MG:'AF',
-      ML:'AF',MR:'AF',MU:'AF',MW:'AF',MZ:'AF',NA:'AF',NE:'AF',NG:'AF',RE:'AF',RW:'AF',
-      SC:'AF',SD:'AF',SH:'AF',SL:'AF',SN:'AF',SO:'AF',SS:'AF',ST:'AF',SZ:'AF',TD:'AF',
-      TG:'AF',TN:'AF',TZ:'AF',UG:'AF',YT:'AF',ZA:'AF',ZM:'AF',ZW:'AF',
-      // Europe
-      AD:'EU',AL:'EU',AT:'EU',AX:'EU',BA:'EU',BE:'EU',BG:'EU',BY:'EU',CH:'EU',CZ:'EU',
-      DE:'EU',DK:'EU',EE:'EU',ES:'EU',FI:'EU',FO:'EU',FR:'EU',GB:'EU',GG:'EU',GI:'EU',
-      GR:'EU',HR:'EU',HU:'EU',IE:'EU',IM:'EU',IS:'EU',IT:'EU',JE:'EU',LI:'EU',LT:'EU',
-      LU:'EU',LV:'EU',MC:'EU',MD:'EU',ME:'EU',MK:'EU',MT:'EU',NL:'EU',NO:'EU',PL:'EU',
-      PT:'EU',RO:'EU',RS:'EU',RU:'EU',SE:'EU',SI:'EU',SK:'EU',SM:'EU',UA:'EU',VA:'EU',
-      XK:'EU',
-      // Asia
-      AE:'AS',AF:'AS',AM:'AS',AZ:'AS',BD:'AS',BH:'AS',BN:'AS',BT:'AS',CN:'AS',CY:'AS',
-      GE:'AS',HK:'AS',ID:'AS',IL:'AS',IN:'AS',IQ:'AS',IR:'AS',JO:'AS',JP:'AS',KG:'AS',
-      KH:'AS',KP:'AS',KR:'AS',KW:'AS',KZ:'AS',LA:'AS',LB:'AS',LK:'AS',MM:'AS',MN:'AS',
-      MO:'AS',MV:'AS',MY:'AS',NP:'AS',OM:'AS',PH:'AS',PK:'AS',PS:'AS',QA:'AS',SA:'AS',
-      SG:'AS',SY:'AS',TH:'AS',TJ:'AS',TL:'AS',TM:'AS',TR:'AS',TW:'AS',UZ:'AS',VN:'AS',
-      YE:'AS',
-      // North/Central America + Caribbean
-      AG:'NA',AI:'NA',AW:'NA',BB:'NA',BM:'NA',BS:'NA',BZ:'NA',CA:'NA',CR:'NA',CU:'NA',
-      DM:'NA',DO:'NA',GD:'NA',GL:'NA',GT:'NA',HN:'NA',HT:'NA',JM:'NA',KN:'NA',KY:'NA',
-      LC:'NA',MX:'NA',NI:'NA',PA:'NA',PR:'NA',SV:'NA',TC:'NA',TT:'NA',US:'NA',VC:'NA',
-      VG:'NA',VI:'NA',
-      // South America
-      AR:'SA',BO:'SA',BR:'SA',CL:'SA',CO:'SA',EC:'SA',FK:'SA',GF:'SA',GY:'SA',PE:'SA',
-      PY:'SA',SR:'SA',UY:'SA',VE:'SA',
-      // Oceania
-      AS:'OC',AU:'OC',CK:'OC',FJ:'OC',FM:'OC',GU:'OC',KI:'OC',MH:'OC',MP:'OC',NC:'OC',
-      NF:'OC',NR:'OC',NU:'OC',NZ:'OC',PF:'OC',PG:'OC',PN:'OC',PW:'OC',SB:'OC',TK:'OC',
-      TO:'OC',TV:'OC',VU:'OC',WF:'OC',WS:'OC',
-    };
-    const CONTINENT_BBOX = {
-      AF: [[-35, -20], [38, 55]],
-      EU: [[35, -25], [72, 60]],
-      AS: [[-12, 25], [78, 180]],
-      NA: [[7, -170], [83, -52]],
-      SA: [[-56, -82], [13, -34]],
-      OC: [[-50, 110], [-10, 180]],
-    };
+    // Our detection sites are all in Africa, so the range map is framed on the
+    // African continent: the occurrence range reads against our site dots.
+    const AFRICA_BBOX = [[-35, -20], [38, 55]];
 
-    function fitGBIFExtent(map, taxonKey) {
-      const url = 'https://api.gbif.org/v1/occurrence/search'
-        + '?taxonKey=' + taxonKey
-        + '&hasCoordinate=true&limit=0'
-        + '&facet=country&facetLimit=15';
-      fetch(url).then(r => r.ok ? r.json() : null).then(d => {
-        if (!d || !d.facets || !d.facets[0]) return;
-        const counts = d.facets[0].counts || [];
-        if (!counts.length) return;
-        const totals = {};
-        let grand = 0;
-        counts.forEach(c => {
-          const cont = CC_CONTINENT[c.name];
-          if (!cont) return;
-          totals[cont] = (totals[cont] || 0) + c.count;
-          grand += c.count;
-        });
-        let winner = null, max = 0;
-        for (const k in totals) {
-          if (totals[k] > max) { winner = k; max = totals[k]; }
-        }
-        if (winner && max >= grand * 0.70 && CONTINENT_BBOX[winner]) {
-          map.fitBounds(CONTINENT_BBOX[winner],
-            { padding: [8, 8], animate: false });
-        }
-      }).catch(() => { /* silent — keep default view */ });
+    function gbifTile(taxonKey) {
+      return 'https://api.gbif.org/v2/map/occurrence/density/{z}/{x}/{y}@2x.png'
+        + '?taxonKey=' + taxonKey + '&style=classic.poly&bin=hex&hexPerTile=30';
+    }
+    function inatTile(taxonId) {
+      return 'https://api.inaturalist.org/v1/colored_heatmap/{z}/{x}/{y}.png'
+        + '?taxon_id=' + taxonId;
     }
 
-    function renderLiveTile({ mapEl, tileTemplate, attribSource, attribText,
-                              attribLink, onMapReady }) {
+    // Resolved range-tile config, shared between the inline snapshot and the
+    // enlarged popup it opens.
+    let rangeCfg = null;
+    let bigMap = null;
+
+    function addRangeTiles(map, opacity) {
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+      // GBIF/iNat toned down so our site dots are the prominent layer.
+      L.tileLayer(rangeCfg.tileTemplate, { maxZoom: 14, opacity }).addTo(map);
+    }
+
+    // Inline range map: a non-interactive snapshot framed on Africa. Every
+    // handler is off and the site dots are non-interactive, so a click anywhere
+    // opens the enlarged popup rather than panning or filtering.
+    function renderInlineRange() {
       // CRITICAL ORDERING: make the container visible BEFORE L.map(). Leaflet
-      // measures the container at init time and caches the dimensions; if the
-      // element is display:none, that cache is 0×0 and every subsequent
-      // setView/fitBounds computes nonsense zoom levels (we ended up at z>10,
-      // past the maxZoom where GBIF serves tiles → no overlay visible).
+      // caches the container size at init; a display:none element measures 0×0
+      // and every fitBounds then computes a nonsense zoom past GBIF's maxZoom.
+      const mapEl = document.getElementById('species-range-map');
       mapEl.style.display = 'block';
       document.getElementById('species-range-attrib').style.display = '';
-
       const map = L.map(mapEl, {
-        zoomControl: false, attributionControl: false,
-        worldCopyJump: true,
+        zoomControl: false, attributionControl: false, worldCopyJump: false,
+        dragging: false, scrollWheelZoom: false, doubleClickZoom: false,
+        boxZoom: false, keyboard: false, touchZoom: false, tap: false,
       });
-      lockMap(map);
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-      L.tileLayer(tileTemplate, { maxZoom: 14, opacity: 0.85 }).addTo(map);
-      // Defensive invalidateSize on the next frame in case the parent is
-      // still mid-layout (Tailwind grid + lazy fetch can race).
-      map.setView([5, 25], 2);
+      addRangeTiles(map, 0.4);
+      map.fitBounds(AFRICA_BBOX, { padding: [8, 8], animate: false });
+      if (window.SP) window.SP.addSiteMarkers(map, { radius: 6, interactive: false });
       requestAnimationFrame(() => map.invalidateSize());
-
+      const el = map.getContainer();
+      el.style.cursor = 'zoom-in';
+      el.title = 'Click to enlarge';
+      el.addEventListener('click', openRangeModal);
       const a = document.getElementById('species-range-attrib-link');
-      a.textContent = attribSource;
-      a.href = attribLink;
-      document.getElementById('species-range-attrib-text').textContent = attribText;
-      if (onMapReady) onMapReady(map);
+      a.textContent = rangeCfg.attribSource;
+      a.href = rangeCfg.attribLink;
+      document.getElementById('species-range-attrib-text').textContent = rangeCfg.attribText;
     }
-    function showRange(src, href) {
-      if (!src) return;
-      const empty = document.getElementById('species-range-empty');
-      if (empty) empty.style.display = 'none';
-      const mapEl = document.getElementById('species-range-map');
-      const mg = GBIF_RE.exec(src);
-      if (mg) {
-        const taxonKey = mg[1];
-        renderLiveTile({
-          mapEl,
-          tileTemplate:
-            'https://api.gbif.org/v2/map/occurrence/density/{z}/{x}/{y}@2x.png'
-            + '?taxonKey=' + taxonKey
-            + '&style=classic.poly&bin=hex&hexPerTile=30',
-          attribSource: 'GBIF',
-          attribText: 'occurrence density (CC BY 4.0)',
-          attribLink: href || 'https://www.gbif.org/species/' + taxonKey,
-          onMapReady: (map) => fitGBIFExtent(map, taxonKey),
-        });
-        return;
+
+    // Enlarged, interactive popup of the same map, built on first open (Leaflet
+    // needs a visible, sized container). Site dots here ARE interactive: click
+    // one to filter the page to that site.
+    function openRangeModal() {
+      const dialog = document.getElementById('range-map-modal');
+      if (!dialog || !rangeCfg) return;
+      if (typeof dialog.showModal === 'function') dialog.showModal();
+      else dialog.setAttribute('open', '');
+      requestAnimationFrame(() => {
+        if (!bigMap) {
+          bigMap = L.map('range-map-big', { worldCopyJump: false });
+          addRangeTiles(bigMap, 0.55);
+          if (window.SP) window.SP.addSiteMarkers(bigMap, { radius: 8 });
+          const close = () => {
+            if (typeof dialog.close === 'function') dialog.close();
+            else dialog.removeAttribute('open');
+          };
+          document.getElementById('range-map-close').addEventListener('click', close);
+          dialog.addEventListener('cancel', close);
+          dialog.addEventListener('click', (e) => { if (e.target === dialog) close(); });
+        }
+        bigMap.invalidateSize();
+        bigMap.fitBounds(AFRICA_BBOX, { padding: [12, 12], animate: false });
+      });
+    }
+
+    // Render the range slot from the resolved media: the live occurrence map
+    // (GBIF → iNat) with our site dots goes in the "distribution" panel; the
+    // static Wikipedia/Wikidata image (often the clean IUCN/BirdLife polygon)
+    // goes in the "natural range" panel beside it.
+    function showRange(tile, tilePage, img, imgPage) {
+      const rangeEmpty = document.getElementById('species-range-empty');
+      const naturalEmpty = document.getElementById('species-natural-empty');
+      if (tile) {
+        const mg = GBIF_RE.exec(tile);
+        const mi = INAT_RE.exec(tile);
+        if (mg) {
+          rangeCfg = {
+            tileTemplate: gbifTile(mg[1]),
+            attribSource: 'GBIF', attribText: 'occurrence density (CC BY 4.0)',
+            attribLink: tilePage || 'https://www.gbif.org/species/' + mg[1],
+          };
+        } else if (mi) {
+          rangeCfg = {
+            tileTemplate: inatTile(mi[1]),
+            attribSource: 'iNaturalist',
+            attribText: 'observation density (CC BY-NC)',
+            attribLink: tilePage || 'https://www.inaturalist.org/taxa/' + mi[1],
+          };
+        }
+        if (rangeCfg) {
+          renderInlineRange();
+          if (rangeEmpty) rangeEmpty.style.display = 'none';
+        }
       }
-      const mi = INAT_RE.exec(src);
-      if (mi) {
-        const taxonId = mi[1];
-        renderLiveTile({
-          mapEl,
-          tileTemplate:
-            'https://api.inaturalist.org/v1/colored_heatmap/{z}/{x}/{y}.png'
-            + '?taxon_id=' + taxonId,
-          attribSource: 'iNaturalist',
-          attribText: 'observation density (CC BY-NC)',
-          attribLink: href || 'https://www.inaturalist.org/taxa/' + taxonId,
-        });
-        return;
+      if (img) {
+        show('species-range-link', 'species-range', null, img, imgPage);
+        if (naturalEmpty) naturalEmpty.style.display = 'none';
       }
-      // Static image path (Wikipedia / Wikidata P181 / etc.).
-      show('species-range-link', 'species-range', null, src, href);
     }
     fetch('/api/species_image?' + qs.toString())
       .then(r => r.ok ? r.json() : null)
@@ -323,7 +335,15 @@
         if (!data) return;
         show('species-photo-link', 'species-photo', 'species-photo-empty',
              data.thumbnail, data.page_url);
-        showRange(data.range_map, data.range_map_page || data.page_url);
+        let tile = data.range_tile, tilePage = data.range_tile_page;
+        let img = data.range_map, imgPage = data.range_map_page || data.page_url;
+        // Backward-compat: before the one-time refetch, a GBIF/iNat tile URL
+        // may still sit in range_map (the old single field). Treat it as a
+        // tile so it renders as a map, not a broken <img>.
+        if (!tile && img && (GBIF_RE.test(img) || INAT_RE.test(img))) {
+          tile = img; tilePage = imgPage; img = null; imgPage = null;
+        }
+        showRange(tile, tilePage, img, imgPage);
       })
       .catch(() => { /* silent — placeholders remain */ });
   })();
@@ -379,124 +399,35 @@
   </div>
 </section>
 
-{% if sites_for_map %}
-{# Enlarged "where it's heard" map, opened by clicking the header thumbnail.
-   Zoomed to the spread of detection sites; each bubble is clickable to filter
-   the page to that site (active one clears the filter), labelled with name +
-   count. #}
-<dialog id="heard-map-modal"
+{# Enlarged range map, opened by clicking the distribution map above. Same
+   GBIF/iNat range + our site dots, but interactive: pannable/zoomable, and
+   each site bubble filters the page to that site (active one clears it). Built
+   and wired on first open by the distribution-panel script above. #}
+<dialog id="range-map-modal"
         class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 max-w-4xl w-full max-h-[92vh] overflow-hidden backdrop:bg-black/70">
-  <div class="flex items-center justify-between gap-4 px-5 py-3 border-b border-zinc-800">
-    <h3 class="text-sm uppercase tracking-wider text-zinc-400">
-      Where it's heard
-      <span class="text-zinc-500 normal-case text-xs ml-1">click a site to filter this page to it</span>
-    </h3>
-    <button type="button" id="heard-map-close"
-            class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
+  <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <div class="min-w-0">
+      <h3 class="text-sm uppercase tracking-wider text-zinc-400 truncate">
+        Range + detection sites
+        <span class="normal-case text-zinc-200">· {{ common_name or scientific }}</span>
+      </h3>
+      <div class="mt-1 text-xs">
+        {% if active_source %}
+          {# Make the active site filter obvious in the popup header, matching
+             the "filtered to" pill on the page header above. #}
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/40 text-emerald-300">
+            filtered to <span class="font-medium">{{ active_source }}</span>
+          </span>
+        {% else %}
+          <span class="text-zinc-500">click a site to filter this page to it</span>
+        {% endif %}
+      </div>
+    </div>
+    <button type="button" id="range-map-close"
+            class="shrink-0 text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
   </div>
-  <div id="heard-map-big" class="w-full" style="height: 70vh;"></div>
+  <div id="range-map-big" class="w-full" style="height: 70vh;"></div>
 </dialog>
-
-{# Header thumbnail map. Static (not pannable) and framed on the African
-   continent so it lines up with the distribution map beside it; all detection
-   sites shown as small bubbles, no labels, the active-filter site ringed in
-   white. The whole thumbnail is a button that opens the enlarged map above. #}
-<script>
-(function () {
-  const el = document.getElementById('species-heard-mini');
-  if (!el) return;
-  const SITES = {{ sites_for_map | tojson }};
-  const ACTIVE = {{ active_source | tojson }};
-  const SCI = {{ scientific | tojson }};
-  const SOURCE_COLORS = {{ source_colors | tojson }};
-
-  function speciesUrl(source) {
-    const base = '/species/' + encodeURIComponent(SCI);
-    return source ? base + '?source=' + encodeURIComponent(source) : base;
-  }
-  function fitSites(map) {
-    const pts = SITES.map(s => [s.lat, s.lon]);
-    if (pts.length === 1) map.setView(pts[0], 9);
-    else if (pts.length > 1) map.fitBounds(pts, { padding: [40, 40], maxZoom: 10 });
-    else map.setView([10, 20], 3);
-  }
-
-  // --- Header thumbnail: a non-interactive snapshot framed on Africa. Every
-  // handler is off so a click bubbles up to open the modal instead of
-  // panning the map.
-  const mini = L.map('species-heard-mini', {
-    zoomControl: false, attributionControl: false, worldCopyJump: false,
-    dragging: false, scrollWheelZoom: false, doubleClickZoom: false,
-    boxZoom: false, keyboard: false, touchZoom: false, tap: false,
-  });
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OSM', maxZoom: 18, noWrap: true,
-  }).addTo(mini);
-  SITES.forEach(s => {
-    const isActive = ACTIVE && s.name === ACTIVE;
-    const fill = SOURCE_COLORS[s.name] || '#10b981';
-    L.circleMarker([s.lat, s.lon], {
-      radius: 5,
-      color: isActive ? '#fafafa' : fill,
-      weight: isActive ? 3 : 1,
-      fillColor: fill, fillOpacity: 0.85,
-      interactive: false,  // clicks pass through to the container → open modal
-    }).addTo(mini);
-  });
-  // Same extent as the GBIF distribution map's African frame so the two
-  // header maps line up visually.
-  mini.fitBounds([[-35, -20], [38, 55]], { padding: [8, 8] });
-  const miniEl = mini.getContainer();
-  miniEl.style.cursor = 'zoom-in';
-  miniEl.title = 'Click to enlarge';
-
-  // --- Enlarged interactive map in a dialog. Leaflet must measure a visible,
-  // sized container, so the map is created/refreshed AFTER showModal() puts
-  // the dialog on screen (an invisible 0×0 container yields nonsense zoom).
-  const dialog = document.getElementById('heard-map-modal');
-  const closeBtn = document.getElementById('heard-map-close');
-  let big = null;
-
-  function openModal() {
-    if (typeof dialog.showModal === 'function') dialog.showModal();
-    else dialog.setAttribute('open', '');
-    requestAnimationFrame(() => {
-      if (!big) {
-        big = L.map('heard-map-big', { worldCopyJump: false });
-        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; OpenStreetMap', maxZoom: 18, noWrap: true,
-        }).addTo(big);
-        SITES.forEach(s => {
-          const isActive = ACTIVE && s.name === ACTIVE;
-          const fill = SOURCE_COLORS[s.name] || '#10b981';
-          const m = L.circleMarker([s.lat, s.lon], {
-            radius: 8,
-            color: isActive ? '#fafafa' : fill,
-            weight: isActive ? 3 : 1,
-            fillColor: fill, fillOpacity: 0.85,
-          }).addTo(big);
-          m.bindTooltip(`${s.name} · ${s.count}`, {
-            direction: 'top', offset: [0, -4], className: 'site-label',
-          });
-          m.on('click', () => { window.location.href = speciesUrl(isActive ? null : s.name); });
-        });
-      }
-      big.invalidateSize();
-      fitSites(big);
-    });
-  }
-  function closeModal() {
-    if (typeof dialog.close === 'function') dialog.close();
-    else dialog.removeAttribute('open');
-  }
-
-  miniEl.addEventListener('click', openModal);
-  closeBtn.addEventListener('click', closeModal);
-  dialog.addEventListener('cancel', closeModal);
-  dialog.addEventListener('click', (e) => { if (e.target === dialog) closeModal(); });
-})();
-</script>
-{% endif %}
 
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl">
