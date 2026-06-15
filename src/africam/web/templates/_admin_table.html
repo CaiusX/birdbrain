@@ -101,7 +101,22 @@
                 <dd class="tabular-nums {{ 'text-emerald-300' if r.min_conf_overridden else '' }}">{{ "%.2f"|format(r.min_confidence) }}{% if r.min_conf_overridden %}<span title="per-site override (configured {{ '%.2f'|format(r.min_conf_base) }})"> *</span>{% endif %}</dd>
               <dt class="text-zinc-500">lat / lon</dt>
                 <dd class="tabular-nums">
-                  {% if r.lat is not none and r.lon is not none %}
+                  {% if r.is_runtime %}
+                    {# Editable for runtime sources — applies on the worker's
+                       next (re)start (■ stop then ▶ start). Empty = unset. #}
+                    <form hx-post="/api/sources/{{ r.name | urlencode }}/location"
+                          hx-target="#admin-table" hx-swap="outerHTML"
+                          class="flex items-center gap-1">
+                      <input name="lat" type="number" step="any" min="-90" max="90" placeholder="lat"
+                             value="{{ '%.5f'|format(r.lat) if r.lat is not none else '' }}"
+                             class="w-16 bg-zinc-950 border border-zinc-800 rounded px-1 py-0.5 text-xs tabular-nums">
+                      <input name="lon" type="number" step="any" min="-180" max="180" placeholder="lon"
+                             value="{{ '%.5f'|format(r.lon) if r.lon is not none else '' }}"
+                             class="w-16 bg-zinc-950 border border-zinc-800 rounded px-1 py-0.5 text-xs tabular-nums">
+                      <button type="submit" title="Save coordinates — applies on the worker's next restart"
+                              class="px-1.5 py-0.5 rounded text-[11px] border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/10">save</button>
+                    </form>
+                  {% elif r.lat is not none and r.lon is not none %}
                     {{ "%.3f"|format(r.lat) }}, {{ "%.3f"|format(r.lon) }}
                   {% else %}<span class="text-zinc-600">unset</span>{% endif %}
                 </dd>

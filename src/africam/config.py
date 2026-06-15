@@ -24,7 +24,7 @@ class OcrConfig(BaseModel):
 
 class SourceConfig(BaseModel):
     name: str
-    kind: Literal["youtube", "rtsp"]
+    kind: Literal["youtube", "rtsp", "device"]
     url: str
     lat: float | None = None
     lon: float | None = None

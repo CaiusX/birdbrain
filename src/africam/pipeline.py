@@ -8,7 +8,8 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 
-from africam.audio import AudioSource, RtspSource, YouTubeSource
+from africam import sandbox
+from africam.audio import AlsaSource, AudioSource, RtspSource, YouTubeSource
 from africam.audio.quality import QualityAccumulator, chunk_features
 from africam.audio.source import AudioChunk
 from africam.audio_hash import clip_hash
@@ -83,6 +84,9 @@ def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
         )
     if cfg.kind == "rtsp":
         return RtspSource(url=cfg.url, **common)
+    if cfg.kind == "device":
+        # url is an ALSA device string, e.g. "plughw:CARD=Device,DEV=0".
+        return AlsaSource(url=cfg.url, **common)
     raise ValueError(f"Unknown source kind: {cfg.kind!r}")
 
 
@@ -252,6 +256,10 @@ def _consume_stream(
     # call lives in seconds 3-6 of the saved clip. Memory cost: one chunk
     # per worker (~580 KB at 48 kHz mono float32, 3 s).
     prev_samples: np.ndarray | None = None
+    # Sandbox: when app_settings sandbox:<name> is set, run detection for live
+    # feedback but divert results to the in-memory sandbox feed instead of the
+    # DB. Polled on the same cadence as the floors below; toggled live.
+    sandbox_mode = False
     for chunk in source.stream(stop_event=stop_event):
         if stop_event.is_set():
             return
@@ -273,6 +281,7 @@ def _consume_stream(
                     highlight_gate.update(
                         bool(db.get_setting(f"gate_highlights:{cfg.name}"))
                     )
+                sandbox_mode = bool(db.get_setting(f"sandbox:{cfg.name}"))
                 # Flush the current audio-quality snapshot (once enough audio
                 # has accumulated to be meaningful). Detection yield over the
                 # last 6h is the masking signal — loud audio with ~no detections.
@@ -345,6 +354,21 @@ def _consume_stream(
                 d for d in detections
                 if d.confidence >= species_floor.get(d.scientific_name, effective_min)
             ]
+
+        # Sandbox: feed the live monitor and skip ALL persistence (no clips, no
+        # DB row). Detection above already ran, so the operator sees real
+        # results while testing; clearing sandbox:<name> resumes normal writes.
+        if sandbox_mode:
+            for d in detections:
+                sandbox.record(
+                    cfg.name,
+                    ts=d.started_at.isoformat(),
+                    common_name=d.common_name,
+                    scientific_name=d.scientific_name,
+                    confidence=d.confidence,
+                )
+            prev_samples = chunk.samples
+            continue
 
         if not detections:
             # Even when no detections fire, advance the pre-roll buffer so

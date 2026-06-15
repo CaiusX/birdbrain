@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}BirdBrain · sandbox{% endblock %}
+
+{% block content %}
+<section class="max-w-3xl">
+  <div class="flex items-baseline justify-between gap-4">
+    <h2 class="text-xl font-semibold text-zinc-100">Sandbox monitor</h2>
+    <span class="text-xs text-zinc-500">detections shown here are <strong class="text-amber-300">not saved</strong> to the database</span>
+  </div>
+  <p class="mt-2 text-sm text-zinc-400">
+    Sources in test mode run real BirdNET detection for live feedback — play bird
+    sounds near the mic to confirm it's working. When you're satisfied, hit
+    <span class="text-emerald-300">Go live</span> and detections start persisting normally.
+  </p>
+
+  {% if not sandbox_sources %}
+    <div class="mt-6 rounded border border-dashed border-zinc-800 p-6 text-sm text-zinc-500">
+      No sources are in sandbox mode right now.
+    </div>
+  {% endif %}
+
+  <div class="mt-5 space-y-5">
+    {% for name in sandbox_sources %}
+    <div class="bg-zinc-900 border border-zinc-800 rounded-xl" data-sandbox-card data-name="{{ name }}">
+      <div class="flex items-center justify-between gap-3 px-5 py-3 border-b border-zinc-800">
+        <h3 class="text-sm uppercase tracking-wider text-zinc-300">
+          {{ name }}
+          <span class="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 border border-amber-500/40 text-amber-300 normal-case">sandbox</span>
+        </h3>
+        <button type="button" data-golive
+                class="px-2.5 py-1 rounded text-xs bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25">
+          Go live →
+        </button>
+      </div>
+      <ul data-feed class="divide-y divide-zinc-800/70 text-sm max-h-[60vh] overflow-y-auto">
+        <li class="px-5 py-3 text-zinc-600">waiting for detections… play a sound near the mic</li>
+      </ul>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<script>
+(function () {
+  function fmtTime(iso) {
+    try { return new Date(iso).toLocaleTimeString(); } catch (_) { return iso; }
+  }
+  function renderFeed(ul, dets) {
+    if (!dets.length) {
+      ul.innerHTML = '<li class="px-5 py-3 text-zinc-600">waiting for detections… play a sound near the mic</li>';
+      return;
+    }
+    ul.innerHTML = dets.map(d => {
+      const pct = Math.round((d.confidence || 0) * 100);
+      return '<li class="px-5 py-2 flex items-center justify-between gap-3">'
+        + '<span class="min-w-0 truncate"><span class="text-zinc-100">' + (d.common_name || d.scientific_name || '?')
+        + '</span> <span class="italic text-zinc-500 text-xs">' + (d.scientific_name || '') + '</span></span>'
+        + '<span class="shrink-0 tabular-nums text-zinc-400 text-xs">' + pct + '% · ' + fmtTime(d.ts) + '</span>'
+        + '</li>';
+    }).join('');
+  }
+  document.querySelectorAll('[data-sandbox-card]').forEach(card => {
+    const name = card.getAttribute('data-name');
+    const ul = card.querySelector('[data-feed]');
+    const poll = () => fetch('/api/sandbox/' + encodeURIComponent(name))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) renderFeed(ul, data.detections || []); })
+      .catch(() => {});
+    poll();
+    setInterval(poll, 2000);
+    card.querySelector('[data-golive]').addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = 'going live…';
+      const body = new URLSearchParams({ enabled: '0' });
+      fetch('/api/sources/' + encodeURIComponent(name) + '/sandbox', { method: 'POST', body })
+        .then(r => r.ok ? r.json() : Promise.reject())
+        .then(() => { window.location.reload(); })
+        .catch(() => { btn.disabled = false; btn.textContent = 'Go live →'; });
+    });
+  });
+})();
+</script>
+{% endblock %}

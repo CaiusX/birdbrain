@@ -1206,6 +1206,20 @@ class Database:
             row.deleted_at = None
         return row
 
+    def set_runtime_source_location(
+        self, name: str, lat: float | None, lon: float | None
+    ) -> bool:
+        """Update just the lat/lon on an existing runtime source. Takes effect
+        the next time the worker (re)starts — lat/lon are read into the worker's
+        config at startup, not polled live. Returns False if no runtime row."""
+        with self._Session() as s, s.begin():
+            row = s.get(RuntimeSourceRow, name)
+            if row is None:
+                return False
+            row.lat = lat
+            row.lon = lon
+        return True
+
     def soft_delete_runtime_source(self, name: str) -> bool:
         with self._Session() as s, s.begin():
             row = s.get(RuntimeSourceRow, name)

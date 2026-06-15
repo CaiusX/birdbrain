@@ -42,6 +42,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, case, desc, func, or_, select
 
+from africam import sandbox
 from africam import weather as weather_module
 from africam.config import AppConfig, SourceConfig, load_sources
 from africam.host import host_metrics
@@ -711,6 +712,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         through the tunnel (middleware only blocks /admin + mutating verbs)."""
         return TEMPLATES.TemplateResponse(request, "about.html", {})
 
+    @app.get("/sandbox", response_class=HTMLResponse)
+    def sandbox_page(request: Request) -> HTMLResponse:
+        """Live monitor for sources in sandbox (test) mode: detections appear as
+        they fire but are never persisted, so you can verify a new mic (e.g. by
+        playing bird sounds) without touching the live data. Includes a Go-live
+        control per source."""
+        names = sorted(
+            key[len("sandbox:"):]
+            for key in db.list_settings_with_prefix("sandbox:")
+        )
+        return TEMPLATES.TemplateResponse(
+            request, "sandbox.html", {"sandbox_sources": names}
+        )
+
     @app.get("/logo-test", response_class=HTMLResponse)
     def logo_test_page(request: Request) -> HTMLResponse:
         """Side-by-side gallery of the 10 logo iterations. SVGs are generated
@@ -1001,8 +1016,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         timezone: str = Form(default="UTC"),
         min_confidence: float = Form(default=0.3),
     ) -> Response:
-        if kind not in ("youtube", "rtsp"):
-            raise HTTPException(400, "kind must be youtube or rtsp")
+        if kind not in ("youtube", "rtsp", "device"):
+            raise HTTPException(400, "kind must be youtube, rtsp, or device")
         if not name.strip():
             raise HTTPException(400, "name is required")
         # Validate timezone before persisting so a typo doesn't slip through.
@@ -1147,6 +1162,53 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if request.headers.get("hx-request"):
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name, "enabled": bool(enabled)})
+
+    @app.post("/api/sources/{name}/sandbox")
+    def set_sandbox(request: Request, name: str, enabled: int = Form(...)) -> Response:
+        """Turn sandbox (test) mode on/off for a source. The worker polls this
+        (~60s): ON = run detection but divert results to the in-memory sandbox
+        feed, never the DB or clips; OFF ("go live") = persist normally. No
+        restart. Used to verify a new mic by playing sounds without polluting
+        the live data."""
+        db.set_setting(f"sandbox:{name}", "1" if enabled else None)
+        if not enabled:
+            sandbox.clear(name)  # going live — drop the test feed
+        return JSONResponse({"ok": True, "name": name, "sandbox": bool(enabled)})
+
+    @app.post("/api/sources/{name}/location")
+    def set_source_location(
+        request: Request,
+        name: str,
+        lat: str = Form(default=""),
+        lon: str = Form(default=""),
+    ) -> Response:
+        """Set/clear a runtime source's coordinates (BirdNET's location filter).
+        Empty fields clear them. Applies on the worker's next (re)start — lat/lon
+        are read at startup, not polled. Returns the admin table so it re-renders."""
+        def _parse(v: str) -> float | None:
+            v = (v or "").strip()
+            return float(v) if v else None
+        try:
+            latv, lonv = _parse(lat), _parse(lon)
+        except ValueError as e:
+            raise HTTPException(400, "lat/lon must be numbers") from e
+        if not db.set_runtime_source_location(name, latv, lonv):
+            raise HTTPException(404, f"no runtime source named {name!r}")
+        if request.headers.get("hx-request"):
+            return admin_partial(request)
+        return JSONResponse({"ok": True, "name": name, "lat": latv, "lon": lonv})
+
+    @app.get("/api/sandbox/{name}")
+    def sandbox_feed(name: str) -> JSONResponse:
+        """Recent sandbox detections for a source — live monitor feed. In-memory
+        only (empty once the worker restarts or the source goes live)."""
+        return JSONResponse(
+            {
+                "name": name,
+                "sandbox": bool(db.get_setting(f"sandbox:{name}")),
+                "detections": sandbox.recent(name),
+            }
+        )
 
     def _is_static_source(name: str) -> bool:
         """True if ``name`` matches a sources.toml entry — independent of any
