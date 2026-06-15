@@ -39,14 +39,24 @@
   <div class="p-4 space-y-3">
     <canvas id="audition-canvas" width="640" height="180"
             class="w-full rounded bg-zinc-950 block"></canvas>
-    <audio id="audition-audio" controls class="w-full"></audio>
+    {# Listen controls. Native <audio controls> is hidden — its seek bar is
+       meaningless for a live stream. "listen" is monitor volume (what you hear;
+       does NOT affect the recording/detection). #}
+    <div class="flex items-center gap-3 text-xs text-zinc-400">
+      <button type="button" id="audition-playpause"
+              class="px-2 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800 shrink-0">⏸ pause</button>
+      <span class="uppercase tracking-wider text-[10px] text-zinc-500 shrink-0">listen</span>
+      <input id="audition-monitor" type="range" min="0" max="100" value="100" class="flex-1 accent-zinc-400">
+    </div>
     {# Mic gain — shown only for local-mic (pulse) sources. Adjusts the hardware
-       capture gain live via PipeWire; lower it to cut the noise floor. #}
+       capture gain live via PipeWire; lower it to cut the noise floor. This DOES
+       affect the recording/detection. #}
     <div id="audition-gain-row" class="hidden items-center gap-3 text-xs text-zinc-400">
       <span class="uppercase tracking-wider text-[10px] text-zinc-500 shrink-0">mic gain</span>
       <input id="audition-gain" type="range" min="0" max="100" step="1" class="flex-1 accent-sky-400">
       <span id="audition-gain-val" class="tabular-nums w-9 text-right text-zinc-300">—</span>
     </div>
+    <audio id="audition-audio" class="hidden"></audio>
   </div>
 </dialog>
 
@@ -246,9 +256,15 @@
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.4;
+      // node → analyser (visual tap, full signal) → monitor (listen volume) →
+      // speakers. Monitor gain only changes what you HEAR, not the spectrogram.
+      const monitor = ctx.createGain();
+      const mon = document.getElementById('audition-monitor');
+      monitor.gain.value = (mon ? mon.value : 100) / 100;
       node.connect(analyser);
-      analyser.connect(ctx.destination);
-      G = { ctx, analyser, audio, data: new Uint8Array(analyser.frequencyBinCount), raf: 0 };
+      analyser.connect(monitor);
+      monitor.connect(ctx.destination);
+      G = { ctx, analyser, monitor, audio, data: new Uint8Array(analyser.frequencyBinCount), raf: 0 };
       return G;
     }
     function colour(v) {            // 0..255 → dark-purple → orange → white
@@ -328,6 +344,21 @@
       panel.addEventListener('close', teardown);
       panel.addEventListener('click', function (e) {
         if (e.target === panel) panel.close();   // click on the backdrop
+      });
+    })();
+    // Listen controls: play/pause + monitor volume (replaces the native
+    // <audio controls> seek bar, which is meaningless for live audio).
+    (function () {
+      const audio = document.getElementById('audition-audio');
+      const pp = document.getElementById('audition-playpause');
+      const mon = document.getElementById('audition-monitor');
+      pp.addEventListener('click', function () {
+        if (audio.paused) audio.play().catch(function () {}); else audio.pause();
+      });
+      audio.addEventListener('play', function () { pp.textContent = '⏸ pause'; });
+      audio.addEventListener('pause', function () { pp.textContent = '▶ play'; });
+      mon.addEventListener('input', function () {
+        if (G && G.monitor) G.monitor.gain.value = mon.value / 100;
       });
     })();
   })();
