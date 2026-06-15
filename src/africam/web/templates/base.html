@@ -21,7 +21,10 @@
     /* Leaflet popups inherit a white background by default — match the dark theme. */
     .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: #18181b !important; color: #e4e4e7; }
     .leaflet-popup-content { margin: 10px 14px; font-size: 13px; }
-    .leaflet-container { background: #0c0c0e; }
+    /* isolation:isolate confines Leaflet's internal z-indexes (panes 200–700,
+       controls/popups up to ~1000) to a local stacking context, so a scrolled
+       map can't paint over the sticky header (z-40) or the search dropdown. */
+    .leaflet-container { background: #0c0c0e; isolation: isolate; }
     /* Permanent site labels next to each marker. */
     .leaflet-tooltip.site-label {
       background: rgba(24, 24, 27, 0.85);
