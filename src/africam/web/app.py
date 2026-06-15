@@ -3211,9 +3211,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 }
             )
 
-        # Rank busiest site first — it's a scoreboard. Keep the per-site
-        # species sections in the same order.
-        rollup_rows.sort(key=lambda r: r["count"], reverse=True)
+        # Rank by species diversity (count breaks ties) — it's a scoreboard.
+        # Keep the per-site species sections in the same order.
+        rollup_rows.sort(key=lambda r: (r["species"], r["count"]), reverse=True)
         rank = {r["source"]: i for i, r in enumerate(rollup_rows)}
         per_source_top.sort(key=lambda x: rank.get(x["source"], 1 << 30))
 
