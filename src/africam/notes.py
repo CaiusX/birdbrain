@@ -52,7 +52,7 @@ _SITE_DESCRIPTIONS: dict[str, str] = {
     "Tau Game Lodge":      "25°S, Madikwe Game Reserve bushveld, NW South Africa (UTC+2) — southern hemisphere",
     "Tortilis Camp":       "3°S, Amboseli, semi-arid grassland under Kilimanjaro, southern Kenya (UTC+3) — equatorial",
     "Mara River":          "1°S, Maasai Mara Triangle, riverine savanna, southwestern Kenya (UTC+3) — equatorial",
-    "Mpala Watering Hole": "0° (equator), Laikipia plateau acacia-Commiphora bushland, ~1800 m, research-station camera, central Kenya (UTC+3) — equatorial",
+    "Mpala Watering Hole": "0° (equator), Laikipia plateau acacia-Commiphora bushland, ~1800 m, research-station stream, central Kenya (UTC+3) — equatorial",
     "Stony Point":         "34°S, Coastal African Penguin colony with Cape Cormorants, Betty's Bay, Western Cape (UTC+2) — southern hemisphere",
     "Elephant Pan":        "22°S, Northern Tuli Block riparian waterhole, Mashatu area, eastern Botswana (UTC+2) — southern hemisphere",
 }
