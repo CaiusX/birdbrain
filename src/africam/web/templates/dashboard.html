@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import brief_body %}
+{% from "_macros.html" import brief_body, spectrogram_clip %}
 {% block title %}BirdBrain · dashboard{% endblock %}
 
 {% block head_extra %}
@@ -97,10 +97,14 @@
         {% if recently_heard %}
           <ul class="space-y-1.5">
             {% for sp in recently_heard %}
-              <li class="flex items-baseline justify-between gap-3 text-sm">
+              {% set _tz = source_tz.get(sp.source, 'UTC') %}
+              {% set _meta = sp.source ~ ' · ' ~ (sp.started_at | localtime(_tz, "%m-%d %H:%M")) ~ ' ' ~ (_tz | tz_abbr) %}
+              <li class="flex items-center gap-2 text-sm">
                 <a href="/species/{{ sp.scientific | urlencode }}"
-                   class="text-zinc-200 hover:text-emerald-300 truncate" title="{{ sp.scientific }}">{{ sp.common }}</a>
-                <span class="text-xs text-zinc-500 tabular-nums shrink-0">{{ ago(sp.age_s) }} ago</span>
+                   class="flex-1 min-w-0 text-zinc-200 hover:text-emerald-300 truncate" title="{{ sp.scientific }}">{{ sp.common }}</a>
+                {{ spectrogram_clip(sp.id, confidence=sp.confidence, common=sp.common,
+                     scientific=sp.scientific, meta=_meta, cls="shrink-0 w-20") }}
+                <span class="text-xs text-zinc-500 tabular-nums shrink-0 w-12 text-right">{{ ago(sp.age_s) }} ago</span>
               </li>
             {% endfor %}
           </ul>

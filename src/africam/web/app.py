@@ -27,6 +27,39 @@ def _zone_info(tz_name: str) -> ZoneInfo:
     except ZoneInfoNotFoundError:
         return ZoneInfo("UTC")
 
+
+@functools.lru_cache(maxsize=1)
+def _birdnet_catalog() -> list[dict[str, str]]:
+    """The full BirdNET global label set (~6.5k entries), read once from the
+    birdnetlib labels file. Each line is ``Scientific_Common``. Returns
+    ``{"scientific", "common"}`` dicts sorted by common name, deduped by common
+    name (the suggestion box inserts the common name). Importing ``LABEL_PATH``
+    does not load the TFLite model, so this is cheap. Empty list on any error
+    so the caller degrades to the server-rendered detected-species options."""
+    try:
+        from birdnetlib.analyzer import LABEL_PATH
+    except Exception:  # pragma: no cover - birdnetlib import/layout drift
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    try:
+        with open(LABEL_PATH, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                sci, _, common = line.partition("_")
+                common = common or sci
+                key = common.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"scientific": sci, "common": common})
+    except OSError:
+        return []
+    out.sort(key=lambda r: r["common"].casefold())
+    return out
+
 import squarify
 import structlog
 from fastapi import FastAPI, Form, HTTPException, Query, Request
@@ -732,6 +765,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
         )
 
+    @app.get("/api/species/catalog")
+    def species_catalog() -> JSONResponse:
+        """Every species BirdNET can output — the full global label set, not
+        just the ones detected here. Feeds the verification 'looked more like…'
+        suggestion box so the operator can name any species the model knows.
+        Read once from the birdnetlib labels file and cached; read-only, so
+        safe to serve publicly through the tunnel."""
+        return JSONResponse({"species": _birdnet_catalog()})
+
     @app.get("/sandbox", response_class=HTMLResponse)
     def sandbox_page(request: Request) -> HTMLResponse:
         """Live monitor for sources in sandbox (test) mode: detections appear as
@@ -797,29 +839,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             )
             rows = _group_detections(raw, group_minutes * 60)[:50]
-            # Most-recently-heard distinct species across the network (replays
-            # excluded), for the "recently heard" panel beside the map.
-            recent_sp = s.execute(
-                select(
-                    DetectionRow.scientific_name,
-                    func.max(DetectionRow.common_name),
-                    func.max(DetectionRow.started_at),
-                )
-                .where(Database.not_replay_predicate())
-                .group_by(DetectionRow.scientific_name)
-                .order_by(desc(func.max(DetectionRow.started_at)))
-                .limit(8)
-            ).all()
-        _now = datetime.now(UTC)
-        recently_heard = []
-        for sci, common, last in recent_sp:
-            if last is not None and last.tzinfo is None:
-                last = last.replace(tzinfo=UTC)
-            recently_heard.append({
-                "scientific": sci,
-                "common": common or sci,
-                "age_s": max(0, int((_now - last).total_seconds())) if last else None,
-            })
+            # Most-recently-heard distinct species (replays excluded), for the
+            # "recently heard" panel beside the map. Dedupe the recent feed by
+            # species, keeping each one's latest detection — that row carries the
+            # clip id so the panel can show a (clickable) spectrogram.
+            _now = datetime.now(UTC)
+            recently_heard: list[dict] = []
+            _seen_sci: set[str] = set()
+            for r in raw:
+                if r.scientific_name in _seen_sci:
+                    continue
+                _seen_sci.add(r.scientific_name)
+                last = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
+                recently_heard.append({
+                    "id": r.id,
+                    "scientific": r.scientific_name,
+                    "common": r.common_name or r.scientific_name,
+                    "confidence": r.confidence,
+                    "source": r.source_name,
+                    "started_at": r.started_at,
+                    "age_s": max(0, int((_now - last).total_seconds())),
+                })
+                if len(recently_heard) >= 8:
+                    break
 
         sites_activity, front_stats, site_pairs = _front_activity(sources_by_name)
         tiles_for_js = [

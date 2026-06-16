@@ -35,7 +35,9 @@
       </a>
       <div class="min-w-0">
         <div class="flex items-center gap-1.5 flex-wrap">
-          <div id="spec-modal-species" class="text-base font-medium truncate"></div>
+          <a id="spec-modal-species" href="#"
+             class="text-base font-medium truncate hover:text-emerald-300"
+             title="open species page"></a>
           <span id="spec-modal-status"
                 class="hidden px-1 py-0 rounded text-[10px] font-medium tabular-nums border"
                 title=""></span>
@@ -205,10 +207,21 @@
 
     <div id="spec-confirm-suggest-wrap" class="mt-4 hidden">
       <label for="spec-confirm-suggest" class="text-xs uppercase tracking-wider text-zinc-500">Looked more like…</label>
-      <input id="spec-confirm-suggest" type="text" list="known-species"
-             placeholder="optional — type a species"
-             class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2.5 text-sm text-zinc-100"
-             autocomplete="off" spellcheck="false">
+      {# Custom autocomplete, not a native <datalist>: Firefox paints datalist
+         popups under a modal <dialog>'s top layer, so they never surface.
+         This list lives inside the dialog, so it renders correctly. #}
+      <div class="relative mt-1">
+        <input id="spec-confirm-suggest" type="text"
+               placeholder="optional — type any species"
+               class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2.5 text-sm text-zinc-100"
+               autocomplete="off" spellcheck="false"
+               role="combobox" aria-autocomplete="list" aria-expanded="false"
+               aria-controls="spec-confirm-suggest-list">
+        <ul id="spec-confirm-suggest-list"
+            role="listbox"
+            class="hidden absolute left-0 right-0 top-full mt-1 z-10 max-h-56 overflow-y-auto
+                   rounded border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/50"></ul>
+      </div>
     </div>
 
     <div class="mt-4">
@@ -429,6 +442,9 @@
     currentSoundRating = parseInt(btn.dataset.soundRating, 10) || null;
     currentSci = btn.dataset.scientific || '';
     speciesEl.textContent = btn.dataset.species || '';
+    // Common name links through to the species page (same scientific-name
+    // route the row links use). No sci name → leave it inert.
+    speciesEl.href = currentSci ? `/species/${encodeURIComponent(currentSci)}` : '#';
     sciEl.textContent     = currentSci;
     metaEl.textContent    = btn.dataset.meta || '';
     img.src = `/spectrograms/${currentId}.png?size=large&p=${encodeURIComponent(btn.dataset.palette || 'fire')}`;
@@ -994,6 +1010,101 @@
   // --- Two-step verification confirm popup ---------------------------------
   let pendingLabel = null;     // verdict awaiting confirmation
   let confirmRating = null;    // star rating chosen inside the popup
+
+  // The "looked more like…" box autocompletes against every species BirdNET
+  // knows (the full global label set), not just the ones detected here. The
+  // catalog is ~6.5k entries, fetched once on first need. We render our own
+  // dropdown (see the combobox markup) rather than a native <datalist>, which
+  // Firefox won't surface inside a modal <dialog>.
+  const confirmSuggestList = document.getElementById('spec-confirm-suggest-list');
+  let speciesCatalog = [];
+  let catalogLoaded = false;
+  let suggestMatches = [];
+  let suggestActiveIdx = -1;
+  let suppressConfirmCancel = false;  // ESC closes the dropdown, not the popup
+
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"]/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  async function ensureSpeciesCatalog() {
+    if (catalogLoaded) return;
+    catalogLoaded = true;
+    try {
+      const resp = await fetch('/api/species/catalog');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      speciesCatalog = data.species || [];
+    } catch (_) {
+      catalogLoaded = false;  // allow a retry next time the popup opens
+      // Fall back to whatever detected species the page server-rendered.
+      const dl = document.getElementById('known-species');
+      if (dl && !speciesCatalog.length) {
+        speciesCatalog = [...dl.options].map((o) => ({ common: o.value, scientific: '' }));
+      }
+    }
+  }
+
+  function hideSuggest() {
+    confirmSuggestList.classList.add('hidden');
+    confirmSuggestList.innerHTML = '';
+    confirmSuggest.setAttribute('aria-expanded', 'false');
+    suggestMatches = [];
+    suggestActiveIdx = -1;
+  }
+
+  function renderSuggest(query) {
+    const q = (query || '').trim().toLowerCase();
+    if (!q) { hideSuggest(); return; }
+    const starts = [], contains = [];
+    for (const s of speciesCatalog) {
+      const c = (s.common || '').toLowerCase();
+      if (c.startsWith(q)) starts.push(s);
+      else if (c.includes(q) || (s.scientific || '').toLowerCase().includes(q)) contains.push(s);
+      if (starts.length >= 12) break;
+    }
+    suggestMatches = starts.concat(contains).slice(0, 12);
+    suggestActiveIdx = -1;
+    if (!suggestMatches.length) { hideSuggest(); return; }
+    confirmSuggestList.innerHTML = suggestMatches.map((s, i) =>
+      `<li data-idx="${i}" role="option"
+           class="px-3 py-1.5 cursor-pointer flex items-baseline justify-between gap-2 hover:bg-zinc-800">
+         <span class="text-zinc-100 text-sm">${escHtml(s.common)}</span>
+         <span class="text-xs italic text-zinc-500 truncate">${escHtml(s.scientific)}</span>
+       </li>`).join('');
+    confirmSuggestList.classList.remove('hidden');
+    confirmSuggest.setAttribute('aria-expanded', 'true');
+  }
+
+  function paintActiveSuggest() {
+    [...confirmSuggestList.children].forEach((li, i) => {
+      li.classList.toggle('bg-zinc-800', i === suggestActiveIdx);
+      if (i === suggestActiveIdx) li.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function pickSuggest(i) {
+    const s = suggestMatches[i];
+    if (!s) return;
+    confirmSuggest.value = s.common;
+    hideSuggest();
+    confirmSuggest.focus();
+  }
+
+  confirmSuggest.addEventListener('input', () => renderSuggest(confirmSuggest.value));
+  confirmSuggest.addEventListener('focus', () => {
+    if (confirmSuggest.value.trim()) renderSuggest(confirmSuggest.value);
+  });
+  // Hide on blur, but after a tick so a click on the list still registers.
+  confirmSuggest.addEventListener('blur', () => setTimeout(hideSuggest, 120));
+  // mousedown (not click) so it fires before the input's blur.
+  confirmSuggestList.addEventListener('mousedown', (e) => {
+    const li = e.target.closest('[data-idx]');
+    if (!li) return;
+    e.preventDefault();
+    pickSuggest(parseInt(li.dataset.idx, 10));
+  });
   const verdictText  = { good: '✓ good', bad: '✗ bad', unsure: '? unsure' };
   const verdictColor = { good: 'text-emerald-300', bad: 'text-rose-300', unsure: 'text-amber-300' };
 
@@ -1015,6 +1126,8 @@
     const needSuggest = (value === 'bad' || value === 'unsure');
     confirmSuggestWrap.classList.toggle('hidden', !needSuggest);
     confirmSuggest.value = needSuggest ? currentSuggested : '';
+    hideSuggest();
+    if (needSuggest) ensureSpeciesCatalog();
     paintStars(confirmRating);
     if (typeof confirmDlg.showModal === 'function') confirmDlg.showModal();
     else confirmDlg.setAttribute('open', '');
@@ -1084,10 +1197,33 @@
     closeConfirm();
   });
   confirmSuggest.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); confirmOk.click(); }
+    const open = !confirmSuggestList.classList.contains('hidden');
+    if (e.key === 'ArrowDown' && open) {
+      e.preventDefault();
+      suggestActiveIdx = Math.min(suggestMatches.length - 1, suggestActiveIdx + 1);
+      paintActiveSuggest();
+    } else if (e.key === 'ArrowUp' && open) {
+      e.preventDefault();
+      suggestActiveIdx = Math.max(0, suggestActiveIdx - 1);
+      paintActiveSuggest();
+    } else if (e.key === 'Escape' && open) {
+      // Close the dropdown, not the whole popup; swallow the dialog's ESC.
+      e.preventDefault();
+      suppressConfirmCancel = true;
+      hideSuggest();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && suggestActiveIdx >= 0) pickSuggest(suggestActiveIdx);
+      else confirmOk.click();
+    }
   });
-  // Backdrop click / ESC just dismiss — no label is written.
-  confirmDlg.addEventListener('cancel', (e) => { e.preventDefault(); closeConfirm(); });
+  // Backdrop click / ESC just dismiss — no label is written. (But if ESC was
+  // used to close the suggestion dropdown, leave the popup open.)
+  confirmDlg.addEventListener('cancel', (e) => {
+    e.preventDefault();
+    if (suppressConfirmCancel) { suppressConfirmCancel = false; return; }
+    closeConfirm();
+  });
   confirmDlg.addEventListener('click', (e) => { if (e.target === confirmDlg) closeConfirm(); });
 
   closeBtn.addEventListener('click', closeIt);
