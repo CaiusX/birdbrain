@@ -2644,11 +2644,27 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 y = 30.0 - (max(0, min(100, sc)) / 100.0) * 30.0
                 pts.append(f"{x:.1f},{y:.1f}")
             audio_sparkline = " ".join(pts)
+        # Activity clock: the same radial dial the dashboard map used to
+        # open in a modal, now surfaced inline on the site page. Computed
+        # here because the simple bar histogram it replaces only needed the
+        # `hours` array; the dial also wants solar bands + the current hour.
+        # `local_now` above is a formatted string, so derive a fresh dt.
+        dial_now = datetime.now(local_tz)
+        dial_bands = (
+            _solar_bands(dial_now.date(), src_cfg.lat, src_cfg.lon, local_tz)
+            if src_cfg and src_cfg.lat is not None and src_cfg.lon is not None
+            else []
+        )
+        dial_svg = _radial_dial_svg(
+            hours, highlight=dial_now.hour, bands=dial_bands,
+            compact=False, interactive=True,
+        )
         return TEMPLATES.TemplateResponse(
             request,
             "site_detail.html",
             {
                 "name": name,
+                "dial_svg": dial_svg,
                 "src_cfg": src_cfg,
                 "source_color": SOURCE_COLORS.get(name, "#10b981"),
                 "video_id": video_id,

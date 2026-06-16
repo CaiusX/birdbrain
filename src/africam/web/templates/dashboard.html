@@ -386,12 +386,13 @@
     m.bindTooltip(`${s.name} · ${s.species_24h} species (24h)`, {
       permanent: false, direction: 'top', offset: [0, -4], className: 'site-label',
     });
-    // Dot click opens the hour-drill modal directly — no intermediate
-    // popup. Avoids two problems: Leaflet popups near the map's edge get
-    // clipped by the map container (a 460 px box), and enabling autoPan
-    // to fix that drifts the welcome Africa-fit view under the user. The
-    // modal is fullscreen so neither happens.
-    m.on('click', () => openDrill(s, currentHourFor(s)));
+    // Dot click goes straight to the site page, which now hosts the
+    // interactive activity clock (the same hour-drill the modal offered).
+    // The fullscreen modal below is left in place but no longer opened
+    // from the map — kept for any future caller.
+    m.on('click', () => {
+      window.location.href = `/site/${encodeURIComponent(s.name)}`;
+    });
     markers[s.name] = m;
   });
 

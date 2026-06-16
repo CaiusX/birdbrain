@@ -406,20 +406,19 @@
 </section>
 {% endif %}
 
-<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 px-5 py-4">
-  <div class="flex items-baseline justify-between mb-3">
-    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">hourly activity ({{ tz_name }})</h3>
-    <span class="text-[10px] text-zinc-500 tabular-nums">peak: {{ peak_hour }} detections</span>
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 overflow-hidden">
+  <div class="flex items-baseline justify-between px-5 py-3 border-b border-zinc-800">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">activity clock ({{ tz_name }})</h3>
+    <span class="text-[10px] text-zinc-500">click any hour to inspect</span>
   </div>
-  <div class="flex gap-1 h-32">
-    {% for c in hours %}
-      <div class="flex-1 flex flex-col items-center justify-end gap-1">
-        <div class="w-full bg-emerald-500/80 rounded-t"
-             style="height: {{ (c / peak_hour * 100)|round(1) }}%; min-height: 1px;"
-             title="{{ loop.index0 }}:00 — {{ c }} detections"></div>
-        <span class="text-[9px] text-zinc-600 tabular-nums">{{ "%02d"|format(loop.index0) }}</span>
-      </div>
-    {% endfor %}
+  <div class="grid grid-cols-1 md:grid-cols-[1fr_320px]">
+    <div id="site-dial" class="map-dial p-5 mx-auto w-full max-w-[460px]">
+      {{ dial_svg | safe }}
+    </div>
+    <div id="site-hour-rail"
+         class="md:border-l border-t md:border-t-0 border-zinc-800 bg-zinc-900/40 min-h-[200px]">
+      <div class="px-5 py-6 text-sm text-zinc-500 italic">Loading…</div>
+    </div>
   </div>
 </section>
 
@@ -524,4 +523,66 @@
     <p class="px-5 py-4 text-xs text-zinc-500">No recorded outages.</p>
   {% endif %}
 </section>
+
+<script>
+// Activity-clock drill. Each hour wedge (and the centre hub) is clickable;
+// it loads that hour's detections into the side rail via the same partial
+// the dashboard modal used (/partials/site-hour-detail), scoped to this
+// site. The current site-local hour is loaded on page load so the rail is
+// never empty.
+(function () {
+  const SOURCE = {{ name | tojson }};
+  const TZ = {{ tz_name | tojson }};
+  const dial = document.getElementById('site-dial');
+  const rail = document.getElementById('site-hour-rail');
+  if (!dial || !rail) return;
+
+  function currentHour() {
+    try {
+      const f = new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit', hour12: false, timeZone: TZ,
+      });
+      return parseInt(f.format(new Date()), 10) || 0;
+    } catch (_e) { return new Date().getHours(); }
+  }
+
+  function refreshFocus(hour) {
+    dial.querySelectorAll('.dial-wedge--focus').forEach(p => {
+      p.classList.remove('dial-wedge--focus');
+      p.removeAttribute('stroke');
+      p.removeAttribute('stroke-width');
+    });
+    const w = dial.querySelector(`.dial-wedge[data-hour="${hour}"]`);
+    if (w) {
+      w.classList.add('dial-wedge--focus');
+      w.setAttribute('stroke', '#10b981');
+      w.setAttribute('stroke-width', '2');
+    }
+  }
+
+  function loadHour(hour) {
+    refreshFocus(hour);
+    rail.innerHTML =
+      '<div class="px-5 py-6 text-sm text-zinc-500 italic">Loading…</div>';
+    fetch(`/partials/site-hour-detail?source=${encodeURIComponent(SOURCE)}&hour=${hour}`,
+          { headers: { 'HX-Request': 'true' } })
+      .then(r => r.text())
+      .then(html => { rail.innerHTML = html; })
+      .catch(() => {
+        rail.innerHTML =
+          '<div class="px-5 py-6 text-sm text-rose-300">Failed to load hour detail.</div>';
+      });
+  }
+
+  dial.addEventListener('click', (e) => {
+    const wedge = e.target.closest('.dial-wedge');
+    const centre = e.target.closest('[data-dial-centre]');
+    if (!wedge && !centre) return;
+    const hour = wedge ? parseInt(wedge.dataset.hour, 10) : currentHour();
+    loadHour(hour);
+  });
+
+  loadHour(currentHour());
+})();
+</script>
 {% endblock %}
