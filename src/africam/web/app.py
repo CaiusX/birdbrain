@@ -378,9 +378,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     # Public-tunnel gate: Cloudflare attaches CF-Connecting-IP on every proxied
     # request, so its presence identifies traffic that came in via the public
-    # birds.vcexl.com tunnel (vs LAN/localhost on the Pi). For public visitors
-    # we hide /admin and refuse all mutating verbs — keeps the dashboard
-    # read-only without putting a login in front of the whole site.
+    # Cloudflare tunnel — host-agnostic, so any public hostname (birdbrain.co.za,
+    # birds.vcexl.com, …) is gated the same way, vs LAN/localhost on the Pi. For
+    # public visitors we hide /admin and refuse all mutating verbs — keeps the
+    # dashboard read-only without putting a login in front of the whole site.
     _PUBLIC_BLOCKED_PREFIXES = ("/admin",)
     _PUBLIC_BLOCKED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 
