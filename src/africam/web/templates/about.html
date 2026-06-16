@@ -1,15 +1,11 @@
 {% extends "base.html" %}
+{% from "_macros.html" import brand_lockup %}
 {% block title %}BirdBrain · about{% endblock %}
 
 {% block content %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-5 max-w-3xl">
-  <div class="flex items-center gap-4">
-    <img src="/static/birdbrain-logo.svg" alt="" aria-hidden="true" class="w-14 h-14 shrink-0">
-    <div>
-      <div class="text-2xl font-semibold tracking-tight text-zinc-100">BirdBrain</div>
-      <h2 class="text-sm uppercase tracking-wider text-zinc-500">About this site</h2>
-    </div>
-  </div>
+  {{ brand_lockup(text_cls='text-3xl') }}
+  <h2 class="mt-1 text-sm uppercase tracking-wider text-zinc-500">About this site</h2>
   <p class="mt-3 text-sm text-zinc-300 leading-relaxed">
     Real-time bird species recognition from live African wildlife cams.
     Listens to the audio from

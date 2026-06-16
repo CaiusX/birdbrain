@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import brief_body, spectrogram_clip %}
+{% from "_macros.html" import brief_body, spectrogram_clip, brand_lockup %}
 {% block title %}BirdBrain · dashboard{% endblock %}
 
 {% block head_extra %}
@@ -81,11 +81,7 @@
       {# Brand lockup: mark + wordmark, the leaf-tip dots in the logo echo the
          site-coloured dots on the map next door. Subtitle below the rule
          ties the brand to what the page is doing. #}
-      <div class="flex items-center gap-3">
-        <img src="/static/birdbrain-logo.svg" alt=""
-             class="w-9 h-9 shrink-0" aria-hidden="true">
-        <span class="text-2xl font-semibold tracking-tight text-zinc-100">BirdBrain</span>
-      </div>
+      <div>{{ brand_lockup(text_cls='text-2xl', home=True) }}</div>
       <div class="mt-4 mb-4 border-t border-zinc-800"></div>
       <h2 class="text-base font-medium text-zinc-200 leading-snug">
         Listening to {{ sites_activity | length }} African wildlife streams

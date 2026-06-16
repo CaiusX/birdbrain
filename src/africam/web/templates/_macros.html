@@ -1,5 +1,32 @@
 {# Shared Jinja macros. Imported with: {% from "_macros.html" import iucn_badge %} #}
 
+{# --- Brand lockup -------------------------------------------------------- #}
+{# The two-tone wordmark: emerald base B → gold tip B, echoing the logo's
+   trunk→canopy colours. Use everywhere "BirdBrain" appears as the title. #}
+{% macro brand_word() -%}<span style="color:#059669;">B</span>ird<span style="color:#f59e0b;">B</span>rain{%- endmacro %}
+
+{# The tightly-cropped tree mark, inline-sized so its canopy sits at the cap
+   line and its trunk on the baseline (viewBox aspect w/h = 1.233). #}
+{% macro brand_mark(logo_em='0.72em', gap='0.06em') -%}
+<span aria-hidden="true" style="display:inline-block;height:{{ logo_em }};width:calc({{ logo_em }} * 1.233);vertical-align:0;margin-right:{{ gap }};background:url('/static/birdbrain-logo-tight.svg') left bottom/contain no-repeat;"></span>
+{%- endmacro %}
+
+{# Full lockup: tree mark + two-tone wordmark on one baseline. The canonical
+   logo/title for the whole site — use this for every visible "BirdBrain".
+   modal=True makes the mark open the brand modal + the word link home (header);
+   home=True links the whole lockup to / (e.g. the dashboard panel); neither =
+   a static title (about/help). text_cls sets the scale; the mark follows it. #}
+{% macro brand_lockup(logo_em='0.72em', text_cls='text-xl', gap='0.06em', modal=False, home=False) -%}
+{%- set base = text_cls ~ ' font-semibold tracking-tight text-zinc-100 leading-none whitespace-nowrap' -%}
+{%- if modal -%}
+<span class="{{ base }}"><button type="button" onclick="document.getElementById('brand-modal').showModal()" aria-label="About BirdBrain" class="p-0 align-baseline rounded hover:opacity-80 transition-opacity">{{ brand_mark(logo_em, gap) }}</button><a href="/" class="hover:opacity-80 transition-opacity">{{ brand_word() }}</a></span>
+{%- elif home -%}
+<a href="/" class="{{ base }} hover:opacity-80 transition-opacity">{{ brand_mark(logo_em, gap) }}{{ brand_word() }}</a>
+{%- else -%}
+<span class="{{ base }}">{{ brand_mark(logo_em, gap) }}{{ brand_word() }}</span>
+{%- endif -%}
+{%- endmacro %}
+
 {# Render a parsed daily brief: one overall highlights paragraph + per-site
    bullet lists. Pass the result of the `parse_brief` filter. Site names link
    to their site page (the generator uses exact source names). #}

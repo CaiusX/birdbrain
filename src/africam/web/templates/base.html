@@ -1,3 +1,4 @@
+{% from "_macros.html" import brand_lockup, brand_word %}
 <!doctype html>
 <html lang="en">
 <head>
@@ -110,19 +111,9 @@
   <header class="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/90 supports-[backdrop-filter]:bg-zinc-950/70 backdrop-blur">
     <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
       <div class="flex items-baseline gap-6">
-        {# Brand lockup: tightly-cropped tree logo seated on the baseline at the
-           cap line, then the wordmark with two-tone B's (emerald base → gold
-           tip). Logo opens the brand modal; the word links home. Inline (not
-           flex) so the mark aligns to the caps in size and position. #}
-        <div class="text-xl font-semibold tracking-tight text-zinc-100 leading-none whitespace-nowrap">
-          <button type="button"
-                  onclick="document.getElementById('brand-modal').showModal()"
-                  aria-label="About BirdBrain"
-                  class="p-0 align-baseline rounded hover:opacity-80 transition-opacity">
-            <span aria-hidden="true"
-                  style="display:inline-block;height:0.72em;width:calc(0.72em * 1.233);vertical-align:0;background:url('/static/birdbrain-logo-tight.svg') left bottom/contain no-repeat;"></span>
-          </button><a href="/" class="hover:opacity-80 transition-opacity" style="margin-left:0.06em;"><span style="color:#059669;">B</span>ird<span style="color:#f59e0b;">B</span>rain</a>
-        </div>
+        {# Canonical brand lockup (see _macros.html): tree mark at cap height +
+           two-tone wordmark. Mark opens the brand modal; the word links home. #}
+        {{ brand_lockup(text_cls='text-xl', modal=True) }}
         <nav class="flex items-baseline gap-4 text-sm">
           <a href="/" class="text-zinc-400 hover:text-zinc-100">live</a>
           <a href="/scoreboard" class="text-zinc-400 hover:text-zinc-100">scoreboard</a>
@@ -249,8 +240,8 @@
              class="w-full max-w-[300px] h-auto">
       </div>
 
-      <h2 class="text-2xl font-semibold tracking-tight text-center text-zinc-100 mb-3">
-        BirdBrain
+      <h2 class="text-2xl font-semibold tracking-tight text-center mb-3">
+        {{ brand_word() }}
       </h2>
 
       <p class="text-sm text-zinc-300 leading-relaxed text-center mx-auto max-w-sm">

@@ -15,6 +15,7 @@ Writes ten SVG files into src/africam/web/static/logo-test/.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 # ---- Palette ---------------------------------------------------------------
@@ -478,14 +479,58 @@ VARIANTS = [
 # ---- Driver ----------------------------------------------------------------
 
 
+def crop_to_content(svg_text: str, pad: float = 1.0) -> tuple[str, float]:
+    """Tighten an SVG's viewBox to its drawn-content bbox (+``pad``), removing
+    surrounding whitespace. Returns (cropped_svg, width/height aspect).
+
+    The chosen wordmark lockup places the logo inline so its canopy sits at the
+    cap line and its trunk on the baseline — that only works with no whitespace
+    above/below the mark, hence this tight crop. The header CSS sizes the mark
+    by height and derives width from the returned aspect.
+
+    Bbox is taken over the branches (lines) and leaves (circles) only — i.e. the
+    *tree*. Any head-accent above the canopy (beak/crest polygons) sits above
+    this frame and is intentionally cropped out, so the inline mark reads as a
+    clean tree whose canopy top is the cap line."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for m in re.finditer(
+        r'<line x1="([-\d.]+)" y1="([-\d.]+)" x2="([-\d.]+)" y2="([-\d.]+)" '
+        r'stroke="[^"]+" stroke-width="([\d.]+)"', svg_text):
+        x1, y1, x2, y2, w = map(float, m.groups())
+        h = w / 2
+        xs += [x1 - h, x1 + h, x2 - h, x2 + h]
+        ys += [y1 - h, y1 + h, y2 - h, y2 + h]
+    for m in re.finditer(r'<circle cx="([-\d.]+)" cy="([-\d.]+)" r="([\d.]+)"', svg_text):
+        cx, cy, r = map(float, m.groups())
+        xs += [cx - r, cx + r]
+        ys += [cy - r, cy + r]
+    minx, maxx = min(xs) - pad, max(xs) + pad
+    miny, maxy = min(ys) - pad, max(ys) + pad
+    w, h = maxx - minx, maxy - miny
+    vb = f'viewBox="{minx:.1f} {miny:.1f} {w:.1f} {h:.1f}"'
+    return re.sub(r'viewBox="[^"]+"', vb, svg_text, count=1), w / h
+
+
 def main() -> None:
-    out_dir = Path(__file__).resolve().parent.parent / "src/africam/web/static/logo-test"
+    static_dir = Path(__file__).resolve().parent.parent / "src/africam/web/static"
+    out_dir = static_dir / "logo-test"
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Writing 10 variants to {out_dir}")
+    print(f"Writing {len(VARIANTS)} variants to {out_dir}")
     for n, name, _blurb, builder in VARIANTS:
         path = out_dir / f"logo-{n:02d}.svg"
         path.write_text(builder())
         print(f"  logo-{n:02d}.svg  ({path.stat().st_size:>5} bytes)  {name}")
+
+    # Tight crop of the chosen production logo, for the inline wordmark lockup.
+    main_logo = static_dir / "birdbrain-logo.svg"
+    if main_logo.exists():
+        tight, aspect = crop_to_content(main_logo.read_text())
+        (static_dir / "birdbrain-logo-tight.svg").write_text(tight)
+        print(f"  birdbrain-logo-tight.svg  (cropped, aspect w/h = {aspect:.3f} "
+              f"— set the lockup width to height × this)")
+    else:
+        print("  (birdbrain-logo.svg not found — skipped tight crop)")
 
 
 if __name__ == "__main__":
