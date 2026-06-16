@@ -15,6 +15,16 @@
   /* The expanded clockface still uses .map-dial inside the popup. */
   .map-dial svg { width: 100% !important; height: 100% !important; max-width: none !important; }
   .map-dial { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); }
+  /* Dark theme for the site-summary popup (Leaflet's default is white). */
+  .site-popup .leaflet-popup-content-wrapper {
+    background: #18181b; color: #e4e4e7;
+    border: 1px solid #27272a; border-radius: 0.6rem;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.55);
+  }
+  .site-popup .leaflet-popup-content { margin: 0; }
+  .site-popup .leaflet-popup-tip { background: #18181b; border: 1px solid #27272a; }
+  .site-popup .leaflet-popup-close-button { color: #71717a; padding: 6px 7px 0 0; }
+  .site-popup .leaflet-popup-close-button:hover { color: #e4e4e7; }
 </style>
 {% endblock %}
 
@@ -45,7 +55,7 @@
     <div class="text-2xl font-semibold tabular-nums">{{ "{:,}".format(st.det_24h) }}</div>
   </div>
   <div class="bg-zinc-900 px-5 py-3">
-    <div class="text-[10px] uppercase tracking-wider text-zinc-500">cams live</div>
+    <div class="text-[10px] uppercase tracking-wider text-zinc-500">sites running</div>
     {% set wc = 'text-emerald-300' if st.cams_live == st.cams_total and st.cams_total > 0 else ('text-rose-300' if st.cams_live == 0 else 'text-amber-300') %}
     <div class="text-2xl font-semibold tabular-nums {{ wc }}">{{ st.cams_live }}/{{ st.cams_total }}</div>
   </div>
@@ -377,6 +387,27 @@
   // the click popup so the map itself stays calm.
   const DOT_PX = 14;
   const markers = {};
+
+  // Concise site summary shown in the map popup. The whole card is a link to
+  // the full site page — location/biome + a couple of all-time figures, no more.
+  function siteSummaryHtml(s) {
+    const row = (label, value) =>
+      `<div class="flex justify-between gap-4"><dt class="text-zinc-500">${label}</dt>`
+      + `<dd class="tabular-nums text-zinc-200">${value}</dd></div>`;
+    const rows = [row('species', s.species_all), row('heard · 24h', s.species_24h)];
+    if (s.online_since) rows.push(row('online since', escapeHtml(s.online_since)));
+    const biome = s.biome
+      ? `<div class="mt-0.5 text-xs text-zinc-400">${escapeHtml(s.biome)}</div>` : '';
+    return `<a href="/site/${encodeURIComponent(s.name)}"`
+      + ` class="block w-52 px-3 py-2.5 rounded-md hover:bg-zinc-800/60 transition-colors">`
+      + `<div class="flex items-center gap-2">`
+      + `<span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" style="background:${s.color}"></span>`
+      + `<strong class="text-sm font-semibold text-zinc-100">${escapeHtml(s.name)}</strong></div>`
+      + biome
+      + `<dl class="mt-2 space-y-0.5 text-xs text-zinc-400">${rows.join('')}</dl>`
+      + `<div class="mt-2 text-xs text-emerald-300">View site &rarr;</div></a>`;
+  }
+
   SITES.forEach(s => {
     const icon = L.divIcon({
       className: 'site-dot',
@@ -390,12 +421,10 @@
     m.bindTooltip(`${s.name} · ${s.species_24h} species (24h)`, {
       permanent: false, direction: 'top', offset: [0, -4], className: 'site-label',
     });
-    // Dot click goes straight to the site page, which now hosts the
-    // interactive activity clock (the same hour-drill the modal offered).
-    // The fullscreen modal below is left in place but no longer opened
-    // from the map — kept for any future caller.
-    m.on('click', () => {
-      window.location.href = `/site/${encodeURIComponent(s.name)}`;
+    // Dot click opens a concise site summary; the whole card links through to
+    // the full site page (which hosts the interactive activity clock etc.).
+    m.bindPopup(siteSummaryHtml(s), {
+      className: 'site-popup', closeButton: true, offset: [0, -6], minWidth: 208,
     });
     markers[s.name] = m;
   });

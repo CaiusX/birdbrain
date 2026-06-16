@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% from "_macros.html" import iucn_badge %}
+{% block title %}BirdBrain · help{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-5 max-w-3xl">
+  <div class="flex items-center gap-4 mb-4">
+    <img src="/static/birdbrain-logo.svg" alt="" aria-hidden="true" class="w-14 h-14 shrink-0">
+    <div>
+      <div class="text-2xl font-semibold tracking-tight text-zinc-100">BirdBrain</div>
+      <h2 class="text-sm uppercase tracking-wider text-zinc-500">Help &middot; how to read this site</h2>
+    </div>
+  </div>
+  <p class="mt-3 text-sm text-zinc-300 leading-relaxed">
+    BirdBrain listens to the audio of live African wildlife cams &mdash;
+    <a href="https://africam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">Africam</a>,
+    <a href="https://explore.org/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">explore.org</a>,
+    <a href="https://namibiacam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">NamibiaCam</a>,
+    and a garden microphone &mdash; and uses
+    <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">BirdNET</a>
+    to identify birds by their calls, around the clock. Everything you see here
+    is logged automatically: no one is sitting and listening. This page explains
+    how to read it. For credits and citation, see
+    <a href="/about" class="text-emerald-300 hover:text-emerald-200">about</a>.
+  </p>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 max-w-3xl">
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Reading a detection</h3>
+  </div>
+  <dl class="px-5 py-4 grid grid-cols-1 sm:grid-cols-[10rem_1fr] gap-x-6 gap-y-4 text-sm text-zinc-300">
+    <dt class="text-zinc-100 font-medium">Spectrogram</dt>
+    <dd class="text-zinc-400">
+      The little image on each detection is a <em>spectrogram</em> &mdash; a
+      picture of sound. Time runs left&nbsp;&rarr;&nbsp;right, pitch low&nbsp;&rarr;&nbsp;high
+      (bottom to top), and brightness is loudness. <strong class="text-zinc-200">Click any
+      spectrogram</strong> to open a player: hear the 3-second clip, watch the
+      playhead sweep across, and see coloured boxes marking where each species
+      likely called. You can compare it against reference recordings from
+      <a href="https://www.xeno-canto.org/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">Xeno-Canto</a>,
+      and click the bird's name to open its own page.
+    </dd>
+
+    <dt class="text-zinc-100 font-medium">Confidence</dt>
+    <dd class="text-zinc-400">
+      The number on each detection (0&ndash;1) is how sure BirdNET is &mdash;
+      higher means more certain. Quiet, distant, or overlapping calls score
+      lower. The site hides anything below a cutoff; the
+      <a href="/confidence" class="text-emerald-300 hover:text-emerald-200">confidence</a>
+      page lets you slide that cutoff and watch the counts change.
+    </dd>
+
+    <dt class="text-zinc-100 font-medium">Conservation status</dt>
+    <dd class="text-zinc-400">
+      Small coloured badges show a species' IUCN Red List status:
+      <span class="mt-2 flex flex-wrap gap-x-4 gap-y-2 text-xs text-zinc-400">
+        {% for code, name in [
+            ('LC','Least Concern'), ('NT','Near Threatened'), ('VU','Vulnerable'),
+            ('EN','Endangered'), ('CR','Critically Endangered')] %}
+          <span class="inline-flex items-center gap-1.5">{{ iucn_badge(code, size="md") }} {{ name }}</span>
+        {% endfor %}
+      </span>
+    </dd>
+  </dl>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 max-w-3xl">
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">Getting around</h3>
+  </div>
+  <dl class="px-5 py-4 grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-x-6 gap-y-3 text-sm text-zinc-300">
+    <dt><a href="/" class="text-zinc-100 hover:text-emerald-300 font-medium">live</a></dt>
+    <dd class="text-zinc-400">The home dashboard &mdash; a map of the cameras, today's summary, and the latest detections as they come in.</dd>
+
+    <dt><a href="/scoreboard" class="text-zinc-100 hover:text-emerald-300 font-medium">scoreboard</a></dt>
+    <dd class="text-zinc-400">Which sites are busiest and what's been heard most over a recent window.</dd>
+
+    <dt><a href="/species" class="text-zinc-100 hover:text-emerald-300 font-medium">species</a></dt>
+    <dd class="text-zinc-400">Browse every species heard, grouped by site. Click one for its own page with a range map, photo, and when it's active.</dd>
+
+    <dt><a href="/confidence" class="text-zinc-100 hover:text-emerald-300 font-medium">confidence</a></dt>
+    <dd class="text-zinc-400">Slide the certainty cutoff and watch how many species and detections survive &mdash; a feel for the quality/quantity trade-off.</dd>
+
+    <dt><a href="/review" class="text-zinc-100 hover:text-emerald-300 font-medium">review</a></dt>
+    <dd class="text-zinc-400">Listen through recent clips one by one, or look at moments where several species overlap in one window.</dd>
+
+    <dt><a href="/rare" class="text-zinc-100 hover:text-emerald-300 font-medium">rare</a></dt>
+    <dd class="text-zinc-400">Unusual, first-time, and conservation-flagged finds worth a second look.</dd>
+
+    <dt><a href="/diurnal" class="text-zinc-100 hover:text-emerald-300 font-medium">diurnal</a></dt>
+    <dd class="text-zinc-400">What's vocal at each hour of the day &mdash; the dawn chorus and who calls when.</dd>
+
+    <dt class="text-zinc-400">search</dt>
+    <dd class="text-zinc-400">The box at the top right jumps straight to any species' page by name.</dd>
+  </dl>
+</section>
+
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 px-5 py-4 max-w-3xl">
+  <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider mb-2">Good to know</h3>
+  <p class="text-sm text-zinc-400 leading-relaxed">
+    Times and hour-of-day charts are shown in each camera's <strong class="text-zinc-200">local
+    timezone</strong>, not yours. Automatic identification isn't perfect &mdash;
+    a low-confidence ID, an unexpected species, or a clip that doesn't sound right
+    is the model guessing, so trust your ears and the spectrogram. The AI-written
+    site summaries and species notes are generated context, not field records.
+  </p>
+</section>
+{% endblock %}

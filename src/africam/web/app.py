@@ -251,6 +251,27 @@ SOURCE_COLORS: dict[str, str] = {
 }
 
 
+# Short location + biome label per site, surfaced in the dashboard map's
+# site-summary popup. Mirrors the SOURCE_COLORS biome notes above. Sites not
+# listed (e.g. the garden mic) simply show no biome line.
+SOURCE_BIOME: dict[str, str] = {
+    "Tembe":               "KZN coastal sand forest",
+    "Olifants (Naledi)":   "Greater Kruger bushveld",
+    "Timbavati":           "Lowveld red soils",
+    "Twin Pan":            "Botswana pan & grassland",
+    "Safarihoek":          "Etosha Heights — arid",
+    "Tau Game Lodge":      "Madikwe bushveld",
+    "Tortilis Camp":       "Amboseli golden grass",
+    "Mara River":          "Mara Triangle — riverine",
+    "Mpala Watering Hole": "Laikipia acacia plateau",
+    "Stony Point":         "Atlantic penguin colony",
+    "Elephant Pan":        "Tuli rusty riparian",
+    "Kalahari":            "Kalahari red dune sand",
+    "Namib Desert":        "Namib pale dune sand",
+    "Okaukuejo":           "Etosha white salt pan",
+}
+
+
 def _solar_event_utc_hours(d: date, lat: float, lon: float,
                            altitude_deg: float, morning: bool) -> float | None:
     """Sunrise-equation solver. Returns the UTC fractional hour on date ``d``
@@ -528,6 +549,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             species_all = s.execute(
                 select(func.count(func.distinct(DetectionRow.scientific_name)))
             ).scalar()
+            # Per-site all-time figures for the map's site-summary popup: how
+            # many distinct species the site has ever logged, and when it first
+            # produced a detection ("online since").
+            species_all_by_src = dict(
+                s.execute(
+                    select(
+                        DetectionRow.source_name,
+                        func.count(func.distinct(DetectionRow.scientific_name)),
+                    ).group_by(DetectionRow.source_name)
+                ).all()
+            )
+            first_seen_by_src = dict(
+                s.execute(
+                    select(DetectionRow.source_name, func.min(DetectionRow.started_at))
+                    .group_by(DetectionRow.source_name)
+                ).all()
+            )
 
         # tz per source (cached) — drives source-local hour bucketing + bands.
         tz_cache: dict[str, ZoneInfo] = {}
@@ -565,6 +603,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             hours_arr = per_hours.get(name, [0] * 24)
             tz = _site_tz(name)
             local_now = now.astimezone(tz)
+            first_seen = first_seen_by_src.get(name)
+            if first_seen is not None:
+                if first_seen.tzinfo is None:
+                    first_seen = first_seen.replace(tzinfo=UTC)
+                online_since = first_seen.astimezone(tz).strftime("%-d %b %Y")
+            else:
+                online_since = None
             bands = (
                 _solar_bands(local_now.date(), site["lat"], site["lon"], tz)
                 if site["lat"] is not None and site["lon"] is not None
@@ -578,6 +623,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 # Falls back to the templates' default emerald.
                 "color": SOURCE_COLORS.get(name, "#10b981"),
                 "species_24h": len(sp),
+                # Site-summary popup fields (location/biome, all-time species,
+                # online-since). Concise by design — the popup links through to
+                # the full site page for everything else.
+                "biome": SOURCE_BIOME.get(name, ""),
+                "species_all": int(species_all_by_src.get(name, 0)),
+                "online_since": online_since,
                 # IANA tz so the modal's hour-drill JS can compute "now"
                 # in the site's clock without re-querying the server.
                 "tz": str(tz),
@@ -751,6 +802,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         """Static credits + citation page. No DB calls; safe to render publicly
         through the tunnel (middleware only blocks /admin + mutating verbs)."""
         return TEMPLATES.TemplateResponse(request, "about.html", {})
+
+    @app.get("/help", response_class=HTMLResponse)
+    def help_page(request: Request) -> HTMLResponse:
+        """Visitor guide: how to read the site (spectrograms, confidence, IUCN
+        colours) + a one-line tour of each page. Static, no DB — safe to serve
+        publicly through the tunnel."""
+        return TEMPLATES.TemplateResponse(request, "help.html", {})
 
     @app.get("/api/species/list")
     def species_list() -> JSONResponse:
