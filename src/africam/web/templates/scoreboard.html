@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import species_link %}
+{% from "_macros.html" import species_link, spectrogram_clip %}
 {% block title %}BirdBrain · scoreboard{% endblock %}
 
 {% block content %}
@@ -103,7 +103,11 @@
                 <span class="text-xs tabular-nums" title="{{ sp.best_at | localtime('UTC') }} UTC">
                   {{ sp.best_at | localtime(s.tz, "%m-%d %H:%M") }}
                 </span>
-                <audio src="/clips/{{ sp.best_id }}" controls preload="none" class="inline-block align-middle ml-2 h-7"></audio>
+                {{ spectrogram_clip(
+                     sp.best_id, confidence=sp.max_conf,
+                     common=sp.common, scientific=sp.scientific,
+                     meta=s.source,
+                     cls="inline-block align-middle ml-2 w-44") }}
               </td>
             </tr>
           {% endfor %}
@@ -114,4 +118,6 @@
     {% endif %}
   </section>
 {% endfor %}
+
+{% include "_spectrogram_modal.html" %}
 {% endblock %}

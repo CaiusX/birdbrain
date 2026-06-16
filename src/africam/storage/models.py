@@ -33,6 +33,10 @@ class DetectionRow(Base):
     # Free-text (auto-completed from species we've already detected). NULL
     # whenever label is anything other than 'bad'.
     suggested_species: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Manual sound-quality rating from the review popup: 1 (faint/noisy) – 5
+    # (crisp). Independent of ``label`` — a correct ID can still sound poor.
+    # NULL when the rater didn't give one.
+    sound_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Perceptual fingerprint of the saved clip (see africam.audio_hash). Lets
     # us detect when a YouTube source replays a highlight reel or airs the
     # same advertisement: two replays produce the same hash, so we hide all

@@ -28,6 +28,7 @@
             data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
             data-label="{{ lbl or '' }}"
             data-suggested="{{ r.suggested_species or '' }}"
+            data-sound-rating="{{ r.sound_rating or '' }}"
             data-palette="{{ sp_palette }}"
             class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
             style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
@@ -57,6 +58,10 @@
       </span>
     {% else %}
       <span class="text-xs text-zinc-600">unreviewed</span>
+    {% endif %}
+    {% if r.sound_rating %}
+      <span class="ml-1.5 text-[11px] text-amber-300 tabular-nums shrink-0"
+            title="sound quality {{ r.sound_rating }}/5">{{ '★' * r.sound_rating }}</span>
     {% endif %}
   </div>
 </li>

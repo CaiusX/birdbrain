@@ -88,3 +88,33 @@
 {%- endif -%}
 {%- endif -%}
 {%- endmacro %}
+
+{# Clickable spectrogram thumbnail for a saved clip. Replaces bare <audio>
+   players: the spectrogram IS the affordance — clicking it opens the
+   review modal (_spectrogram_modal.html, which must be included on the
+   page) where the clip plays and can be labelled. The modal reads each
+   data-* with an empty-string fallback and fetches the rest by detection
+   id, so callers pass whatever metadata they have. `cls` controls
+   display/width (e.g. "block w-full" or "inline-block w-44 align-middle"). #}
+{% macro spectrogram_clip(id, confidence=None, common='', scientific='', meta='', label='', suggested='', sound_rating='', palette='fire', cls='block w-full') -%}
+  <button type="button" data-spectrogram-trigger
+          data-detection-id="{{ id }}"
+          data-species="{{ common }}"
+          data-scientific="{{ scientific }}"
+          data-meta="{{ meta }}"
+          data-label="{{ label }}"
+          data-suggested="{{ suggested }}"
+          data-sound-rating="{{ sound_rating }}"
+          data-palette="{{ palette }}"
+          class="relative h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition {{ cls }}"
+          {% if confidence is not none %}style="--w: {{ (confidence * 100)|round(0)|int }}%;"{% endif %}
+          title="click to review">
+    <img src="/spectrograms/{{ id }}.png?p={{ palette }}" alt=""
+         class="absolute inset-0 w-full h-full object-cover pointer-events-none" loading="lazy">
+    {% if confidence is not none %}
+    <span class="absolute inset-0 flex items-center justify-center text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
+      {{ "%.2f"|format(confidence) }}
+    </span>
+    {% endif %}
+  </button>
+{%- endmacro %}

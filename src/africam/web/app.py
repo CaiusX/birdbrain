@@ -4048,6 +4048,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if "suggested" in form:
             s_raw = form.get("suggested") or ""
             kwargs["suggested"] = s_raw.strip() or None
+        # sound_rating: absent → leave untouched; present-but-empty → clear;
+        # "1".."5" → set. Anything else is a bad request.
+        if "sound_rating" in form:
+            r_raw = (form.get("sound_rating") or "").strip()
+            if r_raw == "":
+                kwargs["sound_rating"] = None
+            elif r_raw in ("1", "2", "3", "4", "5"):
+                kwargs["sound_rating"] = int(r_raw)
+            else:
+                raise HTTPException(400, "sound_rating must be 1-5 or empty")
         ok = db.set_detection_label(detection_id, new_label, **kwargs)
         if not ok:
             raise HTTPException(404, "detection not found")

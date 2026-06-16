@@ -118,7 +118,7 @@
     </div>
 
     <div class="mt-4 flex items-center justify-between gap-3 flex-wrap">
-      <p class="text-xs text-zinc-500">click the spectrogram to seek</p>
+      <p class="text-xs text-zinc-500">tap a verdict to confirm &amp; rate</p>
       <div class="flex items-center gap-1.5">
         <button type="button" data-label-btn="bad"
                 class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
@@ -133,21 +133,6 @@
                 class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
                 title="Clear label">↺</button>
       </div>
-    </div>
-
-    <div id="spec-modal-suggest" class="mt-3 hidden">
-      <label for="spec-modal-suggest-input" class="text-xs uppercase tracking-wider text-zinc-500">
-        Looked more like…
-      </label>
-      <div class="flex gap-2 mt-1">
-        <input id="spec-modal-suggest-input" type="text" list="known-species"
-               placeholder="type a species (autocompletes from already-detected)"
-               class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100"
-               autocomplete="off" spellcheck="false">
-        <button type="button" id="spec-modal-suggest-save"
-                class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 text-sm font-medium hover:bg-white">save</button>
-      </div>
-      <p id="spec-modal-suggest-current" class="mt-1 text-xs text-zinc-500"></p>
     </div>
 
     <details id="spec-modal-reanalyze" class="group mt-4 border-t border-zinc-800 pt-3">
@@ -206,6 +191,63 @@
   {% for sp in (all_species or []) %}<option value="{{ sp }}">{% endfor %}
 </datalist>
 
+{# Two-step verification popup. Tapping a verdict opens this; nothing is
+   persisted until Confirm — so a stray tap on a tablet can't silently set a
+   label. Carries the optional 1–5 sound-quality rating and (for bad/unsure)
+   the species suggestion, committed together in one POST. Sibling of the
+   main dialog so its top-layer backdrop clicks don't reach the parent. #}
+<dialog id="spec-confirm"
+        style="touch-action: manipulation;"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-[24rem] max-w-[94vw] backdrop:bg-black/80">
+  <div class="px-5 py-5">
+    <div class="text-xs uppercase tracking-wider text-zinc-500">Confirm verification</div>
+    <div id="spec-confirm-verdict" class="mt-1 text-xl font-semibold"></div>
+
+    <div id="spec-confirm-suggest-wrap" class="mt-4 hidden">
+      <label for="spec-confirm-suggest" class="text-xs uppercase tracking-wider text-zinc-500">Looked more like…</label>
+      <input id="spec-confirm-suggest" type="text" list="known-species"
+             placeholder="optional — type a species"
+             class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2.5 text-sm text-zinc-100"
+             autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="mt-4">
+      <div class="flex items-baseline justify-between">
+        <div class="text-xs uppercase tracking-wider text-zinc-500">Sound quality
+          <span class="normal-case text-zinc-600">· optional</span></div>
+        <span id="spec-confirm-stars-readout" class="text-xs text-zinc-500 tabular-nums">not rated</span>
+      </div>
+      {# Large, contiguous (flex-1, no gap) tap targets — on a tablet small/
+         spaced stars get missed and the rating reads null. touch-action:
+         manipulation also drops the ~300ms tap delay so a quick star→Confirm
+         can't fire Confirm before the star's click registers. #}
+      <div id="spec-confirm-stars"
+           class="mt-1.5 flex items-stretch select-none" role="radiogroup"
+           aria-label="sound quality" style="touch-action: manipulation;">
+        <button type="button" data-star="1" aria-label="1 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border border-zinc-800 rounded-l hover:text-amber-300">★</button>
+        <button type="button" data-star="2" aria-label="2 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 hover:text-amber-300">★</button>
+        <button type="button" data-star="3" aria-label="3 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 hover:text-amber-300">★</button>
+        <button type="button" data-star="4" aria-label="4 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 hover:text-amber-300">★</button>
+        <button type="button" data-star="5" aria-label="5 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 rounded-r hover:text-amber-300">★</button>
+      </div>
+      <button type="button" id="spec-confirm-stars-clear"
+              class="mt-1.5 text-xs text-zinc-500 hover:text-zinc-300">clear rating</button>
+    </div>
+
+    <div class="mt-6 flex items-center justify-end gap-2">
+      <button type="button" id="spec-confirm-cancel"
+              class="px-4 py-2.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-zinc-800">Cancel</button>
+      <button type="button" id="spec-confirm-ok"
+              class="px-5 py-2.5 rounded text-sm font-semibold bg-emerald-500 text-zinc-900 hover:bg-emerald-400">Confirm</button>
+    </div>
+  </div>
+</dialog>
+
 <script>
 (function () {
   // Guard against double-init when the partial is included on multiple pages
@@ -223,10 +265,16 @@
   const metaEl   = document.getElementById('spec-modal-meta');
   const closeBtn = document.getElementById('spec-modal-close');
   const labelBtns = dialog.querySelectorAll('[data-label-btn]');
-  const suggestWrap  = document.getElementById('spec-modal-suggest');
-  const suggestInput = document.getElementById('spec-modal-suggest-input');
-  const suggestSave  = document.getElementById('spec-modal-suggest-save');
-  const suggestNote  = document.getElementById('spec-modal-suggest-current');
+  // Two-step confirm popup.
+  const confirmDlg     = document.getElementById('spec-confirm');
+  const confirmVerdict = document.getElementById('spec-confirm-verdict');
+  const confirmSuggestWrap = document.getElementById('spec-confirm-suggest-wrap');
+  const confirmSuggest = document.getElementById('spec-confirm-suggest');
+  const confirmStars   = document.getElementById('spec-confirm-stars');
+  const confirmStarsReadout = document.getElementById('spec-confirm-stars-readout');
+  const confirmStarsClear = document.getElementById('spec-confirm-stars-clear');
+  const confirmCancel  = document.getElementById('spec-confirm-cancel');
+  const confirmOk      = document.getElementById('spec-confirm-ok');
   const reanalyzeEl    = document.getElementById('spec-modal-reanalyze');
   const reanalyzeStatus= document.getElementById('spec-modal-reanalyze-status');
   const reanalyzeTable = document.getElementById('spec-modal-reanalyze-table');
@@ -339,6 +387,7 @@
   let currentId = null;
   let currentLabel = null;
   let currentSuggested = '';
+  let currentSoundRating = null;
   // Scientific name we've already fetched XC data for in this modal session.
   // Reset on every openFor so a new detection re-fetches when expanded.
   let xcLoadedFor = null;
@@ -360,14 +409,6 @@
         btn.classList.add(...labelStyles[v].split(' '));
       }
     });
-    if (label === 'bad' || label === 'unsure') {
-      suggestWrap.classList.remove('hidden');
-      suggestNote.textContent = currentSuggested
-        ? `current: ${currentSuggested}`
-        : 'optional — saved alongside the label';
-    } else {
-      suggestWrap.classList.add('hidden');
-    }
   }
 
   let raf = 0;
@@ -385,6 +426,7 @@
   function openFor(btn) {
     currentId = btn.dataset.detectionId;
     currentSuggested = btn.dataset.suggested || '';
+    currentSoundRating = parseInt(btn.dataset.soundRating, 10) || null;
     currentSci = btn.dataset.scientific || '';
     speciesEl.textContent = btn.dataset.species || '';
     sciEl.textContent     = currentSci;
@@ -393,7 +435,6 @@
     audio.src = `/clips/${currentId}`;
     playhead.style.left = '0%';
     playhead.style.display = 'block';
-    suggestInput.value = currentSuggested;
     paintActiveLabel(btn.dataset.label || null);
     // Reset XC rolldown to collapsed; recordings load lazily on first expand.
     xcDetailsEl.open = false;
@@ -493,11 +534,20 @@
     } catch (_) { /* silent */ }
   }
 
+  // GBIF whole-world basemap (EPSG:3857, z0, @2x) composited behind the
+  // transparent occurrence-density tile so the thumbnail shows land + coast,
+  // not dots in a void. gbif-dark blends with the dark modal and keeps the
+  // warm classic.poly hexbins prominent. Same projection/extent as the
+  // density @2x tile, so it overlays pixel-for-pixel.
+  const RANGE_BASEMAP_TILE =
+    'https://tile.gbif.org/3857/omt/0/0/0@2x.png?style=gbif-dark';
+
   async function loadSpeciesImage(sci, common) {
     thumbLink.classList.add('hidden');
     rangeLink.classList.add('hidden');
     thumbImg.removeAttribute('src');
     rangeImg.removeAttribute('src');
+    rangeImg.style.backgroundImage = '';
     setStatusBadge(null);
     if (!sci) return;
     try {
@@ -518,6 +568,16 @@
       const rangeSrc = data.range_map || data.range_tile;
       if (rangeSrc) {
         rangeImg.src = rangeSrc;
+        // Only the GBIF/iNat tile is transparent and needs a basemap behind
+        // it; the static polygon (range_map) carries its own background.
+        if (!data.range_map && data.range_tile) {
+          rangeImg.style.backgroundImage = `url("${RANGE_BASEMAP_TILE}")`;
+          rangeImg.style.backgroundSize = '100% 100%';
+          rangeImg.style.backgroundOrigin = 'content-box';
+          rangeImg.style.backgroundClip = 'content-box';
+        } else {
+          rangeImg.style.backgroundImage = '';
+        }
         rangeLink.href = data.range_map
           ? (data.range_map_page || data.page_url || '#')
           : (data.range_tile_page || '#');
@@ -893,11 +953,15 @@
     return li;
   }
 
-  async function postLabel(value, suggested) {
+  async function postLabel(value, suggested, soundRating) {
     if (currentId == null) return;
     const params = new URLSearchParams();
     params.set('value', value);
     if (suggested !== undefined) params.set('suggested', suggested);
+    // undefined → omit (leave rating untouched); null → clear; 1-5 → set.
+    if (soundRating !== undefined) {
+      params.set('sound_rating', soundRating == null ? '' : String(soundRating));
+    }
     const resp = await fetch(`/api/detections/${currentId}/label`, {
       method: 'POST',
       headers: {
@@ -917,14 +981,54 @@
     if (oldRow && newRow) {
       oldRow.replaceWith(newRow);
       const fresh = newRow.querySelector('[data-spectrogram-trigger]');
-      if (fresh) currentSuggested = fresh.dataset.suggested || '';
+      if (fresh) {
+        currentSuggested = fresh.dataset.suggested || '';
+        currentSoundRating = parseInt(fresh.dataset.soundRating, 10) || null;
+      }
     }
+    if (suggested !== undefined) currentSuggested = suggested || '';
+    if (soundRating !== undefined) currentSoundRating = soundRating;
     paintActiveLabel(value || null);
   }
-  const setLabel = (value) => postLabel(value);
-  const saveSuggestion = () => {
-    const lbl = (currentLabel === 'unsure') ? 'unsure' : 'bad';
-    postLabel(lbl, suggestInput.value);
+
+  // --- Two-step verification confirm popup ---------------------------------
+  let pendingLabel = null;     // verdict awaiting confirmation
+  let confirmRating = null;    // star rating chosen inside the popup
+  const verdictText  = { good: '✓ good', bad: '✗ bad', unsure: '? unsure' };
+  const verdictColor = { good: 'text-emerald-300', bad: 'text-rose-300', unsure: 'text-amber-300' };
+
+  function paintStars(n) {
+    confirmStars.querySelectorAll('[data-star]').forEach((b) => {
+      const lit = n != null && parseInt(b.dataset.star, 10) <= n;
+      b.classList.toggle('text-amber-300', lit);
+      b.classList.toggle('text-zinc-600', !lit);
+    });
+    confirmStarsReadout.textContent = n != null ? `${n}/5` : 'not rated';
+  }
+
+  function openConfirm(value) {
+    if (currentId == null || !value) return;
+    pendingLabel = value;
+    confirmRating = currentSoundRating;
+    confirmVerdict.textContent = verdictText[value] || value;
+    confirmVerdict.className = 'mt-1 text-xl font-semibold ' + (verdictColor[value] || 'text-zinc-100');
+    const needSuggest = (value === 'bad' || value === 'unsure');
+    confirmSuggestWrap.classList.toggle('hidden', !needSuggest);
+    confirmSuggest.value = needSuggest ? currentSuggested : '';
+    paintStars(confirmRating);
+    if (typeof confirmDlg.showModal === 'function') confirmDlg.showModal();
+    else confirmDlg.setAttribute('open', '');
+  }
+  function closeConfirm() {
+    if (typeof confirmDlg.close === 'function') confirmDlg.close();
+    else confirmDlg.removeAttribute('open');
+  }
+
+  // Verdict tap opens the confirm popup; the ↺ clear stays a direct,
+  // single action (it's the undo, and undo shouldn't need confirming).
+  const setLabel = (value) => {
+    if (value) openConfirm(value);
+    else postLabel('', undefined, undefined);
   };
   function closeIt() {
     audio.pause();
@@ -963,13 +1067,28 @@
     btn.addEventListener('click', () => setLabel(btn.dataset.labelBtn));
   });
 
-  suggestSave.addEventListener('click', saveSuggestion);
-  suggestInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      saveSuggestion();
-    }
+  // Confirm popup wiring.
+  // Delegated so a tap anywhere on a star button (incl. the ★ glyph node)
+  // resolves to its data-star — more forgiving of imprecise touch.
+  confirmStars.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-star]');
+    if (!b) return;
+    confirmRating = parseInt(b.dataset.star, 10);
+    paintStars(confirmRating);
   });
+  confirmStarsClear.addEventListener('click', () => { confirmRating = null; paintStars(null); });
+  confirmCancel.addEventListener('click', closeConfirm);
+  confirmOk.addEventListener('click', () => {
+    const needSuggest = (pendingLabel === 'bad' || pendingLabel === 'unsure');
+    postLabel(pendingLabel, needSuggest ? confirmSuggest.value : undefined, confirmRating);
+    closeConfirm();
+  });
+  confirmSuggest.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmOk.click(); }
+  });
+  // Backdrop click / ESC just dismiss — no label is written.
+  confirmDlg.addEventListener('cancel', (e) => { e.preventDefault(); closeConfirm(); });
+  confirmDlg.addEventListener('click', (e) => { if (e.target === confirmDlg) closeConfirm(); });
 
   closeBtn.addEventListener('click', closeIt);
   dialog.addEventListener('close',  () => { audio.pause(); stopTick(); });

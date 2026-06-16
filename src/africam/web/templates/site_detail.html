@@ -19,6 +19,7 @@
           data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
           data-label="{{ r.label or '' }}"
           data-suggested="{{ r.suggested_species or '' }}"
+          data-sound-rating="{{ r.sound_rating or '' }}"
           data-palette="fire"
           class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
           style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"
@@ -585,4 +586,10 @@
   loadHour(currentHour());
 })();
 </script>
+
+{# Clip-review modal: clicking any spectrogram button on this page (the
+   recent-detections list, the top-species rows) opens the full review
+   popup. Its click handler is delegated on document.body, so it also
+   catches spectrograms in dynamically loaded fragments. #}
+{% include "_spectrogram_modal.html" %}
 {% endblock %}

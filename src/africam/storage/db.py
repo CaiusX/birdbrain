@@ -102,6 +102,7 @@ class Database:
             ("detections", "label", "TEXT"),
             ("detections", "labeled_at", "TIMESTAMP"),
             ("detections", "suggested_species", "TEXT"),
+            ("detections", "sound_rating", "INTEGER"),
             ("detections", "audio_hash", "TEXT"),
             ("species_notes", "conservation_status", "TEXT"),
             ("species_notes", "min_confidence", "REAL"),
@@ -338,6 +339,7 @@ class Database:
         label: str | None,
         *,
         suggested: Any = _UNSET,
+        sound_rating: Any = _UNSET,
     ) -> bool:
         """Set/clear the manual audition label on a detection. Returns False if
         the detection doesn't exist.
@@ -345,9 +347,17 @@ class Database:
         ``suggested`` is the rater's free-text guess at the actual species. It
         is only meaningful when ``label`` is ``'bad'`` or ``'unsure'``; for any
         other label this method clears it automatically. Pass the sentinel
-        default to leave the existing suggestion unchanged."""
+        default to leave the existing suggestion unchanged.
+
+        ``sound_rating`` is an optional 1–5 clip sound-quality score, set from
+        the review popup. It is independent of the label (a correct ID can
+        still sound poor), so it is NOT cleared when the label changes — only
+        written when explicitly passed. ``None`` clears it; the sentinel leaves
+        it untouched. Values outside 1–5 raise."""
         if label is not None and label not in ("good", "bad", "unsure"):
             raise ValueError(f"invalid label: {label!r}")
+        if sound_rating not in (_UNSET, None) and sound_rating not in (1, 2, 3, 4, 5):
+            raise ValueError(f"invalid sound_rating: {sound_rating!r}")
         with self._Session() as s, s.begin():
             row = s.get(DetectionRow, detection_id)
             if row is None:
@@ -359,6 +369,8 @@ class Database:
                 row.suggested_species = None
             elif suggested is not _UNSET:
                 row.suggested_species = (suggested or None)
+            if sound_rating is not _UNSET:
+                row.sound_rating = sound_rating
         return True
 
     # --- Worker heartbeats (admin liveness view) ---

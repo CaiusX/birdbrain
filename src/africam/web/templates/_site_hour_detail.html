@@ -1,7 +1,7 @@
 {# Right-rail of the dashboard's hour-drill modal. Loaded as a partial
    from /partials/site-hour-detail?source=<name>&hour=<H>. Self-contained:
    no <html>/<body>, just the panel content. #}
-{% from "_macros.html" import species_link, weather_icon %}
+{% from "_macros.html" import species_link, weather_icon, spectrogram_clip %}
 
 <div class="px-5 py-4">
   <div class="flex items-baseline justify-between gap-3 flex-wrap">
@@ -94,9 +94,13 @@
         {{ top_clip.common_name }}
         <span class="text-zinc-600">· conf {{ "%.2f"|format(top_clip.confidence) }}</span>
       </div>
-      <audio controls preload="none" class="w-full" style="height: 32px;">
-        <source src="/clips/{{ top_clip.id }}" type="audio/wav">
-      </audio>
+      {{ spectrogram_clip(
+           top_clip.id, confidence=top_clip.confidence,
+           common=top_clip.common_name, scientific=top_clip.scientific_name,
+           meta=top_clip.source_name,
+           label=top_clip.label or '', suggested=top_clip.suggested_species or '',
+           sound_rating=top_clip.sound_rating or '',
+           cls="block w-full") }}
     </div>
   {% endif %}
 </div>
