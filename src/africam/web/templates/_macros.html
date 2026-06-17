@@ -32,17 +32,16 @@
    to their site page (the generator uses exact source names). #}
 {% macro brief_body(parsed) -%}
   {% if parsed.overall %}
-    <p class="text-sm text-zinc-300 leading-relaxed max-w-3xl">{{ parsed.overall }}</p>
+    <p class="text-sm text-zinc-300 leading-relaxed max-w-3xl">{{ parsed.overall | linkify_species }}</p>
   {% endif %}
   {% if parsed.sites %}
     <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3">
       {% for s in parsed.sites %}
         <div class="min-w-0">
-          <a href="/site/{{ s.site | urlencode }}"
-             class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300 hover:text-emerald-200">{{ s.site }}</a>
+          {{ site_link(s.site, cls="text-[11px] font-semibold uppercase tracking-wider") }}
           <ul class="mt-1 space-y-0.5">
             {% for b in s.bullets %}
-              <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ b }}</span></li>
+              <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ b | linkify_species }}</span></li>
             {% endfor %}
           </ul>
         </div>
@@ -62,8 +61,12 @@
    is shown so the user can always click through to /site/<name>. Pass cls
    to override the default emerald hover when the surrounding context has
    its own colour scheme. #}
-{% macro site_link(name, cls="hover:text-emerald-300") -%}
-<a href="/site/{{ name | urlencode }}"{% if cls %} class="{{ cls }}"{% endif %}>{{ name }}</a>
+{# Site name → its site page, coloured in the site's own (legibility-lifted)
+   palette colour so site names read consistently across the UI and echo the
+   map dots. `cls` adds non-colour styling (size/weight/case); the inline
+   colour wins over any text-colour class. #}
+{% macro site_link(name, cls="") -%}
+<a href="/site/{{ name | urlencode }}" class="hover:opacity-80 transition-opacity{% if cls %} {{ cls }}{% endif %}" style="color: {{ site_color(name) }};">{{ name }}</a>
 {%- endmacro %}
 
 {% set _IUCN_CLASS = {

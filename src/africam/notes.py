@@ -23,8 +23,10 @@ import json
 import os
 import threading
 import time
+import copy
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from africam.config import AppConfig, SourceConfig
 from africam.logging import get_logger
@@ -100,9 +102,10 @@ def _build_sites_context(source_names: list[str]) -> str:
         f"East Africa: UTC+3 EAT):\n\n"
         f"{bullets}\n\n"
         f"A BirdNET-Analyzer classifier runs continuously over the audio. "
-        f"All times in the evidence dossiers are UTC; convert to each site's "
-        f"local clock using the bracketed offset above when discussing "
-        f"diurnal rhythm."
+        f"Times in the dossiers are ALREADY in each site's LOCAL clock — the "
+        f"fields say so (hourly_local, peak_hour_local, first_seen_local, with "
+        f"a local_timezone tag). Use them as given; do NOT convert. The "
+        f"bracketed offsets above are context only."
     )
 
 
@@ -168,7 +171,8 @@ You are the resident analyst for an African live-stream bird monitor network.
 {sites_context}
 
 The operator gives you a JSON evidence dossier for ONE site: its total
-detection count, distinct species count, hour-of-day histogram (UTC), top
+detection count, distinct species count, hour-of-day histogram (``hourly_local``,
+in this site's local clock), top
 species (by count, with max confidence), audition labels on this site's
 clips, the three highest-confidence clips, and a ``weather_recent`` block
 summarizing the last week's conditions at the site (temps, rainfall days,
@@ -213,7 +217,8 @@ particular site, in the context of how it sounds across the network.
 The operator gives you a JSON dossier for ONE (species, site) pair:
 its detection_count at this site, its share_of_network (this site's count as
 a fraction of all detections of this species across all sites), confidence
-stats, first/last seen UTC, hourly_utc histogram AT THIS SITE, per_source_network
+stats, first/last seen (local), hourly_local histogram AT THIS SITE (already in
+this site's local clock), per_source_network
 totals (this species' count by site for contrast), label tallies at this site,
 and newly_heard_at_site (true when this site only first heard it in the last
 7 days — a "new arrival" signal).
@@ -222,8 +227,8 @@ Output your commentary as **2 to 4 BULLETS, ONE PER LINE.** Plain text, no
 JSON, no leading dash/asterisk markers — just the bullet text. Telegraphic
 fragments, not sentences. Lead with the fact. Pick from these angles:
 
-  • When (peak hour, local) — convert the UTC histogram to the site's local
-    clock (most sites are UTC+2 / SAST or UTC+2 / CAT).
+  • When (peak hour) — read it straight from hourly_local; it is already this
+    site's local clock, so quote the hour as-is (no conversion).
   • Relative loudness — is this site the loudest for this species, the
     quietest, or middle-of-the-pack? Use share_of_network and per_source_network
     to back this up without reciting raw counts.
@@ -255,7 +260,8 @@ writing a daily newspaper-style soundscape brief.
 {sites_context}
 
 The operator gives you a JSON evidence dossier for ONE UTC date: per-site
-detection counts, each site's top species and peak hour, high-confidence
+detection counts, each site's top species and peak hour (``peak_hour_local`` —
+already in that site's local clock; quote it as-is), high-confidence
 standouts across all sites, a "newly heard this week" list (species that
 appeared at a site yesterday but not in the prior seven days at the same
 site — the most interesting story angle), and a ``weather`` block on each
@@ -520,6 +526,76 @@ def _hash(canonical: dict) -> str:
     ).hexdigest()[:32]
 
 
+def _site_offset(tz_name: str) -> tuple[int, str]:
+    """Whole-hour UTC offset + short zone name for a site. The African zones we
+    cover have no DST, so an integer offset is exact."""
+    try:
+        tz = ZoneInfo(tz_name or "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    off = round((now.utcoffset() or timedelta(0)).total_seconds() / 3600)
+    return off, (now.tzname() or "UTC")
+
+
+def _tz_for_source(name: str, src_list, db) -> str:
+    """Resolve a source's IANA timezone from static config, then runtime
+    sources (added via /admin), defaulting to UTC."""
+    for s in src_list:
+        if s.name == name:
+            return s.timezone or "UTC"
+    try:
+        for row in db.list_runtime_sources():
+            if row.name == name:
+                return row.timezone or "UTC"
+    except Exception:
+        pass
+    return "UTC"
+
+
+def _localize_evidence(evidence: dict, tz_name: str) -> dict:
+    """Return a copy of a single-site dossier with its UTC time fields rewritten
+    into the site's local clock, so the model reads local times directly rather
+    than converting them itself (and getting it wrong). hourly_utc→hourly_local
+    (rotated by the offset), first/last_seen_utc→…_local, plus a local_timezone
+    tag. The original dict is left intact for signatures/persistence."""
+    ev = copy.deepcopy(evidence)
+    off, abbr = _site_offset(tz_name)
+    try:
+        tz = ZoneInfo(tz_name or "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    h = ev.pop("hourly_utc", None)
+    if isinstance(h, list) and len(h) == 24:
+        ev["hourly_local"] = [h[(i - off) % 24] for i in range(24)]
+    elif h is not None:
+        ev["hourly_local"] = h
+    for k in ("first_seen", "last_seen"):
+        v = ev.pop(f"{k}_utc", None)
+        if not v:
+            continue
+        try:
+            dt = datetime.fromisoformat(v)
+            dt = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+            ev[f"{k}_local"] = dt.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            ev[f"{k}_local"] = v
+    ev["local_timezone"] = abbr
+    return ev
+
+
+def _localize_brief_evidence(evidence: dict, src_list, db) -> dict:
+    """Return a copy of the daily-brief dossier with each per-site peak hour
+    rewritten into that site's local clock (peak_hour_utc→peak_hour_local)."""
+    ev = copy.deepcopy(evidence)
+    for site in ev.get("per_site", []):
+        off, abbr = _site_offset(_tz_for_source(site.get("source_name"), src_list, db))
+        ph = site.pop("peak_hour_utc", None)
+        site["peak_hour_local"] = ((ph + off) % 24) if ph is not None else None
+        site["local_timezone"] = abbr
+    return ev
+
+
 def _format_evidence_for_prompt(evidence: dict) -> str:
     return json.dumps(evidence, indent=2, sort_keys=True)
 
@@ -584,12 +660,25 @@ def _species_tick(
     if evidence is None:
         return None
 
-    sites_context = _build_sites_context(_live_source_names(sources, db))
+    src_list = list(sources)
+    # Cross-site species note: localise the aggregate histogram to the species'
+    # dominant (loudest) site's clock, so "peak hour" reads as one sensible local
+    # time rather than UTC. Per-site exactness lives in the species-site bullets.
+    _per_src = evidence.get("per_source") or []
+    _dominant = (
+        max(_per_src, key=lambda x: x.get("count", 0)).get("source")
+        if _per_src else None
+    )
+    prompt_evidence = (
+        _localize_evidence(evidence, _tz_for_source(_dominant, src_list, db))
+        if _dominant else evidence
+    )
+    sites_context = _build_sites_context(_live_source_names(src_list, db))
     note_text = _call_claude(
         system_prompt=species_system_prompt(sites_context),
         user_text=(
             "Write a commentary on this species' detections at our sites.\n\n"
-            f"{_format_evidence_for_prompt(evidence)}"
+            f"{_format_evidence_for_prompt(prompt_evidence)}"
         ),
         model=cfg.notes_model,
         client=client,
@@ -644,7 +733,7 @@ def _species_site_tick(
         system_prompt=species_site_system_prompt(sites_context),
         user_text=(
             "Write a 2–4 bullet commentary on this species at this site.\n\n"
-            f"{_format_evidence_for_prompt(evidence)}"
+            f"{_format_evidence_for_prompt(_localize_evidence(evidence, _tz_for_source(source_name, src_list, db)))}"
         ),
         model=cfg.notes_model,
         client=client,
@@ -711,7 +800,7 @@ def _site_tick(
         system_prompt=site_system_prompt(sites_context),
         user_text=(
             "Write a commentary on this site's soundscape.\n\n"
-            f"{_format_evidence_for_prompt(evidence)}"
+            f"{_format_evidence_for_prompt(_localize_evidence(evidence, _tz_for_source(source_name, src_list, db)))}"
         ),
         model=cfg.notes_model,
         client=client,
@@ -789,7 +878,7 @@ def _daily_brief_tick(
             system_prompt=daily_brief_system_prompt(sites_context),
             user_text=(
                 "Return the JSON soundscape digest for this date.\n\n"
-                f"{_format_evidence_for_prompt(evidence)}"
+                f"{_format_evidence_for_prompt(_localize_brief_evidence(evidence, src_list, db))}"
             ),
             model=cfg.notes_model,
             client=client,
@@ -900,9 +989,10 @@ def scan_anomalies_for_window(
     return new_rows
 
 
-def _format_anomaly_evidence(row) -> str:
-    """Build the dossier text the LLM sees. Compact JSON-ish key/value
-    layout so it reads naturally in the prompt window."""
+def _format_anomaly_evidence(row, offset: int = 0, tz_abbr: str = "UTC") -> str:
+    """Build the dossier text the LLM sees. Compact JSON-ish key/value layout so
+    it reads naturally in the prompt window. ``offset``/``tz_abbr`` localise the
+    hourly fields to the site's clock (the date stays the UTC date key)."""
     import json as _json
     ev = _json.loads(row.evidence_json or "{}")
     parts = [
@@ -924,11 +1014,12 @@ def _format_anomaly_evidence(row) -> str:
     elif row.kind == "nocturnal_burst":
         h = ev.get("hourly_utc", {})
         night = ev.get("night_hours_utc", [])
-        parts.append("hourly_utc: " + " ".join(
-            f"{int(k):02d}={h[k]}"
-            for k in sorted(h, key=lambda x: int(x))
+        h_local = {(int(k) + offset) % 24: v for k, v in h.items()}
+        night_local = sorted({(int(x) + offset) % 24 for x in night})
+        parts.append(f"hourly_local ({tz_abbr}): " + " ".join(
+            f"{k:02d}={h_local[k]}" for k in sorted(h_local)
         ))
-        parts.append(f"night_hours_utc: {night}")
+        parts.append(f"night_hours_local: {night_local}")
         parts.append("top_species_on_day: " + ", ".join(
             f"{x['common']} ({x['n']})"
             for x in ev.get("top_species", [])[:10]
@@ -956,12 +1047,13 @@ def _anomaly_tick(
         return None
     row = pending[0]
     src_list = list(sources)
+    _off, _abbr = _site_offset(_tz_for_source(row.source_name, src_list, db))
     sites_context = _build_sites_context(_live_source_names(src_list, db))
     text = _call_claude(
         system_prompt=anomaly_system_prompt(sites_context),
         user_text=(
             "Explain why this day was anomalous at this site.\n\n"
-            + _format_anomaly_evidence(row)
+            + _format_anomaly_evidence(row, _off, _abbr)
         ),
         model=cfg.notes_model,
         client=client,
@@ -1102,7 +1194,7 @@ def generate_brief_for_date(
         system_prompt=daily_brief_system_prompt(sites_context),
         user_text=(
             "Return the JSON soundscape digest for this date.\n\n"
-            f"{_format_evidence_for_prompt(evidence)}"
+            f"{_format_evidence_for_prompt(_localize_brief_evidence(evidence, src_list, db))}"
         ),
         model=cfg.notes_model,
         client=client,

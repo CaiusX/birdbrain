@@ -13,6 +13,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+
+from markupsafe import Markup, escape
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -272,6 +274,95 @@ SOURCE_BIOME: dict[str, str] = {
 }
 
 
+def _site_color(name: str) -> str:
+    """Per-site colour for inline text (clickable site names), echoing the map
+    dots. Several palette hues are deliberately dark for the white-stroked map
+    dots (Elephant Pan rust, Kalahari amber, Stony Point blue) and would be
+    unreadable as text on the near-black UI, so dark hues are lightened toward
+    white until legible — the hue stays, only the brightness lifts. Unknown
+    sites (e.g. the garden mic) fall back to emerald-400."""
+    hex_ = SOURCE_COLORS.get(name)
+    if not hex_:
+        return "#34d399"
+    r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b  # 0..255
+    if lum < 150:
+        t = min(0.62, (150 - lum) / 255 * 1.3)  # darker → mix more toward white
+        r, g, b = (round(c + (255 - c) * t) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+TEMPLATES.env.globals["site_color"] = _site_color
+
+
+_SPECIES_LINK_TTL = 300.0  # seconds; the detected-species set changes slowly
+
+
+def _make_species_linkifier(db):
+    """Build a Jinja filter that turns detected-species common names in note
+    prose into neutral links to the species page. The matcher — one compiled
+    alternation regex over the current species, longest-name-first so multi-word
+    names beat their substrings — is built once and refreshed at most every few
+    minutes, so per-render cost is a single regex pass over a short string.
+    Only the first occurrence of each name is linked (avoids a wall of links),
+    and only species we've actually detected (so the link lands on a real page).
+    Output is safe markup: matched names become anchors, everything else is
+    HTML-escaped."""
+    cache: dict = {"ts": -1.0, "pattern": None, "lookup": {}}
+    lock = threading.Lock()
+
+    def _rebuild() -> None:
+        lookup: dict[str, str] = {}
+        names: list[str] = []
+        for sci, common in db.list_detected_species():
+            if not common:
+                continue
+            key = common.casefold()
+            if key not in lookup:
+                lookup[key] = sci
+                names.append(common)
+        names.sort(key=len, reverse=True)
+        pattern = (
+            re.compile(r"\b(" + "|".join(re.escape(n) for n in names) + r")\b")
+            if names else None
+        )
+        cache.update(pattern=pattern, lookup=lookup, ts=time.monotonic())
+
+    def linkify(text):
+        if not text:
+            return text
+        if cache["pattern"] is None or time.monotonic() - cache["ts"] > _SPECIES_LINK_TTL:
+            with lock:
+                if (cache["pattern"] is None
+                        or time.monotonic() - cache["ts"] > _SPECIES_LINK_TTL):
+                    _rebuild()
+        pattern = cache["pattern"]
+        if pattern is None:
+            return text
+        lookup = cache["lookup"]
+        out: list = []
+        seen: set[str] = set()
+        last = 0
+        for m in pattern.finditer(text):
+            key = m.group(1).casefold()
+            sci = lookup.get(key)
+            if not sci or key in seen:
+                continue
+            seen.add(key)
+            out.append(escape(text[last:m.start()]))
+            href = "/species/" + urllib.parse.quote(sci)
+            out.append(Markup(
+                '<a href="{}" class="font-semibold underline decoration-dotted '
+                'decoration-zinc-600 underline-offset-2 hover:text-zinc-100 '
+                'hover:decoration-zinc-400">{}</a>'
+            ).format(href, m.group(1)))
+            last = m.end()
+        out.append(escape(text[last:]))
+        return Markup("").join(out)
+
+    return linkify
+
+
 def _solar_event_utc_hours(d: date, lat: float, lon: float,
                            altitude_deg: float, morning: bool) -> float | None:
     """Sunrise-equation solver. Returns the UTC fractional hour on date ``d``
@@ -417,6 +508,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     cfg = cfg or AppConfig()
     db = Database(cfg.db_url)
     clips_root = cfg.clips_dir.resolve()
+
+    # Linkify species names in note/brief prose → species pages (cached matcher).
+    TEMPLATES.env.filters["linkify_species"] = _make_species_linkifier(db)
 
     try:
         static_sources = load_sources(cfg.sources_file)

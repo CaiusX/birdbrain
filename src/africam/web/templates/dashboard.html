@@ -82,6 +82,10 @@
          site-coloured dots on the map next door. Subtitle below the rule
          ties the brand to what the page is doing. #}
       <div>{{ brand_lockup(text_cls='text-2xl', home=True) }}</div>
+      <p class="mt-1.5 text-xs text-zinc-500">
+        Hosted on a Raspberry Pi 5. Non-commercial; BirdNET models
+        <a href="/about" class="text-zinc-400 hover:text-zinc-200">CC&nbsp;BY-NC-SA&nbsp;4.0</a>.
+      </p>
       <div class="mt-4 mb-4 border-t border-zinc-800"></div>
       <h2 class="text-base font-medium text-zinc-200 leading-snug">
         Listening to {{ sites_activity | length }} African wildlife streams
@@ -118,10 +122,6 @@
           <p class="text-sm text-zinc-600">nothing yet</p>
         {% endif %}
       </div>
-      <p class="mt-auto pt-4 text-xs text-zinc-500">
-        Hosted on a Raspberry Pi 5. Non-commercial; BirdNET models
-        <a href="/about" class="text-zinc-400 hover:text-zinc-200">CC&nbsp;BY-NC-SA&nbsp;4.0</a>.
-      </p>
     </div>
   </div>
 </section>

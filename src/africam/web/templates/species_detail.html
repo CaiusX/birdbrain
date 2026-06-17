@@ -4,7 +4,7 @@
 {% set sp_tag = (note_tag_by_sci or {}).get(scientific) %}
 {% set sp_palette = (palette_for_tag or {}).get(sp_tag, default_palette or 'fire') %}
 {% set sp_status = (status_by_sci or {}).get(scientific) %}
-{% from "_macros.html" import iucn_badge %}
+{% from "_macros.html" import iucn_badge, site_link %}
 
 {% block head_extra %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -57,21 +57,21 @@
       {% if active_source %}
         <div class="mt-2">
           <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs bg-emerald-500/10 border border-emerald-500/40 text-emerald-300">
-            filtered to <a href="/site/{{ active_source | urlencode }}" class="font-medium hover:text-white" title="open {{ active_source }} site page">{{ active_source }}</a>
+            filtered to {{ site_link(active_source, cls="font-medium") }}
             <a href="/species/{{ scientific | urlencode }}" class="text-emerald-200/70 hover:text-white" title="show all sites">×</a>
           </span>
         </div>
       {% endif %}
       {% if note and note.note %}
-        <p class="mt-3 text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ note.note }}</p>
+        <p class="mt-3 text-sm text-zinc-300 whitespace-pre-wrap leading-relaxed max-w-3xl">{{ note.note | linkify_species }}</p>
       {% endif %}
       {% if site_note and site_note.note %}
         <div class="mt-3 max-w-3xl">
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">at <a href="/site/{{ active_source | urlencode }}" class="hover:text-emerald-200" title="open {{ active_source }} site page">{{ active_source }}</a></div>
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-emerald-300">at {{ site_link(active_source) }}</div>
           <ul class="mt-1 space-y-0.5">
             {% for line in site_note.note.splitlines() %}
               {% if line.strip() %}
-                <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ line.strip().lstrip('•-* ').strip() }}</span></li>
+                <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ line.strip().lstrip('•-* ').strip() | linkify_species }}</span></li>
               {% endif %}
             {% endfor %}
           </ul>
@@ -501,7 +501,7 @@
           {% for s in source_summary %}
             {% set tz = (source_tz | default({})).get(s.source, 'UTC') %}
             <tr class="hover:bg-zinc-800/40">
-              <td class="px-5 py-2"><a href="/site/{{ s.source | urlencode }}" class="text-zinc-300 hover:text-emerald-300">{{ s.source }}</a></td>
+              <td class="px-5 py-2">{{ site_link(s.source) }}</td>
               <td class="px-5 py-2 text-right tabular-nums">{{ s.count }}</td>
               <td class="px-5 py-2 text-right tabular-nums">{{ "%.2f"|format(s.max_conf) }}</td>
               <td class="px-5 py-2 text-zinc-400 hidden md:table-cell tabular-nums">

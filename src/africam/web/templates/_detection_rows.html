@@ -3,7 +3,7 @@
    Expects: rows (list of {"r": DetectionRow, "n": int, "latest": datetime}),
    source_tz; optionally note_tag_by_sci, palette_for_tag, default_palette,
    status_by_sci. #}
-{% from "_macros.html" import iucn_badge, species_link %}
+{% from "_macros.html" import iucn_badge, species_link, site_link %}
 {% if rows %}
   <table class="w-full text-sm">
     <thead class="text-zinc-400 text-xs uppercase tracking-wider">
@@ -33,7 +33,7 @@
             {% endif %}
           </td>
           <td class="px-5 py-2">
-            <a href="/site/{{ r.source_name | urlencode }}" class="text-zinc-300 hover:text-emerald-300">{{ r.source_name }}</a>
+            {{ site_link(r.source_name) }}
             {% if r.site %}
               <span class="text-zinc-500"> · </span>
               <span class="text-zinc-200" title="{% if r.latitude is not none and r.longitude is not none %}{{ '%.3f'|format(r.latitude) }}, {{ '%.3f'|format(r.longitude) }}{% endif %}">{{ r.site }}</span>

@@ -1,12 +1,13 @@
 {# Compact list of all currently-configured sources, with a remove button on
    runtime ones. Re-rendered on add/remove so the dashboard reflects pipeline
    state immediately. #}
+{% from "_macros.html" import site_link %}
 <ul class="text-sm divide-y divide-zinc-800">
   {% for t in tiles %}
     <li class="py-2 flex items-center justify-between gap-2">
       <div class="min-w-0">
         <div class="flex items-center gap-2">
-          <a href="/site/{{ t.name | urlencode }}" class="text-zinc-200 hover:text-emerald-300">{{ t.name }}</a>
+          {{ site_link(t.name, cls="font-medium") }}
           <span class="text-xs text-zinc-500 uppercase tracking-wider">{{ t.kind }}</span>
           {% if t.multisite %}
             <span class="text-xs text-amber-400/80 uppercase tracking-wider">multisite</span>

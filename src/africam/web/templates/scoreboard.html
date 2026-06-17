@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import species_link, spectrogram_clip %}
+{% from "_macros.html" import species_link, spectrogram_clip, site_link %}
 {% block title %}BirdBrain · scoreboard{% endblock %}
 
 {% block content %}
@@ -43,7 +43,7 @@
           <tr class="hover:bg-zinc-800/40">
             <td class="pl-5 pr-2 py-3 text-right tabular-nums text-zinc-500">{{ loop.index }}</td>
             <td class="px-3 py-3 font-medium">
-              <a href="/site/{{ r.source }}" class="hover:text-emerald-300">{{ r.source }}</a>
+              {{ site_link(r.source) }}
             </td>
             <td class="px-5 py-3 text-right tabular-nums text-zinc-100">{{ "{:,}".format(r.count) }}</td>
             <td class="px-5 py-3 text-right tabular-nums">{{ r.species }}</td>
@@ -71,7 +71,7 @@
   <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
     <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
       <h3 class="text-sm uppercase tracking-wider text-zinc-400">
-        <a href="/site/{{ s.source | urlencode }}" class="hover:text-emerald-300">{{ s.source }}</a>
+        {{ site_link(s.source) }}
         <span class="text-zinc-500 text-xs ml-1">top {{ s.species | length }} species</span>
       </h3>
       <span class="text-xs text-zinc-500">{{ s.tz | tz_abbr }}</span>

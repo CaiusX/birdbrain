@@ -48,7 +48,7 @@
   {% endif %}
 
   {% if note and note.note %}
-    <p class="text-zinc-300 leading-relaxed">{{ note.note }}</p>
+    <p class="text-zinc-300 leading-relaxed">{{ note.note | linkify_species }}</p>
   {% endif %}
 
   <div>
