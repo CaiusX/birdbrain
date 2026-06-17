@@ -1,0 +1,20 @@
+# TEMPLATE — BirdBrain detection pipeline (systemd --user service).
+# Replace the <PLACEHOLDERS>, then:
+#   cp this file to ~/.config/systemd/user/africam-pipeline.service
+#   systemctl --user daemon-reload && systemctl --user enable --now africam-pipeline
+# Find your uv path with `command -v uv` (often ~/.local/bin/uv).
+# NB: <...> placeholders will NOT pass `systemd-analyze verify` until substituted.
+[Unit]
+Description=BirdBrain detection pipeline (yt-dlp -> ffmpeg -> BirdNET, one worker per source)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=<REPO>
+ExecStart=<UV> run africam run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

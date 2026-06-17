@@ -1,0 +1,24 @@
+# TEMPLATE — BirdBrain web dashboard (systemd --user service).
+# Replace the <PLACEHOLDERS>, then:
+#   cp this file to ~/.config/systemd/user/africam-web.service
+#   systemctl --user daemon-reload && systemctl --user enable --now africam-web
+# Find your uv path with `command -v uv` (often ~/.local/bin/uv).
+# Optional: uncomment EnvironmentFile to supply ANTHROPIC_API_KEY (AI commentary)
+# and/or AFRICAM_XENO_CANTO_KEY. The pipeline service does NOT need these.
+# NB: <...> placeholders will NOT pass `systemd-analyze verify` until substituted.
+[Unit]
+Description=BirdBrain web dashboard (FastAPI + Jinja + HTMX)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=<REPO>
+# --host 0.0.0.0 exposes it on the LAN; 8765 is convention (default is 8000).
+ExecStart=<UV> run africam web --host 0.0.0.0 --port 8765
+# EnvironmentFile=/etc/africam/secrets.env
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

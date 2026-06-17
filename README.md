@@ -24,6 +24,9 @@ view; admin actions are LAN-only.
 
 ## Running it
 
+**Setting it up yourself?** See [`INSTALL.md`](INSTALL.md) for step-by-step
+instructions (Raspberry Pi or desktop — from clone to always-on services).
+
 Deploy is bare systemd user services on a Raspberry Pi 5 (Debian Bookworm,
 Python 3.12, `uv`). Two services:
 
