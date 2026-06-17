@@ -25,13 +25,15 @@ a place to give the computer typed commands.
 For each step below: **copy the line, paste it into the Terminal, and press Enter.**
 Then wait for it to finish before doing the next one.
 
-> 💡 To paste into a Terminal, it's usually **Ctrl + Shift + V** (on a Mac,
-> **⌘ + V**). The normal Ctrl+V often doesn't work there.
+> 💡 To paste into a Terminal: on a Mac use **⌘ + V**; on **Windows PowerShell**
+> just **right-click** (or Ctrl + V); on a Pi/Linux terminal it's usually
+> **Ctrl + Shift + V**.
 
 **To open the Terminal:**
 - **Raspberry Pi / Linux:** click the menu and look for "Terminal" (or press
   `Ctrl + Alt + T`).
 - **Mac:** press `⌘ + Space`, type `Terminal`, press Enter.
+- **Windows:** click **Start**, type `PowerShell`, and open **Windows PowerShell**.
 
 ---
 
@@ -58,14 +60,37 @@ sudo apt install -y ffmpeg git nodejs
 brew install ffmpeg git node
 ```
 
+**On Windows** (in PowerShell):
+
+```powershell
+winget install Git.Git
+winget install Gyan.FFmpeg
+winget install OpenJS.NodeJS.LTS
+```
+
+> After it finishes, **close PowerShell and open a fresh one** so it can see the new
+> programs. (If it says `winget` isn't found, update "App Installer" from the
+> Microsoft Store, then try again.)
+
 ## Step 2 — Install "uv" (the program that sets everything up)
+
+**On a Raspberry Pi, Linux, or Mac:**
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
+**On Windows** (in PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
 When it finishes, **close the Terminal window and open a fresh one** so it knows the
 new program is there.
+
+> ✅ From here on, **every command is the same** whether you're on a Pi, a Mac, or
+> Windows — just type them into your Terminal (PowerShell on Windows).
 
 ## Step 3 — Download BirdBrain
 

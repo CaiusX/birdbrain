@@ -59,11 +59,35 @@ brew install ffmpeg git node          # node (or: brew install deno)
 brew install tesseract                # optional
 ```
 
-### Install uv (any platform)
+### Windows 10 / 11 (winget, in PowerShell)
 
+```powershell
+winget install Git.Git
+winget install Gyan.FFmpeg
+winget install OpenJS.NodeJS.LTS
+winget install UB-Mannheim.TesseractOCR   # optional, OCR multi-site only
+```
+
+Open a **new** PowerShell window afterwards so the tools land on `PATH`. `uv` will
+fetch a matching Python itself, so you don't need to install Python separately.
+
+> **Windows caveats:** the always-on **systemd** steps below are Linux-only (see
+> [Windows always-on](#windows-always-on) instead), and **microphone capture**
+> (`kind = "device"`) is Linux-only — on Windows use `youtube` or `rtsp` sources.
+> Everything else works the same; run the `git` / `uv run …` commands in PowerShell
+> (it aliases `cp`/`cd`, so the commands below work as written).
+
+### Install uv
+
+**Linux / macOS:**
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # then restart your shell, or: source ~/.local/bin/env
+```
+
+**Windows (PowerShell):**
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
 ---
@@ -239,6 +263,18 @@ systemctl --user restart africam-web        # safe anytime
 - **Public access** — front the dashboard with a **Cloudflare Tunnel** (`cloudflared`).
   Over the tunnel, `/admin` and all mutating requests return `404`, so the public side
   is read-only without app-level auth. LAN access stays full.
+
+### Windows always-on
+
+Windows has no systemd. To keep BirdBrain running:
+
+- **Simplest:** leave the two `uv run …` commands (step 5) running in two PowerShell
+  windows.
+- **On startup / unattended:** wrap each command as a background service with
+  [NSSM](https://nssm.cc/), or create two **Task Scheduler** tasks set to *"Run whether
+  user is logged on or not"* triggered *At log on*. Point one at `uv run africam run`
+  and the other at `uv run africam web --host 0.0.0.0 --port 8765`, each with the repo
+  folder as its working directory.
 
 ---
 
