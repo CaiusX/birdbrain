@@ -4,6 +4,9 @@ Self-host BirdBrain on a **Raspberry Pi 5** or a **desktop Linux / macOS** machi
 This guide goes from a clean checkout to a running dashboard, then on to an
 always-on systemd deployment.
 
+> 🐣 **Not very technical?** Try the gentle, plain-language walkthrough first:
+> [`GETTING-STARTED.md`](GETTING-STARTED.md). This page is the detailed reference.
+
 What you're running:
 
 - **`africam run`** — the detection pipeline: one worker per source, pulling audio
