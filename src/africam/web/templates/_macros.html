@@ -31,6 +31,7 @@
    bullet lists. Pass the result of the `parse_brief` filter. Site names link
    to their site page (the generator uses exact source names). #}
 {% macro brief_body(parsed) -%}
+  <div class="max-h-72 overflow-y-auto pr-1">
   {% if parsed.overall %}
     <p class="text-sm text-zinc-300 leading-relaxed max-w-3xl">{{ parsed.overall | linkify_species }}</p>
   {% endif %}
@@ -48,6 +49,7 @@
       {% endfor %}
     </div>
   {% endif %}
+  </div>
 {%- endmacro %}
 
 {# Link a species name to its detail page. `source` (optional) carries the

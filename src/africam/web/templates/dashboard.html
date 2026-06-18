@@ -188,10 +188,9 @@
       <span>auto-refreshes every 5s</span>
     </div>
   </div>
-  <div id="detections-list"
-       hx-get="/partials/detections?limit=50&group_minutes=5"
-       hx-trigger="load, every 5s"
-       hx-swap="innerHTML">
+  {# Refreshed by vanilla fetch in the page script (not htmx) so the filter
+     dropdowns work everywhere; initial rows are server-rendered below. #}
+  <div id="detections-list">
     {% include "_detection_rows.html" %}
   </div>
 </section>
@@ -256,6 +255,14 @@
   const TOPSP_KEY   = 'africam.topSpecies';
   const SOURCES_KEY = 'africam.detectionSources';
 
+  // localStorage access THROWS in Firefox when storage is blocked (strict
+  // tracking protection / blocked cookies / some private windows). Guard every
+  // call so a storage failure can't break the filter dropdowns — persistence is
+  // best-effort; the controls must still work without it.
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* blocked */ } }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { /* blocked */ } }
+
   function escapeHtml(s) {
     const d = document.createElement('div');
     d.textContent = s;
@@ -264,14 +271,14 @@
 
   // --- Detection-source multi-select chips ---
   function loadSourceFilter() {
-    const raw = localStorage.getItem(SOURCES_KEY);
+    const raw = lsGet(SOURCES_KEY);
     if (!raw) return null;
     try { const a = JSON.parse(raw); return Array.isArray(a) ? a : null; }
     catch { return null; }
   }
   function saveSourceFilter(arr) {
-    if (arr === null) localStorage.removeItem(SOURCES_KEY);
-    else localStorage.setItem(SOURCES_KEY, JSON.stringify(arr));
+    if (arr === null) lsDel(SOURCES_KEY);
+    else lsSet(SOURCES_KEY, JSON.stringify(arr));
   }
   function selectedSources() {
     const all = TILES.map((t) => t.name);
@@ -331,9 +338,12 @@
     return '/partials/detections?' + params.toString();
   }
 
+  // Refresh the feed with a plain fetch + innerHTML — deliberately NOT htmx, so
+  // the filter dropdowns and the periodic refresh work even if htmx failed to
+  // load (blocked CDN/extension, privacy settings) in some browsers.
   function refreshDetections() {
     const list = document.getElementById('detections-list');
-    list.setAttribute('hx-get', rowsUrl());
+    if (!list) return;
     const sel = selectedSources();
     const all = TILES.map((t) => t.name);
     let label;
@@ -341,9 +351,12 @@
     else if (sel.length === all.length) label = 'all sites';
     else if (sel.length === 1)          label = sel[0];
     else                                label = sel.length + ' sites';
-    document.getElementById('rows-source-label').textContent = label;
-    htmx.process(list);
-    htmx.ajax('GET', list.getAttribute('hx-get'), {target: list, swap: 'innerHTML'});
+    const lbl = document.getElementById('rows-source-label');
+    if (lbl) lbl.textContent = label;
+    fetch(rowsUrl(), { headers: { 'HX-Request': 'true' } })
+      .then((r) => (r.ok ? r.text() : null))
+      .then((html) => { if (html != null) list.innerHTML = html; })
+      .catch(() => { /* transient error; the next tick retries */ });
   }
 
   // --- Activity map: one constant-sized coloured dot per site, with the
@@ -461,7 +474,7 @@
 
   function rebindFilter(elemId, storageKey) {
     document.getElementById(elemId).addEventListener('change', (e) => {
-      localStorage.setItem(storageKey, e.target.value);
+      lsSet(storageKey, e.target.value);   // best-effort; never blocks the refresh
       refreshDetections();
     });
   }
@@ -470,19 +483,24 @@
   rebindFilter('top-species',   TOPSP_KEY);
 
   function restoreFilter(elemId, storageKey) {
-    const saved = localStorage.getItem(storageKey);
+    const saved = lsGet(storageKey);
     const sel = document.getElementById(elemId);
     if (saved && sel.querySelector(`option[value="${CSS.escape(saved)}"]`)) {
       sel.value = saved;
     }
   }
 
+  // Native <select> dropdowns are converted to custom dropdowns site-wide by
+  // the global enhancer in base.html (some browsers won't open native popups).
+  // It keeps the <select> as the value store and dispatches 'change', so the
+  // listeners below (rebindFilter) and rowsUrl/restoreFilter work unchanged.
   document.addEventListener('DOMContentLoaded', () => {
     restoreFilter('group-by',     GROUP_KEY);
     restoreFilter('last-minutes', LAST_KEY);
     restoreFilter('top-species',  TOPSP_KEY);
     renderSourceChips();
     refreshDetections();
+    setInterval(refreshDetections, 5000);   // periodic refresh (was htmx every 5s)
   });
 
   // --- Hour-drill modal ---------------------------------------------------

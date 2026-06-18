@@ -121,7 +121,7 @@
           <a href="/confidence" class="text-zinc-400 hover:text-zinc-100">confidence</a>
           <a href="/review" class="text-zinc-400 hover:text-zinc-100">review</a>
           <a href="/rare" class="text-zinc-400 hover:text-zinc-100">rare</a>
-          <a href="/diurnal" class="text-zinc-400 hover:text-zinc-100">diurnal</a>
+          <a href="/diurnal" class="text-zinc-400 hover:text-zinc-100">daily</a>
           <a href="/help" class="text-zinc-400 hover:text-zinc-100">help</a>
           {% if not request.state.is_public %}
             <a href="/admin" class="text-zinc-400 hover:text-zinc-100">admin</a>
@@ -271,6 +271,90 @@
       m.addEventListener('click', function (e) {
         if (e.target === this) this.close();
       });
+    })();
+  </script>
+
+  <script>
+    // --- Global <select> enhancer -------------------------------------------
+    // Some browsers (notably Firefox in this deployment) won't open native
+    // <select> popups at all. Replace every <select> site-wide with a custom
+    // button + list. The native <select> stays in the DOM (sr-only) as the
+    // value store, and we dispatch 'change' on it, so anything that reads
+    // `.value`, submits a form, or listens for `change` keeps working. The
+    // button copies the <select>'s own classes so each keeps its look.
+    // Re-runs after HTMX swaps so dynamically-inserted selects get enhanced.
+    (function () {
+      function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+
+      function enhance(sel) {
+        if (sel.dataset.enhanced || sel.multiple) return;
+        sel.dataset.enhanced = '1';
+        const full = sel.classList.contains('w-full') || sel.classList.contains('flex-1');
+        const wrap = document.createElement('span');
+        wrap.className = 'relative ' + (full ? 'block' : 'inline-block')
+          + (sel.classList.contains('flex-1') ? ' flex-1' : '');
+        sel.parentNode.insertBefore(wrap, sel);
+        wrap.appendChild(sel);
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = sel.className.replace(/\bsr-only\b/g, '').trim()
+          + ' inline-flex items-center justify-between gap-1 cursor-pointer text-left'
+          + (full ? ' w-full' : '');
+        sel.classList.add('sr-only');
+        sel.tabIndex = -1;
+        wrap.appendChild(btn);
+
+        const list = document.createElement('ul');
+        list.className = 'cs-list hidden absolute left-0 top-full mt-1 z-50 min-w-full '
+          + 'max-h-60 overflow-auto rounded border border-zinc-700 bg-zinc-900 shadow-xl py-0.5';
+        wrap.appendChild(list);
+
+        const caret = ' <span class="text-zinc-500 ml-1 shrink-0">▾</span>';
+        const labelFor = (v) => {
+          const o = Array.from(sel.options).find((x) => x.value === v);
+          return o ? o.textContent.trim() : '';
+        };
+        const sync = () => { btn.innerHTML = '<span class="truncate">' + esc(labelFor(sel.value)) + '</span>' + caret; };
+
+        Array.from(sel.options).forEach((o) => {
+          const li = document.createElement('li');
+          li.textContent = o.textContent.trim();
+          li.className = 'px-2 py-1 text-sm cursor-pointer whitespace-nowrap text-zinc-200 hover:bg-zinc-800'
+            + (o.disabled ? ' opacity-40 pointer-events-none' : '');
+          li.addEventListener('click', (e) => {
+            e.stopPropagation();
+            list.classList.add('hidden');
+            if (sel.value !== o.value) {
+              sel.value = o.value;
+              sel.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            sync();
+          });
+          list.appendChild(li);
+        });
+
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const open = !list.classList.contains('hidden');
+          document.querySelectorAll('.cs-list').forEach((l) => l.classList.add('hidden'));
+          if (!open) list.classList.remove('hidden');
+        });
+        sel.addEventListener('change', sync);  // keep label synced on programmatic changes
+        sync();
+      }
+
+      function enhanceAll(root) {
+        (root || document).querySelectorAll('select:not([data-enhanced])').forEach(enhance);
+      }
+
+      // Click elsewhere closes any open custom dropdown.
+      document.addEventListener('click', () => {
+        document.querySelectorAll('.cs-list').forEach((l) => l.classList.add('hidden'));
+      });
+      if (document.readyState !== 'loading') enhanceAll();
+      else document.addEventListener('DOMContentLoaded', () => enhanceAll());
+      document.addEventListener('htmx:afterSettle', (e) => enhanceAll(e.target));
     })();
   </script>
 </body>

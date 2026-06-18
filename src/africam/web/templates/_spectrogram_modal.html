@@ -46,7 +46,7 @@
         <div id="spec-modal-meta" class="text-xs text-zinc-500 mt-0.5 truncate"></div>
       </div>
     </div>
-    <button type="button" id="spec-modal-close"
+    <button type="button" id="spec-modal-close" data-spec-close
             class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
   </div>
   <div class="p-5">
@@ -71,9 +71,30 @@
     </div>
     <audio id="spec-modal-audio" src="" controls preload="metadata" class="w-full mt-3"></audio>
 
-    {# Species note sits below the player: a visitor opens a clip to HEAR it,
-       so spectrogram + audio lead; the curator's ID note is context that
-       follows. #}
+    {# Verdict bar sits directly under the clip so it's reachable on mobile
+       without scrolling past the (sometimes long) species note below. A Close
+       button rides alongside it so the popup can be dismissed from here too. #}
+    <div class="mt-3 flex items-center justify-between gap-2 flex-wrap">
+      <div class="flex items-center gap-1.5 flex-wrap">
+        <button type="button" data-label-btn="bad"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
+                title="False positive">✗ bad</button>
+        <button type="button" data-label-btn="unsure"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
+                title="Can't tell">? unsure</button>
+        <button type="button" data-label-btn="good"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
+                title="Correct ID">✓ good</button>
+        <button type="button" data-label-btn=""
+                class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                title="Clear label">↺</button>
+      </div>
+      <button type="button" data-spec-close
+              class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800">Close</button>
+    </div>
+
+    {# Species note: context that follows the clip + verdict. Clamped on open
+       (it can be several paragraphs); tap "more" to expand. #}
     <div id="spec-modal-note"
          class="hidden mt-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40">
       <div class="flex items-center justify-between gap-2">
@@ -84,7 +105,7 @@
           edit
         </button>
       </div>
-      <p id="spec-modal-note-text" class="mt-1 whitespace-pre-wrap text-zinc-200"></p>
+      <p id="spec-modal-note-text" class="mt-1 whitespace-pre-wrap text-zinc-200 max-h-32 overflow-y-auto pr-1"></p>
     </div>
 
     <div id="spec-modal-note-edit-form"
@@ -116,24 +137,6 @@
                 class="px-3 py-1 rounded bg-zinc-100 text-zinc-900 text-xs font-medium hover:bg-white">
           save
         </button>
-      </div>
-    </div>
-
-    <div class="mt-4 flex items-center justify-between gap-3 flex-wrap">
-      <p class="text-xs text-zinc-500">tap a verdict to confirm &amp; rate</p>
-      <div class="flex items-center gap-1.5">
-        <button type="button" data-label-btn="bad"
-                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
-                title="False positive">✗ bad</button>
-        <button type="button" data-label-btn="unsure"
-                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
-                title="Can't tell">? unsure</button>
-        <button type="button" data-label-btn="good"
-                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
-                title="Correct ID">✓ good</button>
-        <button type="button" data-label-btn=""
-                class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
-                title="Clear label">↺</button>
       </div>
     </div>
 
@@ -491,6 +494,7 @@
       noteTagEl.textContent = tagLabel;
       noteTextEl.textContent = data.note;
       noteBox.classList.remove('hidden');
+      noteTextEl.scrollTop = 0;   // a long note scrolls within its box; start at top
     } else {
       noteBox.classList.add('hidden');
     }
@@ -1226,7 +1230,8 @@
   });
   confirmDlg.addEventListener('click', (e) => { if (e.target === confirmDlg) closeConfirm(); });
 
-  closeBtn.addEventListener('click', closeIt);
+  // Header × and the Close button in the verdict bar both dismiss the modal.
+  dialog.querySelectorAll('[data-spec-close]').forEach((b) => b.addEventListener('click', closeIt));
   dialog.addEventListener('close',  () => { audio.pause(); stopTick(); });
   dialog.addEventListener('cancel', closeIt);
   dialog.addEventListener('click', (e) => { if (e.target === dialog) closeIt(); });
