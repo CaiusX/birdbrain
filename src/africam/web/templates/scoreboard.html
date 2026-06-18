@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% from "_macros.html" import species_link, spectrogram_clip, site_link %}
-{% block title %}BirdBrain · scoreboard{% endblock %}
+{% block title %}BirdBrain · sites{% endblock %}
 
 {% block content %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">
-      Site scoreboard
+      Sites
       <span class="text-zinc-200 ml-2">{{ total }}</span>
       <span class="text-zinc-500 text-xs ml-1">detections in last {{ hours }}h · most species first</span>
     </h2>

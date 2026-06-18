@@ -116,7 +116,7 @@
         {{ brand_lockup(text_cls='text-xl', modal=True) }}
         <nav class="flex items-baseline gap-4 text-sm">
           <a href="/" class="text-zinc-400 hover:text-zinc-100">live</a>
-          <a href="/scoreboard" class="text-zinc-400 hover:text-zinc-100">scoreboard</a>
+          <a href="/scoreboard" class="text-zinc-400 hover:text-zinc-100">sites</a>
           <a href="/species" class="text-zinc-400 hover:text-zinc-100">species</a>
           <a href="/confidence" class="text-zinc-400 hover:text-zinc-100">confidence</a>
           <a href="/review" class="text-zinc-400 hover:text-zinc-100">review</a>
@@ -125,6 +125,16 @@
           <a href="/help" class="text-zinc-400 hover:text-zinc-100">help</a>
           {% if not request.state.is_public %}
             <a href="/admin" class="text-zinc-400 hover:text-zinc-100">admin</a>
+          {% endif %}
+          {% if request.state.user %}
+            <span class="text-zinc-600" aria-hidden="true">·</span>
+            <span class="text-zinc-400" title="logged in">{{ request.state.user.username }}</span>
+            <form method="post" action="/auth/logout" class="inline">
+              <button type="submit" class="text-zinc-500 hover:text-zinc-200">logout</button>
+            </form>
+          {% else %}
+            <span class="text-zinc-600" aria-hidden="true">·</span>
+            <a href="/login" class="text-zinc-400 hover:text-zinc-100">log in</a>
           {% endif %}
         </nav>
       </div>

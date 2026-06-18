@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -448,3 +457,44 @@ class SourceStateRow(Base):
     # If set, manual overrides remain authoritative until this timestamp.
     manual_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class UserRow(Base):
+    """A registered reviewer. ``role`` is 'tester' (default) or 'operator'
+    (the original LAN operator; the old global label is migrated in as this
+    user). Passwords are pbkdf2 hashes (see web/auth.py)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(256))
+    role: Mapped[str] = mapped_column(String(16), default="tester")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class DetectionScoreRow(Base):
+    """One reviewer's score of one detection. Many users may score the same
+    detection (multi-rater, independent); the consensus is denormalised back
+    onto DetectionRow.label/suggested_species/sound_rating on every write so
+    the existing readers keep working."""
+
+    __tablename__ = "detection_scores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    detection_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    # 'good' | 'bad' | 'unsure' | NULL (cleared).
+    label: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    suggested_species: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    sound_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("detection_id", "user_id", name="uq_score_detection_user"),
+        # Fast per-user "what have I not scored yet" anti-join on /review.
+        Index("ix_scores_user_detection", "user_id", "detection_id"),
+    )

@@ -4,6 +4,7 @@ import asyncio
 import functools
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -75,7 +76,8 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import and_, case, desc, func, or_, select
+from sqlalchemy import and_, case, desc, exists, func, or_, select
+from starlette.middleware.sessions import SessionMiddleware
 
 from africam import sandbox
 from africam import weather as weather_module
@@ -87,10 +89,13 @@ from africam.storage import (
     DailyBriefRow,
     Database,
     DetectionRow,
+    DetectionScoreRow,
     SiteNoteRow,
     SpeciesNoteRow,
+    UserRow,
     WorkerHeartbeatRow,
 )
+from africam.web import auth as auth_mod
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -509,6 +514,28 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     db = Database(cfg.db_url)
     clips_root = cfg.clips_dir.resolve()
 
+    # One-time migration: the legacy single global label per detection becomes
+    # the "operator" user's score (per-user model). Idempotent; guarded by an
+    # app_settings flag so it runs once. The operator account is created here
+    # with a password from AFRICAM_OPERATOR_PASSWORD, else an unusable hash that
+    # must be set via `africam set-password operator`.
+    if db.get_setting("scores_backfilled") != "1":
+        if not db.operator_exists():
+            _op_pw = os.environ.get("AFRICAM_OPERATOR_PASSWORD")
+            db.set_user_password(
+                "operator",
+                auth_mod.hash_password(_op_pw) if _op_pw else auth_mod.UNUSABLE_PASSWORD,
+                create_role="operator",
+            )
+            if not _op_pw:
+                log.warning(
+                    "operator_account_created_without_password",
+                    hint="run: africam set-password operator",
+                )
+        n = db.migrate_global_labels_to_scores("operator")
+        db.set_setting("scores_backfilled", "1")
+        log.info("scores_backfilled", migrated=n)
+
     # Linkify species names in note/brief prose → species pages (cached matcher).
     TEMPLATES.env.filters["linkify_species"] = _make_species_linkifier(db)
 
@@ -532,6 +559,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # dashboard read-only without putting a login in front of the whole site.
     _PUBLIC_BLOCKED_PREFIXES = ("/admin",)
     _PUBLIC_BLOCKED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+    # Auth flows that must work over the public tunnel so testers can register
+    # / sign in (signup itself is gated by the invite code in the handler).
+    _AUTH_ALLOWED_PATHS = ("/login", "/signup", "/auth/signup", "/auth/login", "/auth/logout")
 
     @app.middleware("http")
     async def no_store_html(request: Request, call_next):
@@ -549,14 +579,116 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     async def restrict_public(request: Request, call_next):
         is_public = request.headers.get("cf-connecting-ip") is not None
         request.state.is_public = is_public
+        # Resolve the logged-in tester from the signed session cookie (set by
+        # SessionMiddleware, which is outermost). One indexed lookup, only when
+        # a session exists — anonymous public traffic pays nothing.
+        uid = request.session.get("uid")
+        request.state.user = db.get_user_by_id(uid) if uid else None
         if is_public:
             path = request.url.path
-            if (
+            if path.startswith(_PUBLIC_BLOCKED_PREFIXES):
+                return Response(status_code=404)          # /admin → LAN only, always
+            if path in _AUTH_ALLOWED_PATHS or path.startswith("/auth/"):
+                pass                                       # sign up / log in over the tunnel
+            elif (
                 request.method in _PUBLIC_BLOCKED_METHODS
-                or any(path.startswith(p) for p in _PUBLIC_BLOCKED_PREFIXES)
+                and request.state.user is None
             ):
-                return Response(status_code=404)
+                return Response(status_code=404)           # anon public stays read-only
         return await call_next(request)
+
+    # SessionMiddleware must wrap the above so request.session is populated
+    # before restrict_public reads it. add_middleware inserts at the front of
+    # the stack, so adding it AFTER the @app.middleware decorators makes it the
+    # outermost layer. https_only=False so the cookie works on both the https
+    # tunnel and plain-http LAN; Lax is fine for our top-level form posts.
+    _secret = cfg.secret_key or auth_mod.get_or_create_secret_key(db)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=_secret,
+        session_cookie="bb_session",
+        same_site="lax",
+        https_only=False,
+        max_age=60 * 60 * 24 * 30,
+    )
+
+    def _resolve_invite_code() -> str | None:
+        """Invite code from config/env, else the app_settings fallback."""
+        return cfg.invite_code or db.get_setting("invite_code")
+
+    def require_user(request: Request) -> UserRow:
+        """Return the logged-in user or raise 401. Use on scoring endpoints."""
+        user = getattr(request.state, "user", None)
+        if user is None:
+            raise HTTPException(401, "login required")
+        return user
+
+    # --- Tester accounts: login / signup / logout ---
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page(request: Request) -> Response:
+        if getattr(request.state, "user", None) is not None:
+            return RedirectResponse("/", status_code=303)
+        return TEMPLATES.TemplateResponse(request, "login.html", {"error": None})
+
+    @app.get("/signup", response_class=HTMLResponse)
+    def signup_page(request: Request) -> Response:
+        if getattr(request.state, "user", None) is not None:
+            return RedirectResponse("/", status_code=303)
+        return TEMPLATES.TemplateResponse(
+            request, "signup.html",
+            {"error": None, "signups_open": _resolve_invite_code() is not None},
+        )
+
+    @app.post("/auth/signup")
+    async def auth_signup(request: Request) -> Response:
+        form = await request.form()
+        username = auth_mod.normalize_username(form.get("username") or "")
+        password = form.get("password") or ""
+        invite = (form.get("invite_code") or "").strip()
+        expected = _resolve_invite_code()
+
+        def _fail(msg: str) -> Response:
+            return TEMPLATES.TemplateResponse(
+                request, "signup.html",
+                {"error": msg, "signups_open": expected is not None},
+                status_code=400,
+            )
+
+        if expected is None:
+            return _fail("Sign-ups are disabled. Ask the operator for access.")
+        if not auth_mod.constant_time_eq(invite, expected):
+            return _fail("Invalid invite code.")
+        if not auth_mod.valid_username(username):
+            return _fail("Username must be 3–64 characters: letters, digits, . _ -")
+        pw_err = auth_mod.validate_password_rules(password)
+        if pw_err:
+            return _fail(pw_err)
+        user = db.create_user(username, auth_mod.hash_password(password))
+        if user is None:
+            return _fail("That username is already taken.")
+        request.session["uid"] = user.id
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/auth/login")
+    async def auth_login(request: Request) -> Response:
+        form = await request.form()
+        username = auth_mod.normalize_username(form.get("username") or "")
+        password = form.get("password") or ""
+        user = db.get_user_by_username(username)
+        if user is None or not auth_mod.verify_password(password, user.password_hash):
+            return TEMPLATES.TemplateResponse(
+                request, "login.html",
+                {"error": "Invalid username or password."},
+                status_code=400,
+            )
+        request.session["uid"] = user.id
+        db.touch_user_login(user.id)
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/auth/logout")
+    async def auth_logout(request: Request) -> Response:
+        request.session.clear()
+        return RedirectResponse("/", status_code=303)
 
     def _runtime_to_cfg(row) -> SourceConfig:
         from africam.config import OcrConfig
@@ -3461,10 +3593,24 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         note_tag: str,
         order: str,
         limit: int,
+        user_id: int | None = None,
     ) -> dict:
         """Build the template context for the per-detection view of /review.
-        Pulled out of the old /audition handler so /review can dispatch."""
+        Pulled out of the old /audition handler so /review can dispatch. When
+        ``user_id`` is given, /review is that tester's personal queue: filters
+        and counts key off THEIR scores (unreviewed = not scored by them),
+        not the consensus."""
         _, sources_by_name, _ = _all_sources()
+
+        def _user_score_exists(label=None):
+            q = (
+                select(DetectionScoreRow.id)
+                .where(DetectionScoreRow.detection_id == DetectionRow.id)
+                .where(DetectionScoreRow.user_id == user_id)
+            )
+            if label is not None:
+                q = q.where(DetectionScoreRow.label == label)
+            return q.exists()
 
         with db.session() as s:
             stmt = (
@@ -3477,10 +3623,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 stmt = stmt.where(DetectionRow.source_name == source)
             if species:
                 stmt = stmt.where(DetectionRow.common_name.ilike(f"%{species}%"))
-            if label_filter == "unreviewed":
-                stmt = stmt.where(DetectionRow.label.is_(None))
-            elif label_filter in ("good", "bad", "unsure"):
-                stmt = stmt.where(DetectionRow.label == label_filter)
+            if user_id is not None:
+                # Per-user queue: scored-by-me vs not.
+                if label_filter == "unreviewed":
+                    stmt = stmt.where(~_user_score_exists())
+                elif label_filter in ("good", "bad", "unsure"):
+                    stmt = stmt.where(_user_score_exists(label_filter))
+            else:
+                # Anonymous/LAN-not-logged-in: fall back to consensus.
+                if label_filter == "unreviewed":
+                    stmt = stmt.where(DetectionRow.label.is_(None))
+                elif label_filter in ("good", "bad", "unsure"):
+                    stmt = stmt.where(DetectionRow.label == label_filter)
             # 'all' adds no filter
 
             if note_tag in ("reliable", "suspect", "rare"):
@@ -3524,12 +3678,38 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     .order_by(DetectionRow.common_name)
                 )
             )
-            label_counts = dict(
-                s.execute(
-                    select(DetectionRow.label, func.count())
-                    .group_by(DetectionRow.label)
-                ).all()
-            )
+            # Counts for the filter chips. Per-user when logged in (their own
+            # tallies; unreviewed = clips they haven't scored), else consensus.
+            your_labels: dict[int, str | None] = {}
+            if user_id is not None:
+                uc = dict(s.execute(
+                    select(DetectionScoreRow.label, func.count())
+                    .where(DetectionScoreRow.user_id == user_id)
+                    .group_by(DetectionScoreRow.label)
+                ).all())
+                scored = sum(uc.values())
+                total_clips = s.scalar(
+                    select(func.count()).select_from(DetectionRow)
+                    .where(DetectionRow.clip_path.is_not(None))
+                ) or 0
+                label_counts = {
+                    "good": uc.get("good", 0), "bad": uc.get("bad", 0),
+                    "unsure": uc.get("unsure", 0),
+                    None: max(0, total_clips - scored),
+                }
+                if rows:
+                    your_labels = dict(s.execute(
+                        select(DetectionScoreRow.detection_id, DetectionScoreRow.label)
+                        .where(DetectionScoreRow.user_id == user_id)
+                        .where(DetectionScoreRow.detection_id.in_([r.id for r in rows]))
+                    ).all())
+            else:
+                label_counts = dict(
+                    s.execute(
+                        select(DetectionRow.label, func.count())
+                        .group_by(DetectionRow.label)
+                    ).all()
+                )
             # Species → note tag, so each row can encode its palette in the
             # spectrogram URL (browser cache busts on re-tag without a full
             # page reload).
@@ -3569,6 +3749,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "unsure": label_counts.get("unsure", 0),
                 "unreviewed": label_counts.get(None, 0),
             },
+            "your_labels": your_labels,
         }
 
     def _chunks_context(
@@ -3781,6 +3962,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 bucket=bucket,
             )
         else:
+            _user = getattr(request.state, "user", None)
             ctx = _detections_context(
                 source=source,
                 species=species,
@@ -3790,6 +3972,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 note_tag=note_tag,
                 order=order or "conf_desc",
                 limit=limit or 50,
+                user_id=_user.id if _user else None,
             )
         ctx["tab"] = tab
         ctx.update(_note_tag_context())
@@ -4253,13 +4436,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 kwargs["sound_rating"] = int(r_raw)
             else:
                 raise HTTPException(400, "sound_rating must be 1-5 or empty")
-        ok = db.set_detection_label(detection_id, new_label, **kwargs)
+        user = require_user(request)   # per-user scoring; 401 if not logged in
+        ok = db.upsert_detection_score(detection_id, user.id, new_label, **kwargs)
         if not ok:
             raise HTTPException(404, "detection not found")
         if request.headers.get("hx-request"):
             with db.session() as s:
                 row = s.get(DetectionRow, detection_id)
                 note = s.get(SpeciesNoteRow, row.scientific_name) if row else None
+            your = db.get_user_score(detection_id, user.id)
             _, sources_by_name, _ = _all_sources()
             source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
             return TEMPLATES.TemplateResponse(
@@ -4267,6 +4452,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "_audition_row.html",
                 {
                     "r": row,
+                    # Badge + data-label reflect THIS user's own score; the
+                    # modal's score-fetch fills suggestion/rating on open.
+                    "your_labels": {detection_id: (your.label if your else None)},
                     "source_tz": source_tz,
                     "note_tag_by_sci": {row.scientific_name: note.tag} if note else {},
                     "status_by_sci": (
@@ -4280,6 +4468,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 },
             )
         return JSONResponse({"ok": True, "id": detection_id, "label": new_label})
+
+    @app.get("/api/detections/{detection_id}/score")
+    def detection_score(request: Request, detection_id: int) -> JSONResponse:
+        """The current user's score for a detection + the rater tally, so the
+        modal can paint the verdict/stars and show consensus on any page."""
+        user = getattr(request.state, "user", None)
+        uid = user.id if user else None
+        sc = db.get_user_score(detection_id, uid) if uid else None
+        tally = db.get_score_tally(detection_id, uid)
+        return JSONResponse({
+            "authed": uid is not None,
+            "label": sc.label if sc else None,
+            "suggested": (sc.suggested_species if sc else None) or "",
+            "sound_rating": (sc.sound_rating if sc else None) or "",
+            "tally": tally,
+        })
 
     @app.get("/partials/site-hour-detail", response_class=HTMLResponse)
     def site_hour_detail_partial(

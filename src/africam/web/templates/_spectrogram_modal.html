@@ -75,7 +75,7 @@
        without scrolling past the (sometimes long) species note below. A Close
        button rides alongside it so the popup can be dismissed from here too. #}
     <div class="mt-3 flex items-center justify-between gap-2 flex-wrap">
-      <div class="flex items-center gap-1.5 flex-wrap">
+      <div id="spec-modal-verdict" class="flex items-center gap-1.5 flex-wrap">
         <button type="button" data-label-btn="bad"
                 class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
                 title="False positive">✗ bad</button>
@@ -89,9 +89,14 @@
                 class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
                 title="Clear label">↺</button>
       </div>
+      {# Shown instead of the verdict buttons when the visitor isn't logged in. #}
+      <a id="spec-modal-login" href="/login"
+         class="hidden text-sm text-emerald-300 hover:text-emerald-200">log in to score →</a>
       <button type="button" data-spec-close
               class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800">Close</button>
     </div>
+    {# Multi-rater tally: how everyone has scored this clip (+ your own vote). #}
+    <div id="spec-modal-tally" class="mt-1.5 hidden text-[11px] text-zinc-500"></div>
 
     {# Species note: context that follows the clip + verdict. Clamped on open
        (it can be several paragraphs); tap "more" to expand. #}
@@ -281,6 +286,45 @@
   const metaEl   = document.getElementById('spec-modal-meta');
   const closeBtn = document.getElementById('spec-modal-close');
   const labelBtns = dialog.querySelectorAll('[data-label-btn]');
+  const verdictEl = document.getElementById('spec-modal-verdict');
+  const loginEl   = document.getElementById('spec-modal-login');
+  const tallyEl   = document.getElementById('spec-modal-tally');
+
+  function renderTally(t) {
+    if (!t || !t.raters) { tallyEl.classList.add('hidden'); tallyEl.textContent = ''; return; }
+    const parts = [t.raters + (t.raters === 1 ? ' rater' : ' raters')];
+    const seg = [];
+    if (t.good) seg.push(t.good + ' good');
+    if (t.unsure) seg.push(t.unsure + ' unsure');
+    if (t.bad) seg.push(t.bad + ' bad');
+    if (seg.length) parts.push(seg.join(' · '));
+    if (t.your) parts.push('you: ' + t.your);
+    tallyEl.textContent = parts.join('  ·  ');
+    tallyEl.classList.remove('hidden');
+  }
+
+  // Fetch the authoritative per-user score + rater tally when the modal opens.
+  // Anonymous visitors get the verdict buttons swapped for a "log in" link.
+  function loadScore(id) {
+    fetch(`/api/detections/${id}/score`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || id !== currentId) return;
+        if (d.authed) {
+          verdictEl.classList.remove('hidden');
+          loginEl.classList.add('hidden');
+          currentSuggested = d.suggested || '';
+          currentSoundRating = parseInt(d.sound_rating, 10) || null;
+          paintActiveLabel(d.label || null);
+        } else {
+          verdictEl.classList.add('hidden');
+          loginEl.classList.remove('hidden');
+          paintActiveLabel(null);
+        }
+        renderTally(d.tally);
+      })
+      .catch(() => {});
+  }
   // Two-step confirm popup.
   const confirmDlg     = document.getElementById('spec-confirm');
   const confirmVerdict = document.getElementById('spec-confirm-verdict');
@@ -455,6 +499,8 @@
     playhead.style.left = '0%';
     playhead.style.display = 'block';
     paintActiveLabel(btn.dataset.label || null);
+    tallyEl.classList.add('hidden');     // until the fetch resolves
+    loadScore(currentId);                // authoritative per-user score + tally
     // Reset XC rolldown to collapsed; recordings load lazily on first expand.
     xcDetailsEl.open = false;
     xcLoadedFor = null;

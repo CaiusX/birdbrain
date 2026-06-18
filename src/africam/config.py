@@ -84,6 +84,14 @@ class AppConfig(BaseSettings):
     # back to a plain "search XC" link that needs no auth.
     xeno_canto_key: str | None = None
 
+    # Tester accounts. ``secret_key`` signs the session cookie; if unset, a
+    # stable key is generated once and persisted in app_settings (so logins
+    # survive restarts). ``invite_code`` gates self-serve signup over the
+    # public site; if neither this nor the app_settings ``invite_code`` is set,
+    # signups are disabled. Env: AFRICAM_SECRET_KEY, AFRICAM_INVITE_CODE.
+    secret_key: str | None = None
+    invite_code: str | None = None
+
     # Background species-note generator. Picks one stale species every
     # notes_tick_seconds and asks Claude to write a 1–2 paragraph commentary
     # grounded in our detection footprint. Dormant unless ANTHROPIC_API_KEY

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Integer, create_engine, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from africam.detector.birdnet import Detection
@@ -17,10 +19,12 @@ from africam.storage.models import (
     AudioQualitySampleRow,
     Base,
     DailyBriefRow,
+    DetectionScoreRow,
     HighlightIntervalRow,
     PlaybackStateRow,
     DetectionRow,
     RuntimeSourceRow,
+    UserRow,
     SiteNoteRow,
     SourceDisableRow,
     SourceStateRow,
@@ -372,6 +376,274 @@ class Database:
             if sound_rating is not _UNSET:
                 row.sound_rating = sound_rating
         return True
+
+    # --- Users (tester accounts) ----------------------------------------
+
+    def create_user(
+        self, username: str, password_hash: str, *, role: str = "tester"
+    ) -> UserRow | None:
+        """Insert a user. Returns the (detached) row, or None if the username
+        is already taken."""
+        now = datetime.now(UTC)
+        try:
+            with self._Session() as s, s.begin():
+                s.add(UserRow(
+                    username=username, password_hash=password_hash,
+                    role=role, created_at=now,
+                ))
+        except IntegrityError:
+            return None
+        return self.get_user_by_username(username)
+
+    def get_user_by_username(self, username: str) -> UserRow | None:
+        with self._Session() as s:
+            return s.scalar(select(UserRow).where(UserRow.username == username))
+
+    def get_user_by_id(self, user_id: int) -> UserRow | None:
+        with self._Session() as s:
+            return s.get(UserRow, user_id)
+
+    def touch_user_login(self, user_id: int) -> None:
+        with self._Session() as s, s.begin():
+            u = s.get(UserRow, user_id)
+            if u is not None:
+                u.last_login_at = datetime.now(UTC)
+
+    def set_user_password(
+        self, username: str, password_hash: str, *, create_role: str | None = None
+    ) -> bool:
+        """Set a user's password hash; create them with ``create_role`` if
+        absent. Returns True if a row was written (False = user missing and no
+        create_role)."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            u = s.scalar(select(UserRow).where(UserRow.username == username))
+            if u is None:
+                if create_role is None:
+                    return False
+                s.add(UserRow(
+                    username=username, password_hash=password_hash,
+                    role=create_role, created_at=now,
+                ))
+            else:
+                u.password_hash = password_hash
+        return True
+
+    def operator_exists(self) -> bool:
+        with self._Session() as s:
+            n = s.scalar(
+                select(func.count()).select_from(UserRow)
+                .where(UserRow.role == "operator")
+            )
+        return bool(n)
+
+    def list_users(self) -> list[UserRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(UserRow).order_by(UserRow.username)))
+
+    def migrate_global_labels_to_scores(self, operator_username: str) -> int:
+        """One-time: copy the legacy global label/suggestion/rating on each
+        detection into a per-user score row owned by the operator. Idempotent —
+        skips detections the operator already has a score for. Returns the
+        number of rows inserted. Consensus already equals these values, so no
+        recompute is needed."""
+        with self._Session() as s, s.begin():
+            op = s.scalar(select(UserRow).where(UserRow.username == operator_username))
+            if op is None:
+                return 0
+            rows = s.execute(
+                select(
+                    DetectionRow.id, DetectionRow.label,
+                    DetectionRow.suggested_species, DetectionRow.sound_rating,
+                    DetectionRow.labeled_at,
+                ).where(or_(
+                    DetectionRow.label.is_not(None),
+                    DetectionRow.suggested_species.is_not(None),
+                    DetectionRow.sound_rating.is_not(None),
+                ))
+            ).all()
+            existing = set(s.scalars(
+                select(DetectionScoreRow.detection_id)
+                .where(DetectionScoreRow.user_id == op.id)
+            ))
+            now = datetime.now(UTC)
+            n = 0
+            for did, label, sugg, rating, lat in rows:
+                if did in existing:
+                    continue
+                s.add(DetectionScoreRow(
+                    detection_id=did, user_id=op.id, label=label,
+                    suggested_species=sugg, sound_rating=rating,
+                    scored_at=lat or now,
+                ))
+                n += 1
+        return n
+
+    # --- Per-user detection scores + denormalised consensus -------------
+
+    def _operator_id(self, s: Session) -> int | None:
+        """Cached operator user id, for consensus tie-breaks."""
+        cached = getattr(self, "_op_id_cache", None)
+        if cached is not None:
+            return cached
+        oid = s.scalar(select(UserRow.id).where(UserRow.role == "operator"))
+        if oid is not None:
+            self._op_id_cache = oid
+        return oid
+
+    def _recompute_consensus(
+        self, s: Session, detection_id: int, operator_id: int | None
+    ) -> None:
+        """Recompute the denormalised consensus on DetectionRow from all
+        per-user scores (called inside the upsert transaction). label =
+        majority vote (tie → operator's vote if among the tied, else 'unsure');
+        sound_rating = rounded mean; suggested_species = most common among
+        bad/unsure scorers (tie → operator, then most recent)."""
+        det = s.get(DetectionRow, detection_id)
+        if det is None:
+            return
+
+        def _aware(dt):
+            # SQLite returns naive datetimes for migrated rows; new scores are
+            # tz-aware. Coerce so max()/comparisons don't mix the two.
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+        scores = list(s.scalars(
+            select(DetectionScoreRow)
+            .where(DetectionScoreRow.detection_id == detection_id)
+        ))
+        labelled = [sc for sc in scores if sc.label]
+        if not labelled:
+            det.label = None
+            det.suggested_species = None
+            det.labeled_at = None
+        else:
+            counts = Counter(sc.label for sc in labelled)
+            top = max(counts.values())
+            tied = [lab for lab, c in counts.items() if c == top]
+            if len(tied) == 1:
+                det.label = tied[0]
+            else:
+                op_label = next(
+                    (sc.label for sc in labelled if sc.user_id == operator_id), None
+                )
+                det.label = op_label if op_label in tied else "unsure"
+            det.labeled_at = max(_aware(sc.scored_at) for sc in labelled)
+            sugg = [
+                sc for sc in scores
+                if sc.label in ("bad", "unsure") and sc.suggested_species
+            ]
+            if sugg:
+                scnt = Counter(sc.suggested_species for sc in sugg)
+                stop = max(scnt.values())
+                stied = [v for v, c in scnt.items() if c == stop]
+                if len(stied) == 1:
+                    det.suggested_species = stied[0]
+                else:
+                    op_s = next(
+                        (sc.suggested_species for sc in sugg
+                         if sc.user_id == operator_id), None
+                    )
+                    det.suggested_species = (
+                        op_s if op_s in stied
+                        else max(sugg, key=lambda sc: _aware(sc.scored_at)).suggested_species
+                    )
+            else:
+                det.suggested_species = None
+        ratings = [sc.sound_rating for sc in scores if sc.sound_rating]
+        det.sound_rating = (
+            max(1, min(5, round(sum(ratings) / len(ratings)))) if ratings else None
+        )
+
+    def upsert_detection_score(
+        self, detection_id: int, user_id: int, label: str | None,
+        *, suggested: Any = _UNSET, sound_rating: Any = _UNSET,
+    ) -> bool:
+        """Set/clear one user's score of a detection, then recompute the
+        consensus onto DetectionRow. Returns False if the detection is gone.
+        Suggestion/sound-rating semantics mirror set_detection_label."""
+        if label is not None and label not in ("good", "bad", "unsure"):
+            raise ValueError(f"invalid label: {label!r}")
+        if sound_rating not in (_UNSET, None) and sound_rating not in (1, 2, 3, 4, 5):
+            raise ValueError(f"invalid sound_rating: {sound_rating!r}")
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            if s.get(DetectionRow, detection_id) is None:
+                return False
+            sc = s.scalar(
+                select(DetectionScoreRow).where(
+                    DetectionScoreRow.detection_id == detection_id,
+                    DetectionScoreRow.user_id == user_id,
+                )
+            )
+            if sc is None:
+                sc = DetectionScoreRow(
+                    detection_id=detection_id, user_id=user_id, scored_at=now
+                )
+                s.add(sc)
+            sc.label = label
+            sc.scored_at = now
+            if label not in ("bad", "unsure"):
+                sc.suggested_species = None
+            elif suggested is not _UNSET:
+                sc.suggested_species = (suggested or None)
+            if sound_rating is not _UNSET:
+                sc.sound_rating = sound_rating
+            s.flush()
+            self._recompute_consensus(s, detection_id, self._operator_id(s))
+        return True
+
+    def get_user_score(self, detection_id: int, user_id: int) -> DetectionScoreRow | None:
+        with self._Session() as s:
+            return s.scalar(
+                select(DetectionScoreRow).where(
+                    DetectionScoreRow.detection_id == detection_id,
+                    DetectionScoreRow.user_id == user_id,
+                )
+            )
+
+    def get_score_tally(self, detection_id: int, user_id: int | None = None) -> dict:
+        """Rater tally for a detection: counts per label, distinct raters, and
+        (if user_id given) this user's own label."""
+        with self._Session() as s:
+            rows = dict(s.execute(
+                select(DetectionScoreRow.label, func.count())
+                .where(DetectionScoreRow.detection_id == detection_id)
+                .where(DetectionScoreRow.label.is_not(None))
+                .group_by(DetectionScoreRow.label)
+            ).all())
+            raters = s.scalar(
+                select(func.count(func.distinct(DetectionScoreRow.user_id)))
+                .where(DetectionScoreRow.detection_id == detection_id)
+            ) or 0
+            your = None
+            if user_id is not None:
+                your = s.scalar(
+                    select(DetectionScoreRow.label).where(
+                        DetectionScoreRow.detection_id == detection_id,
+                        DetectionScoreRow.user_id == user_id,
+                    )
+                )
+        return {
+            "good": int(rows.get("good", 0)),
+            "bad": int(rows.get("bad", 0)),
+            "unsure": int(rows.get("unsure", 0)),
+            "raters": int(raters),
+            "your": your,
+        }
+
+    def user_scored_detection_ids(self, user_id: int, detection_ids: list[int]) -> set[int]:
+        """Of the given detection ids, which has this user already scored?
+        For the /review per-user 'unreviewed' filter / badges."""
+        if not detection_ids:
+            return set()
+        with self._Session() as s:
+            return set(s.scalars(
+                select(DetectionScoreRow.detection_id).where(
+                    DetectionScoreRow.user_id == user_id,
+                    DetectionScoreRow.detection_id.in_(detection_ids),
+                )
+            ))
 
     # --- Worker heartbeats (admin liveness view) ---
 

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}BirdBrain · log in{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-6 max-w-sm mx-auto mt-6">
+  <h2 class="text-xl font-semibold text-zinc-100 mb-4">Log in</h2>
+  {% if error %}<p class="mb-3 text-sm text-rose-300">{{ error }}</p>{% endif %}
+  <form method="post" action="/auth/login" class="space-y-3">
+    <label class="block">
+      <span class="text-xs uppercase tracking-wider text-zinc-500">username</span>
+      <input name="username" autocomplete="username" required autofocus
+             class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-600">
+    </label>
+    <label class="block">
+      <span class="text-xs uppercase tracking-wider text-zinc-500">password</span>
+      <input name="password" type="password" autocomplete="current-password" required
+             class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-emerald-600">
+    </label>
+    <button type="submit"
+            class="w-full px-3 py-2 rounded bg-emerald-500 text-zinc-900 text-sm font-semibold hover:bg-emerald-400">Log in</button>
+  </form>
+  <p class="mt-4 text-xs text-zinc-500">
+    New tester? <a href="/signup" class="text-emerald-300 hover:text-emerald-200">Sign up</a>
+    (you'll need an invite code).
+  </p>
+</section>
+{% endblock %}

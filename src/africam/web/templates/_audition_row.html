@@ -2,7 +2,11 @@
    optionally: note_tag_by_sci, status_by_sci, palette_for_tag, default_palette #}
 {% from "_macros.html" import iucn_badge, species_link %}
 {% set tz = source_tz.get(r.source_name, 'UTC') %}
-{% set lbl = r.label %}
+{# On the per-user review queue, ``your_labels`` maps detection id → this
+   user's own label (absent = they haven't scored it). Show that instead of
+   the consensus so a tester sees their own state and isn't biased by others.
+   Other contexts don't pass it → fall back to consensus ``r.label``. #}
+{% set lbl = your_labels.get(r.id) if your_labels is defined else r.label %}
 {% set sp_tag = (note_tag_by_sci or {}).get(r.scientific_name) %}
 {% set sp_palette = (palette_for_tag or {}).get(sp_tag, default_palette or 'fire') %}
 {% set sp_status = (status_by_sci or {}).get(r.scientific_name) %}
@@ -27,8 +31,8 @@
             data-scientific="{{ r.scientific_name }}"
             data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
             data-label="{{ lbl or '' }}"
-            data-suggested="{{ r.suggested_species or '' }}"
-            data-sound-rating="{{ r.sound_rating or '' }}"
+            data-suggested=""
+            data-sound-rating=""
             data-palette="{{ sp_palette }}"
             class="relative block w-full h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition"
             style="--w: {{ (r.confidence * 100)|round(0)|int }}%;"

@@ -459,5 +459,49 @@ def dedup_backfill(
     )
 
 
+@app.command(name="set-password")
+def set_password(
+    username: Annotated[str, typer.Argument(help="Account username (created if missing).")],
+    password: Annotated[
+        str | None,
+        typer.Option("--password", help="Password (prompted, hidden, if omitted)."),
+    ] = None,
+    operator: Annotated[
+        bool,
+        typer.Option("--operator", help="Create as the operator account if missing."),
+    ] = False,
+) -> None:
+    """Set (or reset) a reviewer's password. Creates the user if they don't
+    exist. Use this to give the migrated ``operator`` account a password, or to
+    reset a tester's."""
+    from africam.web import auth as auth_mod
+
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    uname = auth_mod.normalize_username(username)
+    if not auth_mod.valid_username(uname):
+        console.print("[red]Invalid username (3–64 chars: letters, digits, . _ -).[/red]")
+        raise typer.Exit(1)
+    if password is None:
+        password = typer.prompt("New password", hide_input=True, confirmation_prompt=True)
+    err = auth_mod.validate_password_rules(password)
+    if err:
+        console.print(f"[red]{err}[/red]")
+        raise typer.Exit(1)
+    existing = db.get_user_by_username(uname)
+    role = "operator" if (operator or uname == "operator") else "tester"
+    wrote = db.set_user_password(
+        uname, auth_mod.hash_password(password),
+        create_role=(None if existing else role),
+    )
+    if not wrote:
+        console.print("[red]User not found.[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]Password {'updated' if existing else f'set (new {role})'} "
+        f"for {uname!r}.[/green]"
+    )
+
+
 if __name__ == "__main__":
     app()
