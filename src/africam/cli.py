@@ -282,6 +282,98 @@ def probe(
                 )
 
 
+@app.command(name="tbb-listen")
+def tbb_listen(
+    device: Annotated[
+        str,
+        typer.Option("--device", "-d", help="ALSA capture device of the USB mic."),
+    ] = "plughw:1,0",
+    seconds: Annotated[
+        int, typer.Option("--seconds", "-t", help="How long to listen before stopping.")
+    ] = 60,
+    min_confidence: Annotated[
+        float, typer.Option("--min-confidence", help="BirdNET confidence floor.")
+    ] = 0.5,
+    lat: Annotated[
+        float | None, typer.Option("--lat", help="Latitude for the locality filter.")
+    ] = None,
+    lon: Annotated[
+        float | None, typer.Option("--lon", help="Longitude for the locality filter.")
+    ] = None,
+) -> None:
+    """TBB bench smoke test: capture from a USB mic and run BirdNET per chunk.
+
+    Builds a :class:`MicSource`, streams 3 s chunks off the ALSA device, runs the
+    detector on each, and prints detections plus the measured per-chunk inference
+    time. Use this on a Raspberry Pi Zero 2 W to validate the real-time margin;
+    wrap it in ``/usr/bin/time -v`` (or watch ``free -m``) to capture peak RAM.
+    """
+    import time
+
+    from africam.audio import MicSource
+    from africam.detector import BirdNetDetector
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+
+    source = MicSource(
+        name="tbb-bench",
+        device=device,
+        sample_rate=cfg.sample_rate,
+        chunk_seconds=cfg.chunk_seconds,
+    )
+
+    console.rule(f"[bold]tbb-listen[/bold]  device={device}  {seconds}s")
+    t_load = time.perf_counter()
+    detector = BirdNetDetector()
+    console.print(f"detector loaded in {time.perf_counter() - t_load:.1f}s")
+
+    deadline = time.perf_counter() + seconds
+    inference_ms: list[float] = []
+    n_chunks = 0
+    n_dets = 0
+    stream = source.stream()
+    for chunk in stream:
+        n_chunks += 1
+        t0 = time.perf_counter()
+        dets = detector.analyze(chunk, lat=lat, lon=lon, min_confidence=min_confidence)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        inference_ms.append(dt_ms)
+        n_dets += len(dets)
+        margin = chunk.duration_s * 1000.0 / dt_ms if dt_ms else float("inf")
+        console.print(
+            f"chunk {n_chunks}: {dt_ms:7.1f} ms  "
+            f"(x{margin:.1f} real-time)  {len(dets)} detection(s)"
+        )
+        for d in dets:
+            console.print(
+                f"  {d.common_name} ({d.scientific_name})  conf={d.confidence:.2f}"
+            )
+        if time.perf_counter() >= deadline:
+            break
+
+    console.rule("[bold]summary[/bold]")
+    if inference_ms:
+        avg = sum(inference_ms) / len(inference_ms)
+        console.print(
+            f"chunks={n_chunks}  detections={n_dets}\n"
+            f"inference ms  min={min(inference_ms):.1f}  "
+            f"avg={avg:.1f}  max={max(inference_ms):.1f}\n"
+            f"chunk budget={cfg.chunk_seconds * 1000.0:.0f} ms "
+            f"→ headroom x{cfg.chunk_seconds * 1000.0 / avg:.1f} at the mean"
+        )
+    else:
+        console.print("[red]no chunks captured — check the ALSA device with `arecord -l`[/red]")
+
+    try:
+        import resource  # Unix only; gives peak RSS for the inline RAM datapoint.
+
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        console.print(f"peak RSS (this process): {peak_kb / 1024:.0f} MB")
+    except ImportError:
+        console.print("[dim]peak RSS unavailable here; use `/usr/bin/time -v` on the Pi.[/dim]")
+
+
 @app.command(name="seed-runtime")
 def seed_runtime(
     sources_file: Annotated[
