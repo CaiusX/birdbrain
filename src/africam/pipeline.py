@@ -8,7 +8,7 @@ from datetime import timedelta
 
 import numpy as np
 
-from africam.audio import AudioSource, RtspSource, YouTubeSource
+from africam.audio import AudioSource, MicSource, RtspSource, YouTubeSource
 from africam.audio.source import AudioChunk
 from africam.clips import save_chunk
 from africam.config import AppConfig, OcrConfig, SourceConfig
@@ -72,6 +72,8 @@ def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
         )
     if cfg.kind == "rtsp":
         return RtspSource(url=cfg.url, **common)
+    if cfg.kind == "mic":
+        return MicSource(device=cfg.device, **common)
     raise ValueError(f"Unknown source kind: {cfg.kind!r}")
 
 

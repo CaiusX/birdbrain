@@ -374,6 +374,21 @@ def tbb_listen(
         console.print("[dim]peak RSS unavailable here; use `/usr/bin/time -v` on the Pi.[/dim]")
 
 
+@app.command(name="tbb-pipeline")
+def tbb_pipeline() -> None:
+    """Run the TBB capture-unit pipeline: USB mic → BirdNET → local SQLite + clips.
+
+    Single mic source, no central-only workers, with a local clip-retention
+    sweep. Configure via AFRICAM_TBB_* env / the unit's .env (unit id, mic
+    device, lat/lon, retention). This is the `tbb-pipeline` systemd service.
+    """
+    from africam.tbb import run_tbb
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    run_tbb(cfg)
+
+
 @app.command(name="seed-runtime")
 def seed_runtime(
     sources_file: Annotated[

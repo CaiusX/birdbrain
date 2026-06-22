@@ -24,8 +24,14 @@ class OcrConfig(BaseModel):
 
 class SourceConfig(BaseModel):
     name: str
-    kind: Literal["youtube", "rtsp"]
+    kind: Literal["youtube", "rtsp", "mic"]
+    # Not used by the "mic" kind (it reads ALSA, not a URL) — kept required so
+    # the youtube/rtsp path is unchanged; the mic source config sets it to a
+    # descriptive placeholder.
     url: str
+    # ALSA capture device for the "mic" kind (e.g. "plughw:1,0"). Ignored by the
+    # youtube/rtsp kinds. Lives here so a MicSource's config travels with it.
+    device: str = "plughw:1,0"
     lat: float | None = None
     lon: float | None = None
     min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -122,6 +128,29 @@ class AppConfig(BaseSettings):
     weather_archive_enabled: bool = True
     weather_tick_seconds: int = 3600
     weather_backfill_days: int = 92
+
+    # --- TinyBirdBrain (TBB) capture-unit profile ---
+    # These are inert on the central deploy. The `tbb-pipeline` / `tbb-web`
+    # entrypoints read them to run a single USB-mic source with the
+    # central-only workers (notes, weather, media, anomalies, OCR) left off.
+    # Override via AFRICAM_TBB_* env or the unit's .env.
+    tbb_unit_id: str = "tbb-dev"
+    # ALSA capture device of the USB mic; pick from `arecord -l` on the unit.
+    tbb_mic_device: str = "plughw:1,0"
+    # Static location for BirdNET's locality filter (set at enrollment). None
+    # leaves the filter off (global model).
+    tbb_lat: float | None = None
+    tbb_lon: float | None = None
+    tbb_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    tbb_timezone: str = "UTC"
+    # Local clip retention: prune saved clips older than this many days to
+    # protect the SD card. The pipeline runs the prune sweep itself.
+    tbb_clip_retention_days: int = 14
+    tbb_prune_tick_seconds: int = 3600
+    # Sync to central (birdbrain.co.za). Off in Phase 1 — wired up in Phase 2.
+    tbb_sync_enabled: bool = False
+    tbb_central_url: str | None = None
+    tbb_device_token: str | None = None
 
 
 def load_sources(path: Path) -> list[SourceConfig]:
