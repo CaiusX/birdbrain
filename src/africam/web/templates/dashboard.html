@@ -435,8 +435,68 @@
     m.bindPopup(siteSummaryHtml(s), {
       className: 'site-popup', closeButton: true, offset: [0, -6], minWidth: 208,
     });
+    m.on('mouseover', () => spiderfyAround(m));
     markers[s.name] = m;
   });
+
+  // --- Hover-spiderfy overlapping dots --------------------------------------
+  // Sites at the same/near coords (e.g. the co-located JHB units) stack into a
+  // single dot that can't be clicked apart even fully zoomed in. On hover, fan
+  // the stacked group out around its centre with thin legs so each marker is
+  // individually hoverable/clickable; collapse when the pointer leaves the
+  // cluster, or on zoom/drag. Pixel-based, so it adapts to zoom and only fires
+  // on a genuine overlap.
+  let spider = null;
+  const OVERLAP_PX = 16;
+
+  function clusterOf(target) {
+    const tp = map.latLngToLayerPoint(target.getLatLng());
+    return Object.values(markers).filter(m =>
+      map.latLngToLayerPoint(m.getLatLng()).distanceTo(tp) <= OVERLAP_PX);
+  }
+
+  function spiderfyAround(target) {
+    if (spider) return;                       // a group is already fanned
+    const group = clusterOf(target);
+    if (group.length < 2) return;             // nothing overlaps here
+    const pts = group.map(m => map.latLngToLayerPoint(m.getLatLng()));
+    const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+    const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+    const center = L.point(cx, cy);
+    const r = 14 + group.length * 6;
+    const legs = [];
+    group.forEach((m, i) => {
+      m._homeLatLng = m.getLatLng();
+      const a = (2 * Math.PI * i) / group.length - Math.PI / 2;
+      const ll = map.layerPointToLatLng(L.point(cx + r * Math.cos(a), cy + r * Math.sin(a)));
+      legs.push(L.polyline([map.layerPointToLatLng(center), ll],
+        { color: '#a1a1aa', weight: 1, opacity: 0.55, interactive: false }).addTo(map));
+      m.setLatLng(ll);
+      m.setZIndexOffset(1000);
+    });
+    spider = { group, center, legs, radius: r };
+    map.on('mousemove', spiderWatch);
+  }
+
+  function spiderWatch(e) {
+    if (!spider) return;
+    // keep fanned while a popup from the group is open (so it can be read)
+    if (spider.group.some(m => m.isPopupOpen && m.isPopupOpen())) return;
+    if (map.latLngToLayerPoint(e.latlng).distanceTo(spider.center) > spider.radius + 28) {
+      unspiderfy();
+    }
+  }
+
+  function unspiderfy() {
+    if (!spider) return;
+    spider.legs.forEach(l => map.removeLayer(l));
+    spider.group.forEach(m => { m.setLatLng(m._homeLatLng); m.setZIndexOffset(0); });
+    map.off('mousemove', spiderWatch);
+    spider = null;
+  }
+
+  map.on('zoomstart dragstart', unspiderfy);
+  map.on('popupclose', () => { if (spider) unspiderfy(); });
 
   // Default welcome view: frame Africa, not the site cluster. The map box is
   // wide (full-width × 460px) while the continent is portrait, so fitting the

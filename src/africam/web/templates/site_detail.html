@@ -443,7 +443,7 @@
         </td>
         <td class="px-5 py-2 text-right tabular-nums text-zinc-300">{{ "{:,}".format(sp.n) }}</td>
         <td class="px-5 py-2 text-right tabular-nums text-zinc-400">{{ "%.2f"|format(sp.max_conf) }}</td>
-        <td class="px-5 py-2 text-right tabular-nums text-zinc-500 text-xs">{{ sp.last_seen.strftime('%m-%d %H:%M') if sp.last_seen else '—' }}</td>
+        <td class="px-5 py-2 text-right tabular-nums text-zinc-500 text-xs">{{ sp.last_seen | localtime(tz_name, '%m-%d %H:%M') if sp.last_seen else '—' }}</td>
       </tr>
     {% endfor %}
     </tbody>

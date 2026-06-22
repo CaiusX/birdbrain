@@ -75,7 +75,7 @@
        without scrolling past the (sometimes long) species note below. A Close
        button rides alongside it so the popup can be dismissed from here too. #}
     <div class="mt-3 flex items-center justify-between gap-2 flex-wrap">
-      <div id="spec-modal-verdict" class="flex items-center gap-1.5 flex-wrap">
+      <div id="spec-modal-verdict" class="{% if not request.state.user %}hidden {% endif %}flex items-center gap-1.5 flex-wrap">
         <button type="button" data-label-btn="bad"
                 class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
                 title="False positive">✗ bad</button>
@@ -91,7 +91,7 @@
       </div>
       {# Shown instead of the verdict buttons when the visitor isn't logged in. #}
       <a id="spec-modal-login" href="/login"
-         class="hidden text-sm text-emerald-300 hover:text-emerald-200">log in to score →</a>
+         class="{% if request.state.user %}hidden {% endif %}text-sm text-emerald-300 hover:text-emerald-200">log in to score →</a>
       <button type="button" data-spec-close
               class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800">Close</button>
     </div>
