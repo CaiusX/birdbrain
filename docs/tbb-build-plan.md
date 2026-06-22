@@ -102,12 +102,35 @@ and `birdnetlib` already falls back to `tflite_runtime.interpreter` when full TF
 is absent, so this is a `tbb`-profile **dependency swap with no code change**.
 Central's deps stay on full TensorFlow — unchanged.
 
-*Caveats to confirm on metal:* (a) `tflite-runtime` cp312 wheel availability for
-aarch64 — the repo comment notes none on PyPI for cp312; options are a cp311
-unit interpreter, building the wheel, or the `ai-edge-litert` successor package;
-(b) actual Zero 2 W inference ms (x86→A53 is ~10–25× slower, so expect roughly
-0.5–1.5 s/chunk per the arch estimate, still inside the 3 s budget — but this is
-an extrapolation, not a measurement).
+**Metal results — Pi Zero 2 W, Raspberry Pi OS Lite 64-bit (Bookworm),
+2026-06-22.** Measured on the shipping (tflite) path: `tflite-runtime` 2.14.0
+installed cleanly for **cp311 aarch64**, `tensorflow` absent, birdnetlib used the
+tflite interpreter (XNNPACK delegate). USB mic = Logitech headset on `plughw:0,0`.
+
+| Metric (Zero 2 W, tflite-runtime, Py 3.11) | Value |
+| --- | --- |
+| Detector load | 1.5 s |
+| Per-chunk inference, **warm steady state** | **~1.05 s (x2.9 real-time)** |
+| Per-chunk inference, avg over 16 chunks | 1.40 s (incl. cold start + SD-I/O spikes) |
+| Per-chunk inference, max | 4.20 s (cold first chunk, one-off) |
+| **Peak RSS** | **190 MB** (`time -v`: 194 MB) — **0 swap** |
+
+Both caveats from the x86 estimate are now resolved: (a) **wheels** — cp311
+aarch64 `tflite-runtime` exists, cp312 does **not**, so the `tbb` profile pins
+**Python 3.11** (no `ai-edge-litert` shim needed); (b) **timing** — warm inference
+~1.05 s/chunk, comfortably inside the 3 s budget. The 4.2 s cold-start chunk and
+a couple of 1.6–2.8 s spikes track SD-card I/O (23.9k major page faults on the
+first run, cold caches; job was I/O-bound at ~50% CPU), not sustained compute —
+worth a warm re-run and a multi-hour soak in Phase 1 to confirm steady-state and
+watch thermals.
+
+**Verdict — Phase 0 acceptance met.** tflite-runtime on Python 3.11 gives 190 MB
+peak (vs full TF's ~474 MB on x86, which won't fit 512 MB) and ~2.9× real-time
+headroom warm. The `tbb` profile must ship **Python 3.11 + tflite-runtime with
+`tensorflow` dropped**; central stays on full TF, unchanged. The bench used a
+throwaway `pyproject.toml` edit (requires-python `>=3.11`, TF→tflite-runtime) plus
+`uv python pin 3.11` — Phase 1 must express this as a proper `tbb` dependency
+profile, not an edit to the shared deps.
 
 ---
 
