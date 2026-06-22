@@ -112,9 +112,15 @@ pipeline automatically.
 
 ---
 
-## Acceptance (Phase 1)
+## Acceptance (Phase 1) — verified on the bench Zero 2 W, 2026-06-22
 
-- [ ] Fresh Zero 2 W + mic, **no internet**: detections appear on `Now`, persist
-      across reboot, clips saved and pruned per retention.
-- [ ] RAM stable over a multi-hour run; UI responsive on a phone over LAN.
-- [ ] Central pipeline/app untouched and still green.
+- [x] Fresh Zero 2 W + mic, **no internet**: detections appear on `Now` (phone,
+      over LAN), persist across reboot (3 rows / 3 species survived a `reboot`),
+      clips saved under `data/clips/<unit>/<date>/`. Retention prune covered by
+      unit test (`test_prune_clips_*`).
+- [x] Both `tbb-pipeline` / `tbb-web` user services auto-start headless after
+      reboot (linger); `/healthz` green, UI responsive on a phone over LAN.
+- [x] Central pipeline/app untouched and still green (14 tests pass; central
+      `web/app.py` imports; lint counts unchanged from baseline).
+- [ ] Multi-hour RAM soak — left running; glance at `free -m` later to confirm
+      no creep (steady-state footprint already comfortable on 512 MB).
