@@ -26,9 +26,17 @@
 </form>
 
 <div class="mic-test">
+  <div class="mic-controls">
+    <label>Gain <input type="range" id="mic-gain" min="-20" max="20" step="2" value="0">
+      <span id="mic-gain-val">0 dB</span></label>
+    <label class="check"><input type="checkbox" id="mic-denoise"> Reduce noise</label>
+    <label class="check"><input type="checkbox" id="mic-highpass"> Cut low rumble</label>
+  </div>
   <button type="button" id="mic-test-btn">🎤 Test microphone (record 4s &amp; play)</button>
   <span id="mic-test-status" class="hint"></span>
   <audio id="mic-test-audio" controls style="display:none; margin-top:.6rem; width:100%"></audio>
+  <p class="hint">Filters clean up this preview only. For a permanent fix lower the
+    mic's capture gain on the unit: <code>amixer -c 0 sset Mic cap 50%</code>.</p>
 </div>
 <script>
   // Records a few seconds from the configured mic and plays it here — no deps.
@@ -37,10 +45,19 @@
     const btn = document.getElementById('mic-test-btn');
     const status = document.getElementById('mic-test-status');
     const audio = document.getElementById('mic-test-audio');
+    const gain = document.getElementById('mic-gain');
+    const gainVal = document.getElementById('mic-gain-val');
+    gain.addEventListener('input', () => { gainVal.textContent = gain.value + ' dB'; });
     btn.addEventListener('click', async () => {
       btn.disabled = true; audio.style.display = 'none'; status.textContent = ' recording 4s…';
+      const q = new URLSearchParams({
+        seconds: '4',
+        gain_db: gain.value,
+        denoise: document.getElementById('mic-denoise').checked ? '1' : '0',
+        highpass: document.getElementById('mic-highpass').checked ? '1' : '0',
+      });
       try {
-        const r = await fetch('/setup/mic-sample?seconds=4', { cache: 'no-store' });
+        const r = await fetch('/setup/mic-sample?' + q, { cache: 'no-store' });
         if (!r.ok) {
           let msg = r.status + '';
           try { msg = (await r.json()).detail || msg; } catch (e) {}

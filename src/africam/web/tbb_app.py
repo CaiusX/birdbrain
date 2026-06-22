@@ -267,19 +267,39 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
         return RedirectResponse(url="/setup?saved=1", status_code=303)
 
     @app.get("/setup/mic-sample")
-    def mic_sample(seconds: int = Query(default=4, ge=1, le=10)) -> Response:
+    def mic_sample(
+        seconds: int = Query(default=4, ge=1, le=10),
+        gain_db: float = Query(default=0.0, ge=-30.0, le=30.0),
+        denoise: bool = Query(default=False),
+        highpass: bool = Query(default=False),
+    ) -> Response:
         """Record a few seconds from the configured mic and return it as OGG for
-        the Setup page to play back — a quick "is the mic working?" check.
+        the Setup page to play back — a quick "is the mic working / does it sound
+        clean?" check, with optional cleanup filters.
+
+        Filters (all ffmpeg, so device-agnostic): ``highpass`` cuts low rumble/
+        mains hum, ``denoise`` runs an FFT denoiser for broadband hiss, ``gain_db``
+        adjusts level. They shape this *preview* only — see the note on /setup
+        about lowering the mic's capture gain for a permanent fix.
 
         The pipeline holds the ALSA device exclusively, so this works when the
         pipeline is paused / during first-boot setup; while it's capturing, this
         returns 409 with a clear message rather than fighting for the device."""
+        filters: list[str] = []
+        if highpass:
+            filters.append("highpass=f=120")
+        if denoise:
+            filters.append("afftdn=nr=12")
+        if abs(gain_db) > 0.01:
+            filters.append(f"volume={gain_db}dB")
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             "-f", "alsa", "-i", cfg.tbb_mic_device,
             "-t", str(seconds), "-ac", "1", "-ar", "48000",
-            "-c:a", "libvorbis", "-f", "ogg", "pipe:1",
         ]
+        if filters:
+            cmd += ["-af", ",".join(filters)]
+        cmd += ["-c:a", "libvorbis", "-f", "ogg", "pipe:1"]
         try:
             proc = subprocess.run(cmd, capture_output=True, timeout=seconds + 15, check=False)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:

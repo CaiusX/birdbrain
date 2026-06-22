@@ -98,6 +98,26 @@ def test_mic_sample_returns_ogg_on_success(tmp_path, monkeypatch):
     assert r.content == b"OggS-fake-audio"
 
 
+def test_mic_sample_applies_cleanup_filters(tmp_path, monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        return types.SimpleNamespace(returncode=0, stdout=b"OggS", stderr=b"")
+
+    monkeypatch.setattr(tbb_app.subprocess, "run", _fake_run)
+    client = TestClient(_make_app(tmp_path))
+
+    # No filters → no -af.
+    client.get("/setup/mic-sample?gain_db=0&denoise=0&highpass=0")
+    assert "-af" not in captured["cmd"]
+
+    # All three → a single -af chain in the documented order.
+    client.get("/setup/mic-sample?gain_db=6&denoise=1&highpass=1")
+    af = captured["cmd"][captured["cmd"].index("-af") + 1]
+    assert af == "highpass=f=120,afftdn=nr=12,volume=6.0dB"
+
+
 def test_mic_sample_409_when_device_busy(tmp_path, monkeypatch):
     monkeypatch.setattr(
         tbb_app.subprocess, "run",
