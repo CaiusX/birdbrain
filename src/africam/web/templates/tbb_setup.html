@@ -2,6 +2,34 @@
 {% block content %}
 <h2>Setup</h2>
 {% if saved %}<p class="saved">✓ Saved. Restart the unit's services to apply.</p>{% endif %}
+{% if enrolled %}<p class="saved">✓ Enrolled as <b>{{ enrolled }}</b>. Power-cycle the unit (or restart its services) to start syncing.</p>{% endif %}
+{% if enroll_error %}<p class="enroll-error">Enrollment failed: {{ enroll_error }}</p>{% endif %}
+
+<h3>Connect to central</h3>
+{% if cfg.enrolled %}
+  <p class="hint">This unit is enrolled (<code>{{ cfg.unit_id }}</code>) and syncing to
+    <code>{{ cfg.central_url }}</code>. To re-enroll, get a fresh claim code and submit below.</p>
+{% else %}
+  <p class="hint">Enter the claim code printed on the box to register this unit with central.</p>
+{% endif %}
+<form method="post" action="/setup/enroll">
+  <label>Central URL
+    <input type="text" name="central_url" value="{{ cfg.central_url }}">
+  </label>
+  <label>Claim code
+    <input type="text" name="code" placeholder="XXXXX-XXXXX" required>
+  </label>
+  <label>Name this unit
+    <input type="text" name="display_name" value="{{ cfg.unit_id }}" placeholder="e.g. Front Garden">
+  </label>
+  <div class="latlon">
+    <label>Latitude <input type="text" name="lat" value="{{ cfg.lat if cfg.lat is not none else '' }}" placeholder="-25.75"></label>
+    <label>Longitude <input type="text" name="lon" value="{{ cfg.lon if cfg.lon is not none else '' }}" placeholder="28.19"></label>
+  </div>
+  <button type="submit">Enroll</button>
+</form>
+
+<h3>Local settings</h3>
 <form method="post" action="/setup">
   <label>Unit name
     <input type="text" name="unit_id" value="{{ cfg.unit_id }}">

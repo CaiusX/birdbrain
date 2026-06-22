@@ -87,6 +87,61 @@ def test_setup_page_has_mic_test_button(tmp_path):
     assert "Test microphone" in r.text
 
 
+def test_setup_page_has_enroll_form(tmp_path):
+    r = TestClient(_make_app(tmp_path)).get("/setup")
+    assert "/setup/enroll" in r.text
+    assert "Claim code" in r.text
+
+
+def test_setup_enroll_saves_issued_credentials(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(tbb_app, "update_env_file", lambda p, u: captured.update(u))
+    monkeypatch.setattr(
+        tbb_app.requests, "post",
+        lambda *a, **k: types.SimpleNamespace(
+            status_code=200, json=lambda: {"unit_id": "patio", "token": "TKN123"}
+        ),
+    )
+    client = TestClient(_make_app(tmp_path))
+    r = client.post(
+        "/setup/enroll",
+        data={"central_url": "http://c:8000/", "code": "BIRD-1",
+              "display_name": "Patio", "lat": "-25.7", "lon": "28.2"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "enrolled=patio" in r.headers["location"]
+    assert captured["AFRICAM_TBB_DEVICE_TOKEN"] == "TKN123"
+    assert captured["AFRICAM_TBB_UNIT_ID"] == "patio"
+    assert captured["AFRICAM_TBB_SYNC_ENABLED"] == "true"
+    assert captured["AFRICAM_TBB_CENTRAL_URL"] == "http://c:8000"  # trailing slash trimmed
+    assert captured["AFRICAM_TBB_LAT"] == "-25.7"
+
+
+def test_setup_enroll_surfaces_central_error(tmp_path, monkeypatch):
+    calls = {"env": 0}
+
+    def _count_env(p, u):
+        calls["env"] += 1
+
+    monkeypatch.setattr(tbb_app, "update_env_file", _count_env)
+    monkeypatch.setattr(
+        tbb_app.requests, "post",
+        lambda *a, **k: types.SimpleNamespace(
+            status_code=400, json=lambda: {"detail": "invalid or already-used claim code"}, text=""
+        ),
+    )
+    client = TestClient(_make_app(tmp_path))
+    r = client.post(
+        "/setup/enroll",
+        data={"central_url": "http://c", "code": "WRONG"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "enroll_error" in r.headers["location"]
+    assert calls["env"] == 0  # nothing written on failure
+
+
 def test_mic_sample_returns_ogg_on_success(tmp_path, monkeypatch):
     monkeypatch.setattr(
         tbb_app.subprocess, "run",

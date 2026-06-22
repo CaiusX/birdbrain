@@ -20,8 +20,10 @@ import subprocess
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import requests
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -228,7 +230,12 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
         )
 
     @app.get("/setup", response_class=HTMLResponse)
-    def setup(request: Request, saved: bool = Query(default=False)) -> HTMLResponse:
+    def setup(
+        request: Request,
+        saved: bool = Query(default=False),
+        enrolled: str = Query(default=""),
+        enroll_error: str = Query(default=""),
+    ) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
             request,
             "tbb_setup.html",
@@ -242,10 +249,66 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
                     "lon": cfg.tbb_lon,
                     "retention_days": cfg.tbb_clip_retention_days,
                     "sync_enabled": cfg.tbb_sync_enabled,
+                    "central_url": cfg.tbb_central_url or "https://birdbrain.co.za",
+                    # Enrolled == we hold a device token already.
+                    "enrolled": bool(cfg.tbb_device_token),
                 },
                 "saved": saved,
+                "enrolled": enrolled,
+                "enroll_error": enroll_error,
             },
         )
+
+    @app.post("/setup/enroll")
+    def setup_enroll(
+        central_url: str = Form(...),
+        code: str = Form(...),
+        display_name: str = Form(default=""),
+        lat: str = Form(default=""),
+        lon: str = Form(default=""),
+    ) -> RedirectResponse:
+        """Redeem a claim code against central, then save the issued unit_id +
+        token to .env. Takes effect on the next service restart / power-cycle."""
+        def _num(v: str) -> float | None:
+            try:
+                return float(v) if v.strip() else None
+            except ValueError:
+                return None
+
+        base = central_url.strip().rstrip("/")
+        payload = {
+            "code": code.strip(),
+            "display_name": display_name.strip() or None,
+            "lat": _num(lat),
+            "lon": _num(lon),
+        }
+        try:
+            resp = requests.post(base + "/enroll", json=payload, timeout=30)
+        except requests.RequestException as e:
+            return RedirectResponse(f"/setup?enroll_error={quote(str(e)[:120])}", status_code=303)
+        if resp.status_code // 100 != 2:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except ValueError:
+                detail = resp.text
+            return RedirectResponse(
+                f"/setup?enroll_error={quote(str(detail)[:120])}", status_code=303
+            )
+
+        data = resp.json()
+        updates = {
+            "AFRICAM_TBB_CENTRAL_URL": base,
+            "AFRICAM_TBB_DEVICE_TOKEN": data["token"],
+            "AFRICAM_TBB_UNIT_ID": data["unit_id"],
+            "AFRICAM_TBB_SYNC_ENABLED": "true",
+        }
+        if payload["lat"] is not None:
+            updates["AFRICAM_TBB_LAT"] = str(payload["lat"])
+        if payload["lon"] is not None:
+            updates["AFRICAM_TBB_LON"] = str(payload["lon"])
+        update_env_file(Path(".env"), updates)
+        log.info("tbb.enrolled", unit=data["unit_id"], central=base)
+        return RedirectResponse(f"/setup?enrolled={quote(data['unit_id'])}", status_code=303)
 
     @app.post("/setup")
     def setup_save(
