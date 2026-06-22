@@ -150,10 +150,16 @@ class AppConfig(BaseSettings):
     # protect the SD card. The pipeline runs the prune sweep itself.
     tbb_clip_retention_days: int = 14
     tbb_prune_tick_seconds: int = 3600
-    # Sync to central (birdbrain.co.za). Off in Phase 1 — wired up in Phase 2.
+    # Sync to central (birdbrain.co.za). Off by default; enable per unit once a
+    # device token is issued. The agent runs as a background task in tbb-web.
     tbb_sync_enabled: bool = False
-    tbb_central_url: str | None = None
+    tbb_central_url: str | None = None  # e.g. https://birdbrain.co.za
     tbb_device_token: str | None = None
+    tbb_sync_interval_seconds: int = 45
+    tbb_sync_batch_size: int = 200
+    # High-water-mark store (last synced detection id). A plain JSON file so the
+    # unit's DB schema stays identical to central's.
+    tbb_sync_state_file: Path = Path("data/tbb_sync_state.json")
 
 
 def load_sources(path: Path) -> list[SourceConfig]:

@@ -17,6 +17,7 @@ HTMX so the unit needs no internet.
 from __future__ import annotations
 
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -30,6 +31,7 @@ from sqlalchemy import func, select
 from africam.config import AppConfig
 from africam.logging import get_logger
 from africam.storage import Database, DetectionRow, WorkerHeartbeatRow
+from africam.tbb_sync import start_sync_agent
 
 log = get_logger(__name__)
 
@@ -317,6 +319,11 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
     def healthz() -> dict:
         listening, _last_hb, state = _listening()
         return {"ok": True, "unit": cfg.tbb_unit_id, "listening": listening, "worker_state": state}
+
+    # Sync agent runs in the web process (arch §10.1). No-op unless sync is
+    # configured, so tests/imports and offline units never touch the network.
+    app.state.sync_stop = threading.Event()
+    start_sync_agent(db, cfg, app.state.sync_stop)
 
     return app
 
