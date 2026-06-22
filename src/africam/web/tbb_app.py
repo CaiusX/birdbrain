@@ -285,9 +285,13 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             raise HTTPException(503, f"mic capture failed: {e}") from e
         if proc.returncode != 0 or not proc.stdout:
-            detail = (proc.stderr or b"").decode("utf-8", "replace").strip()[-200:]
+            err = (proc.stderr or b"").decode("utf-8", "replace").lower()
+            if "busy" in err:
+                raise HTTPException(
+                    409, "Microphone is in use by the pipeline. Stop tbb-pipeline to test it here."
+                )
             raise HTTPException(
-                409, f"microphone unavailable (in use by the pipeline?): {detail or 'no audio'}"
+                503, "Microphone capture failed — check the device selection and `arecord -l`."
             )
         return Response(content=proc.stdout, media_type="audio/ogg")
 
