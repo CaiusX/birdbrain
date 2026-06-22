@@ -64,6 +64,29 @@ class RuntimeSourceRow(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class DeviceRow(Base):
+    """A registered TinyBirdBrain capture unit (Phase 2 sync).
+
+    The per-unit bearer token is stored only as a SHA-256 hash. A row authorises
+    ingest writes for exactly one ``source_name`` (== ``unit_id``); a compromised
+    unit can never write another's data. ``last_seen_at`` is stamped on every
+    successful ingest and drives liveness (a silent unit shows offline)."""
+
+    __tablename__ = "devices"
+
+    unit_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 hex
+    owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_enabled: Mapped[bool] = mapped_column(default=True)
+    # Does this unit appear on the public map? Off by default (owner opt-in).
+    public: Mapped[bool] = mapped_column(default=False)
+
+
 class SpeciesNoteRow(Base):
     """A short curated comment about a species — displayed in the audition
     modal whenever a detection of that species is opened. Used to flag known

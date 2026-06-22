@@ -414,6 +414,43 @@ def tbb_web(
     )
 
 
+@app.command(name="tbb-device-add")
+def tbb_device_add(
+    unit_id: Annotated[str, typer.Option("--unit-id", help="Unit id == its source_name on central.")],
+    owner: Annotated[str | None, typer.Option("--owner")] = None,
+    lat: Annotated[float | None, typer.Option("--lat")] = None,
+    lon: Annotated[float | None, typer.Option("--lon")] = None,
+    public: Annotated[
+        bool, typer.Option("--public/--private", help="Show this unit on the public map.")
+    ] = False,
+) -> None:
+    """Register a TBB unit on CENTRAL and print its bearer token (shown once).
+
+    Run on the central server. Re-running rotates the token. Until the Phase 3
+    /enroll flow exists, this is how a unit gets its sync credentials.
+    """
+    import secrets
+
+    from africam.ingest import hash_token
+
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    token = secrets.token_urlsafe(32)
+    db.upsert_device(
+        unit_id, hash_token(token), owner=owner, lat=lat, lon=lon,
+        sync_enabled=True, public=public,
+    )
+    console.print(f"Registered device [bold]{unit_id}[/bold] (public={public}).")
+    console.print("Device token — store it now, it is not recoverable:")
+    console.print(f"  [green]{token}[/green]")
+    console.print(
+        "\nOn the unit's .env:\n"
+        f"  AFRICAM_TBB_DEVICE_TOKEN={token}\n"
+        "  AFRICAM_TBB_CENTRAL_URL=https://birdbrain.co.za\n"
+        "  AFRICAM_TBB_SYNC_ENABLED=true"
+    )
+
+
 @app.command(name="seed-runtime")
 def seed_runtime(
     sources_file: Annotated[

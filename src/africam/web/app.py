@@ -43,6 +43,7 @@ from sqlalchemy import and_, case, desc, func, or_, select
 from africam import weather as weather_module
 from africam.config import AppConfig, SourceConfig, load_sources
 from africam.host import host_metrics
+from africam.ingest import IngestBody, hash_token, ingest_batch
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
 from africam.storage import (
@@ -352,17 +353,23 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     # Public-tunnel gate: Cloudflare attaches CF-Connecting-IP on every proxied
     # request, so its presence identifies traffic that came in via the public
-    # birds.vcexl.com tunnel (vs LAN/localhost on the Pi). For public visitors
+    # birdbrain.co.za tunnel (vs LAN/localhost on the Pi). For public visitors
     # we hide /admin and refuse all mutating verbs — keeps the dashboard
     # read-only without putting a login in front of the whole site.
     _PUBLIC_BLOCKED_PREFIXES = ("/admin",)
     _PUBLIC_BLOCKED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+    # The TBB ingest endpoint is the ONE mutating route allowed over the public
+    # tunnel — it enforces per-unit bearer-token auth instead of the LAN gate
+    # (see tbb-architecture.md §8). Everything else public stays read-only.
+    _PUBLIC_ALLOWED_PREFIXES = ("/ingest/",)
 
     @app.middleware("http")
     async def restrict_public(request: Request, call_next):
         is_public = request.headers.get("cf-connecting-ip") is not None
         request.state.is_public = is_public
-        if is_public:
+        if is_public and not any(
+            request.url.path.startswith(p) for p in _PUBLIC_ALLOWED_PREFIXES
+        ):
             path = request.url.path
             if (
                 request.method in _PUBLIC_BLOCKED_METHODS
@@ -4793,6 +4800,40 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac", ".mp3": "audio/mpeg"}
         return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "audio/wav"))
+
+    # --- TBB ingest: token-authed detection upload from capture units (Phase 2) ---
+    # Public-reachable but token-gated (see the restrict_public allowlist above).
+    _INGEST_MAX_BODY = 2_000_000  # bytes
+    _INGEST_RATE_PER_MIN = 30
+    _ingest_hits: dict[str, list[float]] = {}
+
+    def _ingest_rate_ok(unit_id: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in _ingest_hits.get(unit_id, []) if now - t < 60.0]
+        if len(hits) >= _INGEST_RATE_PER_MIN:
+            _ingest_hits[unit_id] = hits
+            return False
+        hits.append(now)
+        _ingest_hits[unit_id] = hits
+        return True
+
+    @app.post("/ingest/detections")
+    def ingest(request: Request, body: IngestBody) -> dict:
+        clen = request.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > _INGEST_MAX_BODY:
+            raise HTTPException(413, "payload too large")
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            raise HTTPException(401, "missing bearer token")
+        device = db.device_by_token(hash_token(auth[len("Bearer "):].strip()))
+        if device is None or not device.sync_enabled:
+            raise HTTPException(403, "invalid token or sync disabled")
+        if not _ingest_rate_ok(device.unit_id):
+            raise HTTPException(429, "rate limit exceeded")
+        try:
+            return ingest_batch(db, device, body)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     def _media_sweep_loop() -> None:
         """Warm the durable media cache: fetch Wikipedia photo + range map for

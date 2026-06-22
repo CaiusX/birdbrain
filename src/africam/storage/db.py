@@ -15,6 +15,7 @@ from africam.storage.models import (
     Base,
     DailyBriefRow,
     DetectionRow,
+    DeviceRow,
     RuntimeSourceRow,
     SiteNoteRow,
     SourceDisableRow,
@@ -111,6 +112,101 @@ class Database:
         with self._Session() as s, s.begin():
             s.add_all(rows)
         return len(rows)
+
+    def upsert_detection(
+        self,
+        *,
+        source_name: str,
+        started_at: datetime,
+        duration_s: float,
+        scientific_name: str,
+        common_name: str,
+        confidence: float,
+        site: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+    ) -> bool:
+        """Insert one detection unless an identical-key row already exists.
+
+        Idempotency key is the natural ``(source_name, started_at,
+        scientific_name)`` tuple — so retried/overlapping sync batches never
+        double-insert. Returns True iff a new row was created. Used by the TBB
+        ingest endpoint; the local pipeline uses :meth:`insert_detections`."""
+        with self._Session() as s, s.begin():
+            exists = s.scalar(
+                select(DetectionRow.id)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at == started_at)
+                .where(DetectionRow.scientific_name == scientific_name)
+                .limit(1)
+            )
+            if exists is not None:
+                return False
+            s.add(DetectionRow(
+                source_name=source_name,
+                started_at=started_at,
+                duration_s=duration_s,
+                scientific_name=scientific_name,
+                common_name=common_name,
+                confidence=confidence,
+                clip_path=None,  # clips stay on the unit in Phase 2 (metadata-only)
+                site=site,
+                latitude=latitude,
+                longitude=longitude,
+            ))
+        return True
+
+    # --- Devices (registered TBB capture units; Phase 2 sync) ---
+
+    def upsert_device(
+        self,
+        unit_id: str,
+        token_hash: str,
+        *,
+        owner: str | None = None,
+        display_name: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+        sync_enabled: bool = True,
+        public: bool = False,
+    ) -> DeviceRow:
+        """Create or update a device registration (rotates the token hash)."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(DeviceRow, unit_id)
+            if row is None:
+                row = DeviceRow(unit_id=unit_id, created_at=now)
+                s.add(row)
+            row.token_hash = token_hash
+            row.owner = owner
+            row.display_name = display_name
+            row.lat = lat
+            row.lon = lon
+            row.sync_enabled = sync_enabled
+            row.public = public
+        return row
+
+    def device_by_token(self, token_hash: str) -> DeviceRow | None:
+        with self._Session() as s:
+            return s.scalar(
+                select(DeviceRow).where(DeviceRow.token_hash == token_hash).limit(1)
+            )
+
+    def get_device(self, unit_id: str) -> DeviceRow | None:
+        with self._Session() as s:
+            return s.get(DeviceRow, unit_id)
+
+    def device_touch_seen(self, unit_id: str, now: datetime | None = None) -> None:
+        """Stamp last_seen_at on a successful ingest (drives liveness)."""
+        when = now or datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(DeviceRow, unit_id)
+            if row is not None:
+                row.last_seen_at = when
+
+    def list_devices(self) -> list[DeviceRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(DeviceRow).order_by(DeviceRow.unit_id)))
 
     # --- Source state (current site for multi-site streams) ---
 
