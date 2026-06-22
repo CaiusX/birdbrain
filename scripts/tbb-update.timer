@@ -1,0 +1,13 @@
+# Runs the TinyBirdBrain self-update once a day, with a random delay so a fleet
+# doesn't all hit the repo/central at once. Persistent=true catches a run that
+# was missed while the unit was off.
+[Unit]
+Description=Daily TinyBirdBrain self-update
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

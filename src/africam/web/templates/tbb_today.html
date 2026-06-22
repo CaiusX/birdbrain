@@ -1,0 +1,19 @@
+{% extends "tbb_base.html" %}
+{% block content %}
+<h2>Today · {{ header.unique_species_today }} species</h2>
+{% if header.sync_state != 'disabled' and header.central_url %}
+  <p><a href="{{ header.central_url }}">View this unit on central →</a></p>
+{% endif %}
+<ul class="species">
+{% for sp in species %}
+  <li>
+    <span class="count">{{ sp.count }}</span>
+    <span class="name">{{ sp.common_name }}</span>
+    <span class="sci">{{ sp.scientific_name }}</span>
+    <span class="conf">{{ '%.0f'|format(sp.max_confidence * 100) }}%</span>
+  </li>
+{% else %}
+  <li class="empty">Nothing detected today yet.</li>
+{% endfor %}
+</ul>
+{% endblock %}

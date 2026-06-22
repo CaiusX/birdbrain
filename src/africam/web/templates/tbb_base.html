@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ header.unit_id }} · TinyBirdBrain</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #11151a; color: #e8edf2;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; padding: .7rem 1rem; background: #171c23;
+    border-bottom: 1px solid #232a33; position: sticky; top: 0; z-index: 5;
+  }
+  .topbar .unit { font-weight: 600; }
+  nav a {
+    color: #9fb3c8; text-decoration: none; margin-left: .9rem; font-size: .95rem;
+  }
+  nav a:hover { color: #e8edf2; }
+  main { padding: 1rem; max-width: 720px; margin: 0 auto; }
+  .stats {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
+    color: #9fb3c8; font-size: .9rem; margin-bottom: .8rem;
+  }
+  .stats .sep { opacity: .4; }
+  .dot { width: .6rem; height: .6rem; border-radius: 50%; display: inline-block; }
+  .dot.on { background: #3ddc84; box-shadow: 0 0 6px #3ddc84; }
+  .dot.off { background: #6b7280; }
+  .sync-synced { color: #3ddc84; }
+  .sync-offline { color: #f0b429; }
+  .sync-disabled { color: #6b7280; }
+  ul.feed, ul.species { list-style: none; margin: 0; padding: 0; }
+  li.det {
+    display: flex; align-items: center; gap: .7rem; padding: .55rem 0;
+    border-bottom: 1px solid #1d242c;
+  }
+  li.det .spec {
+    width: 120px; height: 34px; border-radius: 4px; object-fit: cover;
+    background: #0c0f13; flex: none;
+  }
+  li.det .meta { flex: 1 1 auto; min-width: 0; }
+  li.det .name { font-weight: 600; }
+  li.det .sci { color: #8b99a7; font-size: .82rem; font-style: italic; }
+  li.det .right { text-align: right; flex: none; }
+  li.det .conf { font-variant-numeric: tabular-nums; font-weight: 600; }
+  li.det .time { color: #8b99a7; font-size: .82rem; font-variant-numeric: tabular-nums; }
+  ul.species li {
+    display: flex; align-items: baseline; gap: .7rem; padding: .5rem 0;
+    border-bottom: 1px solid #1d242c;
+  }
+  ul.species .count {
+    min-width: 2.4rem; text-align: right; font-weight: 700;
+    font-variant-numeric: tabular-nums; color: #6cb6ff;
+  }
+  ul.species .name { font-weight: 600; }
+  ul.species .sci { color: #8b99a7; font-style: italic; font-size: .85rem; flex: 1 1 auto; }
+  ul.species .conf { color: #8b99a7; font-variant-numeric: tabular-nums; }
+  .empty { color: #6b7280; padding: 1.5rem 0; }
+  form label { display: block; margin: .8rem 0; }
+  form label.check { display: flex; align-items: center; gap: .5rem; }
+  form input[type=text], form input:not([type]), form select {
+    width: 100%; padding: .5rem; margin-top: .25rem; border-radius: 6px;
+    border: 1px solid #2a323c; background: #0e1318; color: #e8edf2;
+  }
+  form button {
+    padding: .55rem 1.2rem; border: 0; border-radius: 6px; background: #2563eb;
+    color: #fff; font-weight: 600; cursor: pointer;
+  }
+  .saved { color: #3ddc84; }
+  .enroll-error { color: #f87171; }
+  .hint { color: #6b7280; font-size: .85rem; margin-top: 1rem; }
+  h3 { margin-top: 1.6rem; border-top: 1px solid #232a33; padding-top: 1rem; }
+  .latlon { display: flex; gap: .8rem; }
+  .latlon label { flex: 1; }
+  .mic-controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin: .6rem 0; }
+  .mic-test { margin-top: 1.2rem; }
+  a { color: #6cb6ff; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="unit">🐦 {{ header.unit_id }}</div>
+  <nav>
+    <a href="/">Now</a>
+    <a href="/today">Today</a>
+    <a href="/setup">Setup</a>
+  </nav>
+</header>
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

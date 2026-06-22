@@ -18,11 +18,13 @@ from africam.storage.models import (
     AudioQualityMetricRow,
     AudioQualitySampleRow,
     Base,
+    ClaimCodeRow,
     DailyBriefRow,
     DetectionScoreRow,
     HighlightIntervalRow,
     PlaybackStateRow,
     DetectionRow,
+    DeviceRow,
     RuntimeSourceRow,
     UserRow,
     SiteNoteRow,
@@ -124,6 +126,7 @@ class Database:
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
             ("audio_quality_metrics", "band_hz_low", "INTEGER"),
             ("audio_quality_metrics", "band_hz_high", "INTEGER"),
+            ("runtime_sources", "external", "INTEGER DEFAULT 0"),
         ]
         # Indexes to create on existing tables. ``Base.metadata.create_all``
         # only creates indexes for tables it creates, so any index attached to
@@ -306,6 +309,181 @@ class Database:
             if progress_cb is not None:
                 progress_cb(report, total=len(todo))
         return report
+
+    def upsert_detection(
+        self,
+        *,
+        source_name: str,
+        started_at: datetime,
+        duration_s: float,
+        scientific_name: str,
+        common_name: str,
+        confidence: float,
+        site: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+    ) -> bool:
+        """Insert one detection unless an identical-key row already exists.
+
+        Idempotency key is the natural ``(source_name, started_at,
+        scientific_name)`` tuple — so retried/overlapping sync batches never
+        double-insert. Returns True iff a new row was created. Used by the TBB
+        ingest endpoint; the local pipeline uses :meth:`insert_detections`."""
+        with self._Session() as s, s.begin():
+            exists = s.scalar(
+                select(DetectionRow.id)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.started_at == started_at)
+                .where(DetectionRow.scientific_name == scientific_name)
+                .limit(1)
+            )
+            if exists is not None:
+                return False
+            s.add(DetectionRow(
+                source_name=source_name,
+                started_at=started_at,
+                duration_s=duration_s,
+                scientific_name=scientific_name,
+                common_name=common_name,
+                confidence=confidence,
+                clip_path=None,  # clips stay on the unit in Phase 2 (metadata-only)
+                site=site,
+                latitude=latitude,
+                longitude=longitude,
+            ))
+        return True
+
+    # --- Devices (registered TBB capture units; Phase 2 sync) ---
+
+    def upsert_device(
+        self,
+        unit_id: str,
+        token_hash: str,
+        *,
+        owner: str | None = None,
+        display_name: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+        sync_enabled: bool = True,
+        public: bool = False,
+    ) -> DeviceRow:
+        """Create or update a device registration (rotates the token hash)."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(DeviceRow, unit_id)
+            if row is None:
+                row = DeviceRow(unit_id=unit_id, created_at=now)
+                s.add(row)
+            row.token_hash = token_hash
+            row.owner = owner
+            row.display_name = display_name
+            row.lat = lat
+            row.lon = lon
+            row.sync_enabled = sync_enabled
+            row.public = public
+        return row
+
+    def device_by_token(self, token_hash: str) -> DeviceRow | None:
+        with self._Session() as s:
+            return s.scalar(
+                select(DeviceRow).where(DeviceRow.token_hash == token_hash).limit(1)
+            )
+
+    def get_device(self, unit_id: str) -> DeviceRow | None:
+        with self._Session() as s:
+            return s.get(DeviceRow, unit_id)
+
+    def device_touch_seen(self, unit_id: str, now: datetime | None = None) -> None:
+        """Stamp last_seen_at on a successful ingest (drives liveness)."""
+        when = now or datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            row = s.get(DeviceRow, unit_id)
+            if row is not None:
+                row.last_seen_at = when
+
+    def list_devices(self) -> list[DeviceRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(DeviceRow).order_by(DeviceRow.unit_id)))
+
+    def private_unit_source_names(self) -> set[str]:
+        """source_names of registered units NOT flagged ``public`` — these are
+        hidden from public (Cloudflare-tunnel) views. Non-device sources
+        (YouTube/RTSP cams) aren't in this table, so they're never hidden."""
+        with self._Session() as s:
+            return {
+                r for (r,) in s.execute(
+                    select(DeviceRow.unit_id).where(DeviceRow.public.is_(False))
+                )
+            }
+
+    def set_device_sync(self, unit_id: str, enabled: bool) -> bool:
+        """Enable/revoke a device's sync. Revoking (enabled=False) makes its
+        token stop authorising ingest without deleting its history. Returns
+        False if the device doesn't exist."""
+        with self._Session() as s, s.begin():
+            row = s.get(DeviceRow, unit_id)
+            if row is None:
+                return False
+            row.sync_enabled = enabled
+        return True
+
+    # --- Claim codes (one-time enrollment; Phase 3) ---
+
+    def create_claim_code(self, code: str, note: str | None = None) -> ClaimCodeRow:
+        with self._Session() as s, s.begin():
+            row = ClaimCodeRow(code=code, created_at=datetime.now(UTC), note=note)
+            s.add(row)
+        return row
+
+    def get_claim_code(self, code: str) -> ClaimCodeRow | None:
+        with self._Session() as s:
+            return s.get(ClaimCodeRow, code)
+
+    def redeem_claim_code(self, code: str, unit_id: str) -> bool:
+        """Atomically mark an UNCLAIMED code as claimed by ``unit_id``. Returns
+        False if the code is missing or already claimed — the single-use guard."""
+        with self._Session() as s, s.begin():
+            row = s.get(ClaimCodeRow, code)
+            if row is None or row.claimed_at is not None:
+                return False
+            row.claimed_at = datetime.now(UTC)
+            row.claimed_unit_id = unit_id
+        return True
+
+    def list_claim_codes(self) -> list[ClaimCodeRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(ClaimCodeRow).order_by(ClaimCodeRow.created_at)))
+
+    def register_tbb_source(
+        self,
+        unit_id: str,
+        *,
+        lat: float | None = None,
+        lon: float | None = None,
+        timezone: str = "UTC",
+    ) -> bool:
+        """Ensure a push-fed (external) runtime source exists for a TBB unit so
+        it appears on the dashboard/map. Idempotent and create-only: an existing
+        row is left untouched (don't clobber admin edits or un-delete it).
+        Returns True iff a row was newly created. The ``external`` flag keeps the
+        pipeline supervisor from trying to run a local worker for it."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            if s.get(RuntimeSourceRow, unit_id) is not None:
+                return False
+            s.add(RuntimeSourceRow(
+                name=unit_id,
+                kind="mic",
+                url=f"tbb://{unit_id}",
+                lat=lat,
+                lon=lon,
+                min_confidence=0.0,  # unit already filtered before sending
+                multisite=False,
+                timezone=timezone or "UTC",
+                external=True,
+                created_at=now,
+            ))
+        return True
 
     # --- Source state (current site for multi-site streams) ---
 
@@ -1502,6 +1680,18 @@ class Database:
                 return False
             row.lat = lat
             row.lon = lon
+        return True
+
+    def update_runtime_source(self, name: str, **fields) -> bool:
+        """Patch fields on an existing, non-deleted runtime source. Returns
+        False if the source doesn't exist or has been soft-deleted (use
+        enable_runtime_source first for the latter)."""
+        with self._Session() as s, s.begin():
+            row = s.get(RuntimeSourceRow, name)
+            if row is None or row.deleted_at is not None:
+                return False
+            for k, v in fields.items():
+                setattr(row, k, v)
         return True
 
     def soft_delete_runtime_source(self, name: str) -> bool:

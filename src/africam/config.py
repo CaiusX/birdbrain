@@ -24,8 +24,17 @@ class OcrConfig(BaseModel):
 
 class SourceConfig(BaseModel):
     name: str
-    kind: Literal["youtube", "rtsp", "device"]
+    # "device" = pi's AlsaSource, "mic" = TBB's MicSource — both capture local
+    # audio (kept separate during the tbb->pi merge; unify later). url is unused
+    # by these but stays required so the youtube/rtsp path is unchanged.
+    kind: Literal["youtube", "rtsp", "device", "mic"]
     url: str
+    # ALSA capture device for the "mic" kind (e.g. "plughw:1,0"). Ignored by the
+    # youtube/rtsp kinds. Lives here so a MicSource's config travels with it.
+    device: str = "plughw:1,0"
+    # Drop BirdNET's non-bird noise classes (Engine, Dog, Siren, …). Off by
+    # default so central is unchanged; the TBB profile turns it on.
+    exclude_non_bird: bool = False
     lat: float | None = None
     lon: float | None = None
     min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -130,6 +139,35 @@ class AppConfig(BaseSettings):
     weather_archive_enabled: bool = True
     weather_tick_seconds: int = 3600
     weather_backfill_days: int = 92
+
+    # --- TinyBirdBrain (TBB) capture-unit profile ---
+    # These are inert on the central deploy. The `tbb-pipeline` / `tbb-web`
+    # entrypoints read them to run a single USB-mic source with the
+    # central-only workers (notes, weather, media, anomalies, OCR) left off.
+    # Override via AFRICAM_TBB_* env or the unit's .env.
+    tbb_unit_id: str = "tbb-dev"
+    # ALSA capture device of the USB mic; pick from `arecord -l` on the unit.
+    tbb_mic_device: str = "plughw:1,0"
+    # Static location for BirdNET's locality filter (set at enrollment). None
+    # leaves the filter off (global model).
+    tbb_lat: float | None = None
+    tbb_lon: float | None = None
+    tbb_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    tbb_timezone: str = "UTC"
+    # Local clip retention: prune saved clips older than this many days to
+    # protect the SD card. The pipeline runs the prune sweep itself.
+    tbb_clip_retention_days: int = 14
+    tbb_prune_tick_seconds: int = 3600
+    # Sync to central (birdbrain.co.za). Off by default; enable per unit once a
+    # device token is issued. The agent runs as a background task in tbb-web.
+    tbb_sync_enabled: bool = False
+    tbb_central_url: str | None = None  # e.g. https://birdbrain.co.za
+    tbb_device_token: str | None = None
+    tbb_sync_interval_seconds: int = 45
+    tbb_sync_batch_size: int = 200
+    # High-water-mark store (last synced detection id). A plain JSON file so the
+    # unit's DB schema stays identical to central's.
+    tbb_sync_state_file: Path = Path("data/tbb_sync_state.json")
 
 
 def load_sources(path: Path) -> list[SourceConfig]:

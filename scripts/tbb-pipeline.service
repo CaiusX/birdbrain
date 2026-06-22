@@ -1,0 +1,24 @@
+# TinyBirdBrain capture pipeline — systemd USER unit.
+# Install: ~/.config/systemd/user/tbb-pipeline.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tbb-pipeline
+#   loginctl enable-linger "$USER"   # so it runs without an active login
+# Config is read from .env in WorkingDirectory (AFRICAM_TBB_*).
+[Unit]
+Description=TinyBirdBrain capture pipeline (USB mic -> BirdNET -> local SQLite + clips)
+After=network.target sound.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/birdbrain
+# Call the unit's venv directly (built from deploy/tbb/requirements-tbb.txt) —
+# NOT `uv run`, whose auto-sync would reinstall full TensorFlow from pyproject.
+ExecStart=%h/birdbrain/.venv/bin/africam tbb-pipeline
+Restart=always
+RestartSec=5
+# CPU-bound tflite inference; yield a little so the web UI stays responsive on
+# the quad-A53 Zero 2 W.
+Nice=5
+
+[Install]
+WantedBy=default.target

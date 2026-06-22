@@ -14,6 +14,24 @@ from africam.logging import get_logger
 
 log = get_logger(__name__)
 
+# BirdNET GLOBAL 6K V2.4's non-bird "noise" classes (from
+# BirdNET_GLOBAL_6K_V2.4_Labels.txt — entries of the form "X_X"). A consumer
+# capture unit shouldn't surface these as detections; the TBB profile opts into
+# dropping them via ``analyze(drop_non_bird=True)``.
+NON_BIRD_CLASSES: frozenset[str] = frozenset({
+    "Dog",
+    "Engine",
+    "Environmental",
+    "Fireworks",
+    "Gun",
+    "Human non-vocal",
+    "Human vocal",
+    "Human whistle",
+    "Noise",
+    "Power tools",
+    "Siren",
+})
+
 
 @dataclass(slots=True)
 class Detection:
@@ -56,6 +74,7 @@ class BirdNetDetector:
         lon: float | None = None,
         week: int | None = None,
         min_confidence: float = 0.5,
+        drop_non_bird: bool = False,
     ) -> list[Detection]:
         with self._lock, _silence_stdout():
             recording = RecordingBuffer(
@@ -80,6 +99,10 @@ class BirdNetDetector:
                 label = d.get("label", "")
                 sci = sci or (label.split("_", 1)[0] if "_" in label else label)
                 common = common or (label.split("_", 1)[1] if "_" in label else label)
+            if drop_non_bird and sci in NON_BIRD_CLASSES:
+                # e.g. Engine, Dog, Human vocal, Siren — noise classes a unit
+                # shouldn't present as birds.
+                continue
             out.append(
                 Detection(
                     source_name=chunk.source_name,

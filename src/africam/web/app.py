@@ -82,7 +82,9 @@ from starlette.middleware.sessions import SessionMiddleware
 from africam import sandbox
 from africam import weather as weather_module
 from africam.config import AppConfig, SourceConfig, load_sources
+from africam.enroll import EnrollBody, enroll
 from africam.host import host_metrics
+from africam.ingest import IngestBody, hash_token, ingest_batch
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
 from africam.storage import (
@@ -562,6 +564,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # Auth flows that must work over the public tunnel so testers can register
     # / sign in (signup itself is gated by the invite code in the handler).
     _AUTH_ALLOWED_PATHS = ("/login", "/signup", "/auth/signup", "/auth/login", "/auth/logout")
+    # TBB ingest + enroll are mutating routes allowed over the public tunnel for
+    # anonymous units — ingest enforces per-unit bearer-token auth, enroll a
+    # one-time claim code (tbb-architecture.md §8). Both rate-limited + capped.
+    _PUBLIC_ALLOWED_PREFIXES = ("/ingest/", "/enroll")
 
     @app.middleware("http")
     async def no_store_html(request: Request, call_next):
@@ -588,7 +594,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             path = request.url.path
             if path.startswith(_PUBLIC_BLOCKED_PREFIXES):
                 return Response(status_code=404)          # /admin → LAN only, always
-            if path in _AUTH_ALLOWED_PATHS or path.startswith("/auth/"):
+            if any(path.startswith(p) for p in _PUBLIC_ALLOWED_PREFIXES):
+                pass                                       # TBB ingest/enroll (token/code-gated)
+            elif path in _AUTH_ALLOWED_PATHS or path.startswith("/auth/"):
                 pass                                       # sign up / log in over the tunnel
             elif (
                 request.method in _PUBLIC_BLOCKED_METHODS
@@ -689,6 +697,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     async def auth_logout(request: Request) -> Response:
         request.session.clear()
         return RedirectResponse("/", status_code=303)
+
+    def _hidden_source_names(request: Request) -> set[str]:
+        """Source names to hide from THIS request. Over the public tunnel,
+        non-public TBB units are hidden (privacy, Phase 3); on the LAN/admin
+        side nothing is hidden so the operator sees every unit."""
+        if getattr(request.state, "is_public", False):
+            return db.private_unit_source_names()
+        return set()
 
     def _runtime_to_cfg(row) -> SourceConfig:
         from africam.config import OcrConfig
@@ -1107,21 +1123,27 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
         _, sources_by_name, tiles = _all_sources()
+        hidden = _hidden_source_names(request)
+        if hidden:
+            sources_by_name = {k: v for k, v in sources_by_name.items() if k not in hidden}
+            tiles = [t for t in tiles if t.name not in hidden]
         # Initial render uses default grouping; JS swaps the URL on toggle.
         group_minutes = 5
         with db.session() as s:
             # Pull a wider window than ``limit`` so we have enough raw rows to
             # form ``limit`` groups when grouping is on. Replays are hidden by
             # default (see Database.not_replay_predicate); the /admin/replays
-            # page is the place to inspect what's been filtered.
-            raw = list(
-                s.scalars(
-                    select(DetectionRow)
-                    .where(Database.not_replay_predicate())
-                    .order_by(desc(DetectionRow.started_at))
-                    .limit(500)
-                )
+            # page is the place to inspect what's been filtered. Private TBB
+            # units are also hidden from public requests.
+            stmt = (
+                select(DetectionRow)
+                .where(Database.not_replay_predicate())
+                .order_by(desc(DetectionRow.started_at))
+                .limit(500)
             )
+            if hidden:
+                stmt = stmt.where(DetectionRow.source_name.not_in(hidden))
+            raw = list(s.scalars(stmt))
             rows = _group_detections(raw, group_minutes * 60)[:50]
             # Most-recently-heard distinct species (replays excluded), for the
             # "recently heard" panel beside the map. Dedupe the recent feed by
@@ -1207,6 +1229,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raw_limit = limit
         # Normalise source filter: drop empty entries; empty list means "all".
         sources_filter = [s for s in (source or []) if s]
+        hidden = _hidden_source_names(request)
         with db.session() as s:
             stmt = (
                 select(DetectionRow)
@@ -1215,6 +1238,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
             if sources_filter:
                 stmt = stmt.where(DetectionRow.source_name.in_(sources_filter))
+            if hidden:
+                stmt = stmt.where(DetectionRow.source_name.not_in(hidden))
             if last_minutes > 0:
                 cutoff = datetime.now(UTC) - timedelta(minutes=last_minutes)
                 stmt = stmt.where(DetectionRow.started_at >= cutoff)
@@ -1698,6 +1723,31 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if request.headers.get("hx-request"):
             return admin_partial(request)
         return JSONResponse({"ok": True, "name": name})
+
+    @app.post("/api/sources/{name}/min_confidence")
+    def set_source_min_confidence(
+        request: Request,
+        name: str,
+        value: float = Form(..., ge=0.0, le=1.0),
+    ) -> Response:
+        """Edit a runtime source's detection floor. File-managed sources (in
+        sources.toml) are not mutable through the UI by design — return 400
+        with a hint to edit the file. The supervisor sees the row update on
+        its next reconcile tick (~15 s) and respawns the worker so the new
+        floor takes effect."""
+        ok = db.update_runtime_source(name, min_confidence=value)
+        if not ok:
+            # Distinguish "doesn't exist" from "exists but file-managed".
+            _, sources_by_name, _ = _all_sources()
+            if name in sources_by_name:
+                raise HTTPException(
+                    400,
+                    f"{name} is file-managed (sources.toml) — edit there instead.",
+                )
+            raise HTTPException(404, f"Runtime source not found: {name}")
+        if request.headers.get("hx-request"):
+            return admin_partial(request)
+        return JSONResponse({"ok": True, "name": name, "min_confidence": value})
 
     @app.delete("/api/sources/{name}")
     def remove_runtime_source(request: Request, name: str) -> Response:
@@ -2782,6 +2832,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     def site_detail(request: Request, name: str) -> HTMLResponse:
         """Per-site detail page. Mirrors /species/{scientific}: AI commentary
         on top, then top species, hourly rhythm, and recent detections."""
+        # A private unit's page is not visible over the public tunnel.
+        if name in _hidden_source_names(request):
+            raise HTTPException(404, f"No site or detections for {name!r}")
         _, sources_by_name, _ = _all_sources()
         src_cfg = sources_by_name.get(name)
         site_note = db.get_site_note(name)
@@ -4592,11 +4645,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         )
 
     @app.get("/api/detections/{detection_id}/reanalyze")
-    def reanalyze(detection_id: int) -> JSONResponse:
+    def reanalyze(
+        detection_id: int,
+        start_s: float | None = Query(default=None, ge=0.0),
+        end_s: float | None = Query(default=None, ge=0.0),
+    ) -> JSONResponse:
         """Re-run BirdNET on a saved clip and return the top candidates.
 
-        Useful in the audition flow when a detection's confidence sits near
-        the threshold and you want to see what *else* the model considered.
+        Pass ``start_s`` + ``end_s`` (seconds, both required if either given)
+        to analyse only a slice of the clip — useful when the user drags a
+        region on the spectrogram to ask "what's that sound at 1.5s?".
+        Slices shorter than 3 s are zero-padded so BirdNET's 3-second
+        window is satisfied; longer slices get sliding-window analysis
+        from birdnetlib internally.
+
         Uses a lower min_confidence than the live pipeline so runners-up
         surface. lat/lon are taken from the original detection row so the
         species filter matches what was applied during ingest.
@@ -4631,6 +4693,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         except Exception as e:
             raise HTTPException(500, f"failed to load clip: {e}") from e
         samples = np.asarray(samples, dtype=np.float32)
+        full_duration_s = float(len(samples)) / float(sr)
+
+        analyzed_window: tuple[float, float] | None = None
+        if start_s is not None and end_s is not None and end_s > start_s:
+            s0 = max(0.0, min(start_s, full_duration_s))
+            s1 = max(s0, min(end_s, full_duration_s))
+            i0 = int(s0 * sr)
+            i1 = int(s1 * sr)
+            samples = samples[i0:i1]
+            analyzed_window = (round(s0, 3), round(s1, 3))
+            min_len = int(3 * sr)
+            if len(samples) < min_len:
+                samples = np.pad(samples, (0, min_len - len(samples)))
+                samples = np.asarray(samples, dtype=np.float32)
 
         if started_at is not None and started_at.tzinfo is None:
             started_at = started_at.replace(tzinfo=UTC)
@@ -4665,7 +4741,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "common_name": orig_common,
                     "confidence": round(float(orig_conf), 4),
                 },
-                "clip_duration_s": round(len(samples) / float(sr), 3),
+                "clip_duration_s": round(full_duration_s, 3),
+                "analyzed_window_s": list(analyzed_window) if analyzed_window else None,
             }
         )
 
@@ -5859,7 +5936,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return FileResponse(png, media_type="image/png")
 
     @app.get("/clips/{detection_id}")
-    def clip(detection_id: int) -> FileResponse:
+    def clip(detection_id: int, fmt: str = Query(default="auto")) -> FileResponse:
+        """Serve a detection clip. iOS Safari's OGG playback is jerky and
+        currentTime resolution is poor, which breaks the spectrogram
+        playhead sync; transcode to MP3 (cached on disk next to the OGG)
+        and serve that by default so audio works the same across browsers.
+        Use ``?fmt=original`` for the underlying OGG if you really want it.
+        """
         with db.session() as s:
             row = s.get(DetectionRow, detection_id)
             if row is None or row.clip_path is None:
@@ -5871,8 +5954,90 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="Clip outside allowed root") from e
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Clip file missing")
-        media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac"}
+
+        if fmt == "auto" and path.suffix.lower() == ".ogg":
+            mp3 = path.parent / f"{path.stem}.mp3"
+            if not mp3.exists():
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-loglevel", "error",
+                            "-i", str(path),
+                            "-c:a", "libmp3lame", "-q:a", "4",
+                            str(mp3),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        timeout=15,
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                    # Fall back to OGG if transcode fails for any reason.
+                    mp3 = None
+            if mp3 and mp3.is_file():
+                return FileResponse(mp3, media_type="audio/mpeg")
+
+        media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac", ".mp3": "audio/mpeg"}
         return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "audio/wav"))
+
+    # --- TBB ingest: token-authed detection upload from capture units (Phase 2) ---
+    # Public-reachable but token-gated (see the restrict_public allowlist above).
+    _INGEST_MAX_BODY = 2_000_000  # bytes
+    _INGEST_RATE_PER_MIN = 30
+    _ingest_hits: dict[str, list[float]] = {}
+
+    def _ingest_rate_ok(unit_id: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in _ingest_hits.get(unit_id, []) if now - t < 60.0]
+        if len(hits) >= _INGEST_RATE_PER_MIN:
+            _ingest_hits[unit_id] = hits
+            return False
+        hits.append(now)
+        _ingest_hits[unit_id] = hits
+        return True
+
+    @app.post("/ingest/detections")
+    def ingest(request: Request, body: IngestBody) -> dict:
+        clen = request.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > _INGEST_MAX_BODY:
+            raise HTTPException(413, "payload too large")
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            raise HTTPException(401, "missing bearer token")
+        device = db.device_by_token(hash_token(auth[len("Bearer "):].strip()))
+        if device is None or not device.sync_enabled:
+            raise HTTPException(403, "invalid token or sync disabled")
+        if not _ingest_rate_ok(device.unit_id):
+            raise HTTPException(429, "rate limit exceeded")
+        try:
+            return ingest_batch(db, device, body)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    _enroll_hits: dict[str, list[float]] = {}
+    _ENROLL_RATE_PER_MIN = 10
+
+    def _enroll_rate_ok(client_ip: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in _enroll_hits.get(client_ip, []) if now - t < 60.0]
+        if len(hits) >= _ENROLL_RATE_PER_MIN:
+            _enroll_hits[client_ip] = hits
+            return False
+        hits.append(now)
+        _enroll_hits[client_ip] = hits
+        return True
+
+    @app.post("/enroll")
+    def enroll_route(request: Request, body: EnrollBody) -> dict:
+        # Rate-limit by client IP (no unit identity yet) to blunt code guessing.
+        client_ip = request.headers.get("cf-connecting-ip") or (
+            request.client.host if request.client else "?"
+        )
+        if not _enroll_rate_ok(client_ip):
+            raise HTTPException(429, "rate limit exceeded")
+        try:
+            return enroll(db, body)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     def _media_sweep_loop() -> None:
         """Warm the durable media cache: fetch Wikipedia photo + range map for

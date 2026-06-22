@@ -1,0 +1,27 @@
+# TinyBirdBrain: restore the Codec Zero's ALSA mixer routing at boot.
+#
+# The Codec Zero (DA7212) loses its capture routing on power-off, so without
+# this the mic goes silent after a reboot. This is a SYSTEM unit because
+# `alsactl restore` needs root; ordering it Before=multi-user.target means it
+# finishes before the (lingering) user services — tbb-pipeline/tbb-web — start,
+# so the pipeline never opens an unconfigured codec.
+#
+# Install on the unit:
+#   sudo cp ~/birdbrain/scripts/tbb-codec.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tbb-codec
+#
+# Edit ExecStart to match your clone path + chosen mic preset (onboard MEMS vs
+# external MIC1/MIC2 — see docs/tbb-provisioning.md).
+[Unit]
+Description=Restore Codec Zero ALSA mixer (TinyBirdBrain mic)
+After=sound.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/alsactl restore -f /home/pi/Pi-Codec/Codec_Zero_OnboardMIC_record_and_SPK_playback.state
+
+[Install]
+WantedBy=multi-user.target

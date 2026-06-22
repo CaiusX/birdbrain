@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 
 from africam import sandbox
-from africam.audio import AlsaSource, AudioSource, RtspSource, YouTubeSource
+from africam.audio import AlsaSource, AudioSource, MicSource, RtspSource, YouTubeSource
 from africam.audio.quality import QualityAccumulator, chunk_features
 from africam.audio.source import AudioChunk
 from africam.audio_hash import clip_hash
@@ -87,6 +87,8 @@ def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
     if cfg.kind == "device":
         # url is an ALSA device string, e.g. "plughw:CARD=Device,DEV=0".
         return AlsaSource(url=cfg.url, **common)
+    if cfg.kind == "mic":
+        return MicSource(device=cfg.device, **common)
     raise ValueError(f"Unknown source kind: {cfg.kind!r}")
 
 
@@ -365,6 +367,7 @@ def _consume_stream(
                 lon=resolved.longitude,
                 week=cfg.week,
                 min_confidence=effective_min,
+                drop_non_bird=cfg.exclude_non_bird,
             )
         except Exception:
             slog.exception("detect.failed")
@@ -497,6 +500,10 @@ def _desired_sources(
     for row in db.list_runtime_sources():
         if row.name in disabled:
             continue
+        if getattr(row, "external", False):
+            # Push-fed TBB unit — it ingests over HTTP; central never runs a
+            # local worker for it.
+            continue
         out[row.name] = _runtime_row_to_cfg(row)
     return out
 
@@ -518,7 +525,9 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
 
     def reconcile() -> None:
         desired = _desired_sources(static_sources, db)
-        # Stop workers whose source has been removed.
+        # Stop workers whose source has been removed OR whose config changed
+        # under us (e.g. min_confidence edited via /admin). Pydantic equality
+        # gives us a field-by-field comparison for free.
         for name in list(workers):
             if name not in desired:
                 log.info("supervisor.stopping", source=name)

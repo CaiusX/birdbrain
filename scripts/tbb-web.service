@@ -1,0 +1,21 @@
+# TinyBirdBrain local web UI — systemd USER unit.
+# Install: ~/.config/systemd/user/tbb-web.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tbb-web
+#   loginctl enable-linger "$USER"
+# Serves the LAN-only Now/Today/Setup pages on :8080. No inbound internet ports.
+[Unit]
+Description=TinyBirdBrain local web UI (LAN-only Now/Today/Setup)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/birdbrain
+# Call the unit's venv directly (built from deploy/tbb/requirements-tbb.txt) —
+# NOT `uv run`, whose auto-sync would reinstall full TensorFlow from pyproject.
+ExecStart=%h/birdbrain/.venv/bin/africam tbb-web
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

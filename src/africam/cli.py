@@ -282,6 +282,264 @@ def probe(
                 )
 
 
+@app.command(name="tbb-listen")
+def tbb_listen(
+    device: Annotated[
+        str,
+        typer.Option("--device", "-d", help="ALSA capture device of the USB mic."),
+    ] = "plughw:1,0",
+    seconds: Annotated[
+        int, typer.Option("--seconds", "-t", help="How long to listen before stopping.")
+    ] = 60,
+    min_confidence: Annotated[
+        float, typer.Option("--min-confidence", help="BirdNET confidence floor.")
+    ] = 0.5,
+    lat: Annotated[
+        float | None, typer.Option("--lat", help="Latitude for the locality filter.")
+    ] = None,
+    lon: Annotated[
+        float | None, typer.Option("--lon", help="Longitude for the locality filter.")
+    ] = None,
+) -> None:
+    """TBB bench smoke test: capture from a USB mic and run BirdNET per chunk.
+
+    Builds a :class:`MicSource`, streams 3 s chunks off the ALSA device, runs the
+    detector on each, and prints detections plus the measured per-chunk inference
+    time. Use this on a Raspberry Pi Zero 2 W to validate the real-time margin;
+    wrap it in ``/usr/bin/time -v`` (or watch ``free -m``) to capture peak RAM.
+    """
+    import time
+
+    from africam.audio import MicSource
+    from africam.detector import BirdNetDetector
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+
+    source = MicSource(
+        name="tbb-bench",
+        device=device,
+        sample_rate=cfg.sample_rate,
+        chunk_seconds=cfg.chunk_seconds,
+    )
+
+    console.rule(f"[bold]tbb-listen[/bold]  device={device}  {seconds}s")
+    t_load = time.perf_counter()
+    detector = BirdNetDetector()
+    console.print(f"detector loaded in {time.perf_counter() - t_load:.1f}s")
+
+    deadline = time.perf_counter() + seconds
+    inference_ms: list[float] = []
+    n_chunks = 0
+    n_dets = 0
+    stream = source.stream()
+    for chunk in stream:
+        n_chunks += 1
+        t0 = time.perf_counter()
+        dets = detector.analyze(chunk, lat=lat, lon=lon, min_confidence=min_confidence)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        inference_ms.append(dt_ms)
+        n_dets += len(dets)
+        margin = chunk.duration_s * 1000.0 / dt_ms if dt_ms else float("inf")
+        console.print(
+            f"chunk {n_chunks}: {dt_ms:7.1f} ms  "
+            f"(x{margin:.1f} real-time)  {len(dets)} detection(s)"
+        )
+        for d in dets:
+            console.print(
+                f"  {d.common_name} ({d.scientific_name})  conf={d.confidence:.2f}"
+            )
+        if time.perf_counter() >= deadline:
+            break
+
+    console.rule("[bold]summary[/bold]")
+    if inference_ms:
+        avg = sum(inference_ms) / len(inference_ms)
+        console.print(
+            f"chunks={n_chunks}  detections={n_dets}\n"
+            f"inference ms  min={min(inference_ms):.1f}  "
+            f"avg={avg:.1f}  max={max(inference_ms):.1f}\n"
+            f"chunk budget={cfg.chunk_seconds * 1000.0:.0f} ms "
+            f"→ headroom x{cfg.chunk_seconds * 1000.0 / avg:.1f} at the mean"
+        )
+    else:
+        console.print("[red]no chunks captured — check the ALSA device with `arecord -l`[/red]")
+
+    try:
+        import resource  # Unix only; gives peak RSS for the inline RAM datapoint.
+
+        peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        console.print(f"peak RSS (this process): {peak_kb / 1024:.0f} MB")
+    except ImportError:
+        console.print("[dim]peak RSS unavailable here; use `/usr/bin/time -v` on the Pi.[/dim]")
+
+
+@app.command(name="tbb-pipeline")
+def tbb_pipeline() -> None:
+    """Run the TBB capture-unit pipeline: USB mic → BirdNET → local SQLite + clips.
+
+    Single mic source, no central-only workers, with a local clip-retention
+    sweep. Configure via AFRICAM_TBB_* env / the unit's .env (unit id, mic
+    device, lat/lon, retention). This is the `tbb-pipeline` systemd service.
+    """
+    from africam.tbb import run_tbb
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    run_tbb(cfg)
+
+
+@app.command(name="tbb-web")
+def tbb_web(
+    host: Annotated[
+        str, typer.Option("--host", "-H", help="Bind address. 0.0.0.0 = reachable on the LAN.")
+    ] = "0.0.0.0",
+    port: Annotated[int, typer.Option("--port", "-p")] = 8080,
+) -> None:
+    """Run the minimal LAN-only TBB unit web UI (Now / Today / Setup).
+
+    Binds the LAN by default so a phone on the same wifi can reach it at
+    http://<unit>.local:8080. The unit exposes no inbound ports to the
+    internet — keep it off any port-forward (see tbb-architecture.md §8).
+    """
+    import uvicorn
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    uvicorn.run(
+        "africam.web.tbb_app:app",
+        host=host,
+        port=port,
+        log_level=cfg.log_level.lower(),
+    )
+
+
+@app.command(name="tbb-device-add")
+def tbb_device_add(
+    unit_id: Annotated[str, typer.Option("--unit-id", help="Unit id == its source_name on central.")],
+    owner: Annotated[str | None, typer.Option("--owner")] = None,
+    lat: Annotated[float | None, typer.Option("--lat")] = None,
+    lon: Annotated[float | None, typer.Option("--lon")] = None,
+    public: Annotated[
+        bool, typer.Option("--public/--private", help="Show this unit on the public map.")
+    ] = False,
+) -> None:
+    """Register a TBB unit on CENTRAL and print its bearer token (shown once).
+
+    Run on the central server. Re-running rotates the token. Until the Phase 3
+    /enroll flow exists, this is how a unit gets its sync credentials.
+    """
+    import secrets
+
+    from africam.ingest import hash_token
+
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    token = secrets.token_urlsafe(32)
+    db.upsert_device(
+        unit_id, hash_token(token), owner=owner, lat=lat, lon=lon,
+        sync_enabled=True, public=public,
+    )
+    console.print(f"Registered device [bold]{unit_id}[/bold] (public={public}).")
+    console.print("Device token — store it now, it is not recoverable:")
+    console.print(f"  [green]{token}[/green]")
+    console.print(
+        "\nOn the unit's .env:\n"
+        f"  AFRICAM_TBB_DEVICE_TOKEN={token}\n"
+        "  AFRICAM_TBB_CENTRAL_URL=https://birdbrain.co.za\n"
+        "  AFRICAM_TBB_SYNC_ENABLED=true"
+    )
+
+
+@app.command(name="tbb-claim-new")
+def tbb_claim_new(
+    note: Annotated[
+        str | None, typer.Option("--note", help="Reminder of which box/owner this code is for.")
+    ] = None,
+) -> None:
+    """Generate a one-time enrollment claim code on CENTRAL (print it on the box).
+
+    A unit redeems it from its /setup page; central then issues the unit's id +
+    token automatically. Run on the central server.
+    """
+    import secrets
+
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    # Grouped 10 hex chars — short enough to type, long enough vs the /enroll
+    # rate limit. Uppercased for legibility on a printed label.
+    raw = secrets.token_hex(5).upper()
+    code = f"{raw[:5]}-{raw[5:]}"
+    db.create_claim_code(code, note=note)
+    console.print("Claim code (print on the unit's box):")
+    console.print(f"  [green]{code}[/green]")
+    if note:
+        console.print(f"  note: {note}")
+
+
+@app.command(name="tbb-device-revoke")
+def tbb_device_revoke(
+    unit_id: Annotated[str, typer.Option("--unit-id", help="Unit to cut off from sync.")],
+    enable: Annotated[
+        bool, typer.Option("--enable/--revoke", help="Re-enable instead of revoking.")
+    ] = False,
+) -> None:
+    """Revoke (or re-enable) a unit's sync on CENTRAL. Revoking makes its token
+    stop authorising ingest immediately; the unit's existing data is kept."""
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    if not db.set_device_sync(unit_id, enable):
+        console.print(f"[red]No such device: {unit_id}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"{'Enabled' if enable else 'Revoked'} sync for [bold]{unit_id}[/bold].")
+
+
+@app.command(name="seed-runtime")
+def seed_runtime(
+    sources_file: Annotated[
+        Path | None,
+        typer.Option("--sources", "-s", help="sources.toml to copy from."),
+    ] = None,
+) -> None:
+    """Copy sources.toml entries into the runtime_sources table.
+
+    File-managed sources can only be reconfigured by editing sources.toml +
+    restarting the pipeline. Runtime sources can be stopped, restarted,
+    and have their min_confidence edited from /admin. This command promotes
+    each toml entry to a runtime row so the UI can govern it.
+
+    Idempotent — running twice updates the existing row with the toml's
+    current values without duplicating.
+    """
+    cfg = AppConfig()
+    if sources_file is not None:
+        cfg.sources_file = sources_file
+    configure_logging(cfg.log_level)
+    sources = load_sources(cfg.sources_file)
+    if not sources:
+        console.print("[yellow]sources.toml is empty or missing — nothing to seed.[/yellow]")
+        raise typer.Exit(code=0)
+    db = Database(cfg.db_url)
+    for s_cfg in sources:
+        db.add_runtime_source(
+            name=s_cfg.name,
+            kind=s_cfg.kind,
+            url=s_cfg.url,
+            lat=s_cfg.lat,
+            lon=s_cfg.lon,
+            min_confidence=s_cfg.min_confidence,
+            multisite=s_cfg.multisite,
+            cookies_from_browser=s_cfg.cookies_from_browser,
+            cookies_file=str(s_cfg.cookies_file) if s_cfg.cookies_file else None,
+            timezone=s_cfg.timezone,
+        )
+        console.print(f"  ✓ {s_cfg.name}")
+    console.print(
+        f"\nSeeded {len(sources)} runtime sources. "
+        "Restart the pipeline so the supervisor reattaches under the new rows."
+    )
+
+
 @app.command()
 def prune(
     days: Annotated[int, typer.Option("--days", "-d", help="Delete clip files older than this many days.")] = 14,

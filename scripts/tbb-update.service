@@ -1,0 +1,14 @@
+# TinyBirdBrain self-update — systemd USER oneshot. Driven by tbb-update.timer.
+# Install:
+#   cp ~/birdbrain/scripts/tbb-update.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tbb-update.timer
+# Run on demand: systemctl --user start tbb-update
+[Unit]
+Description=TinyBirdBrain self-update (pull + sync + restart)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/birdbrain
+ExecStart=/bin/bash %h/birdbrain/scripts/tbb-update.sh

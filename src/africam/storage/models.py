@@ -96,6 +96,47 @@ class RuntimeSourceRow(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Push-fed source: a TBB capture unit that ingests detections over HTTP.
+    # The pipeline supervisor does NOT run a local worker for these — they're
+    # registered only so the dashboard/map picks them up via their lat/lon.
+    external: Mapped[bool] = mapped_column(default=False)
+
+
+class DeviceRow(Base):
+    """A registered TinyBirdBrain capture unit (Phase 2 sync).
+
+    The per-unit bearer token is stored only as a SHA-256 hash. A row authorises
+    ingest writes for exactly one ``source_name`` (== ``unit_id``); a compromised
+    unit can never write another's data. ``last_seen_at`` is stamped on every
+    successful ingest and drives liveness (a silent unit shows offline)."""
+
+    __tablename__ = "devices"
+
+    unit_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 hex
+    owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_enabled: Mapped[bool] = mapped_column(default=True)
+    # Does this unit appear on the public map? Off by default (owner opt-in).
+    public: Mapped[bool] = mapped_column(default=False)
+
+
+class ClaimCodeRow(Base):
+    """A one-time enrollment code (Phase 3). Generated on central and printed on
+    a unit's box; the unit redeems it via POST /enroll to be issued its unit_id
+    and device token. Single-use: ``claimed_at`` is stamped on redemption."""
+
+    __tablename__ = "claim_codes"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_unit_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
 
 class SpeciesNoteRow(Base):
