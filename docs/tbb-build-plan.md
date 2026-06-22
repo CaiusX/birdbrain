@@ -211,6 +211,39 @@ minimal LAN UI — with no internet.
 `central: device registry + token-authed /ingest (Phase 2b)`,
 `central: auto-register TBB units as sites + liveness (Phase 2c)`
 
+### Phase 2 — decision record (2026-06-22)
+
+Implemented and unit-tested in the sandbox (31 tests green; central app imports
+and its lint counts unchanged from baseline). **On-metal acceptance pending** —
+needs the bench unit POSTing to a central instance.
+
+- **Idempotency:** central upserts on the natural key `(source_name,
+  started_at, scientific_name)` — no `client_id` *column* was added to central.
+  The unit still sends a stable `client_id` per row (logging / forward-compat),
+  but the natural key is what dedups. Verified: resending a batch reports
+  `accepted=0, duplicate=N`.
+- **Auto-register needed a new flag.** A unit is registered as a
+  `RuntimeSourceRow` with **`external=True`** (new column, ADD COLUMN migration).
+  Without it the pipeline supervisor would try to run a *local* mic worker for
+  the unit and thrash; `_desired_sources` now skips external rows. This is a
+  deviation from the bare "upsert a RuntimeSourceRow" in §7.3, forced by the
+  supervisor's spawn behaviour.
+- **Liveness via heartbeat freshness, not downtime accounting.** Each ingest
+  stamps `worker_heartbeat(unit_id)`; the dashboard's existing `_hb_status`
+  renders a `running` heartbeat older than 60 s as `stale`, so a silent unit
+  shows offline with no new code. `WorkerDowntimeRow` intervals are
+  backoff-driven (local workers only), so per-unit `down_*_s` stats stay 0 — the
+  *status* is correct, the cumulative downtime figure isn't tracked for units.
+- **§10 decisions taken:** sync agent placement = in-process background thread
+  in `tbb-web` (§10.1, "for now"); clip policy = **metadata-only** (`has_clip`
+  flag, no audio body — §10.2 lazy/clip-sync deferred to Phase 4). Tenancy
+  (§10.3) untouched: `devices.public` defaults false; no per-owner gating yet.
+- **Token lifecycle:** stored as SHA-256 hash; `africam tbb-device-add` mints a
+  token on central (shown once) until the Phase 3 `/enroll` flow exists.
+- **Public gate:** the ingest route opts out of the `CF-Connecting-IP` block via
+  a narrow `/ingest/` allowlist but enforces bearer auth + rate limit + body
+  cap. Verified: a public `POST /admin/*` still 404s.
+
 ---
 
 ## Phase 3 — fleet & enrollment
