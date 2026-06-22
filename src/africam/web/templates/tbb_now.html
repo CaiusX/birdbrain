@@ -1,0 +1,17 @@
+{% extends "tbb_base.html" %}
+{% block content %}
+<div id="live">{% include "_tbb_feed.html" %}</div>
+<script>
+  // Dependency-free auto-refresh — the unit may have no internet, so no CDN/HTMX.
+  async function refresh() {
+    try {
+      const r = await fetch('/feed', { cache: 'no-store' });
+      if (r.ok) document.getElementById('live').innerHTML = await r.text();
+    } catch (e) { /* offline blip — try again next tick */ }
+  }
+  setInterval(refresh, 5000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refresh();
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,31 @@
+<div class="stats">
+  <span class="dot {{ 'on' if header.listening else 'off' }}"></span>
+  <span>{{ 'Listening' if header.listening else 'Mic idle' }}</span>
+  <span class="sep">·</span>
+  <span><b>{{ header.unique_species_today }}</b> species today</span>
+  <span class="sep">·</span>
+  <span class="sync-{{ header.sync_state }}">sync: {{ header.sync_state }}</span>
+  {% if header.last_detection_local %}
+    <span class="sep">·</span>
+    <span>last {{ header.last_detection_local.strftime('%H:%M:%S') }}</span>
+  {% endif %}
+</div>
+<ul class="feed">
+{% for d in detections %}
+  <li class="det">
+    {% if d.has_clip %}
+      <img class="spec" src="/spectrograms/{{ d.id }}.png" alt="spectrogram" loading="lazy">
+    {% endif %}
+    <div class="meta">
+      <div class="name">{{ d.common_name }}</div>
+      <div class="sci">{{ d.scientific_name }}</div>
+    </div>
+    <div class="right">
+      <div class="conf">{{ '%.0f'|format(d.confidence * 100) }}%</div>
+      <div class="time">{{ d.local_time.strftime('%H:%M:%S') if d.local_time else '' }}</div>
+    </div>
+  </li>
+{% else %}
+  <li class="empty">No detections yet — give it a minute.</li>
+{% endfor %}
+</ul>

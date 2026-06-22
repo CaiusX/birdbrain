@@ -389,6 +389,31 @@ def tbb_pipeline() -> None:
     run_tbb(cfg)
 
 
+@app.command(name="tbb-web")
+def tbb_web(
+    host: Annotated[
+        str, typer.Option("--host", "-H", help="Bind address. 0.0.0.0 = reachable on the LAN.")
+    ] = "0.0.0.0",
+    port: Annotated[int, typer.Option("--port", "-p")] = 8080,
+) -> None:
+    """Run the minimal LAN-only TBB unit web UI (Now / Today / Setup).
+
+    Binds the LAN by default so a phone on the same wifi can reach it at
+    http://<unit>.local:8080. The unit exposes no inbound ports to the
+    internet — keep it off any port-forward (see tbb-architecture.md §8).
+    """
+    import uvicorn
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    uvicorn.run(
+        "africam.web.tbb_app:app",
+        host=host,
+        port=port,
+        log_level=cfg.log_level.lower(),
+    )
+
+
 @app.command(name="seed-runtime")
 def seed_runtime(
     sources_file: Annotated[

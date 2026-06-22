@@ -1,0 +1,33 @@
+{% extends "tbb_base.html" %}
+{% block content %}
+<h2>Setup</h2>
+{% if saved %}<p class="saved">✓ Saved. Restart the unit's services to apply.</p>{% endif %}
+<form method="post" action="/setup">
+  <label>Unit name
+    <input type="text" name="unit_id" value="{{ cfg.unit_id }}">
+  </label>
+  <label>Microphone
+    <select name="mic_device">
+      {% for d in devices %}
+        <option value="{{ d.device }}" {{ 'selected' if d.device == cfg.mic_device else '' }}>
+          {{ d.device }} — {{ d.label }}
+        </option>
+      {% endfor %}
+      {% if not devices %}
+        <option value="{{ cfg.mic_device }}" selected>{{ cfg.mic_device }} (no ALSA devices detected)</option>
+      {% endif %}
+    </select>
+  </label>
+  <label class="check">
+    <input type="checkbox" name="sync_enabled" value="true" {{ 'checked' if cfg.sync_enabled else '' }}>
+    Sync detections to central (wired up in Phase 2)
+  </label>
+  <button type="submit">Save</button>
+</form>
+<p class="hint">
+  Microphones detected via <code>arecord -l</code>. Location
+  ({{ cfg.lat if cfg.lat is not none else '—' }}, {{ cfg.lon if cfg.lon is not none else '—' }})
+  and clip retention ({{ cfg.retention_days }} days) are set via the unit's <code>.env</code>
+  (<code>AFRICAM_TBB_*</code>). This page is reachable on the LAN only.
+</p>
+{% endblock %}
