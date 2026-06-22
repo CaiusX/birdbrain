@@ -138,6 +138,16 @@ def _sync_loop(db: Database, cfg: AppConfig, stop_event: threading.Event) -> Non
             n = sync_once(db, cfg, state)
             if n:
                 log.info("tbb_sync.flushed", count=n, last_synced_id=state.last_synced_id)
+            else:
+                # Idle keep-alive: no backlog this tick, so post an empty batch
+                # to refresh central's liveness. Central stamps the heartbeat on
+                # every ingest (even empty), so a quiet unit reads "running"
+                # instead of decaying to "stale" between bird detections.
+                post_batch(
+                    cfg.tbb_central_url,
+                    cfg.tbb_device_token,
+                    detections_payload(cfg.tbb_unit_id, []),
+                )
         except Exception:
             log.exception("tbb_sync.tick_failed")
         if stop_event.wait(cfg.tbb_sync_interval_seconds):

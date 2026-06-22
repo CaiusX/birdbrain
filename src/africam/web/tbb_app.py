@@ -16,6 +16,7 @@ HTMX so the unit needs no internet.
 """
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import threading
 from datetime import UTC, datetime
@@ -25,7 +26,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
@@ -426,6 +433,42 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
             raise HTTPException(404, "clip file missing")
         media = {".ogg": "audio/ogg", ".wav": "audio/wav", ".flac": "audio/flac"}
         return FileResponse(path, media_type=media.get(path.suffix.lower(), "audio/ogg"))
+
+    @app.get("/live.mp3")
+    async def live_audio(request: Request) -> StreamingResponse:
+        """Live mic audio as a streaming MP3, for the central dashboard to proxy
+        and audition. Reads the *shared* capture device (the dsnoop PCM set as
+        ``tbb_mic_device``) so it runs alongside the detector instead of fighting
+        it for the mic. A 10-min ffmpeg cap backstops a forgotten client, and a
+        client disconnect kills ffmpeg promptly so a 512 MB unit never accrues
+        orphaned encoders. LAN-only, like the rest of this app — the unit exposes
+        no inbound internet ports."""
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-t", "600",  # safety cap for a forgotten tab
+                "-f", "alsa", "-i", cfg.tbb_mic_device,
+                "-vn", "-ac", "1", "-ar", "44100", "-b:a", "96k",
+                "-f", "mp3", "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+        async def _pump():
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    chunk = await asyncio.to_thread(proc.stdout.read, 8192)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                proc.kill()
+                proc.wait()
+
+        return StreamingResponse(_pump(), media_type="audio/mpeg")
 
     @app.get("/healthz")
     def healthz() -> dict:

@@ -5830,6 +5830,22 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 raise HTTPException(
                     409, "mic is on raw ALSA (exclusive) — route it via pulse: to audition"
                 )
+        elif cfg_src.url.startswith("tbb://"):
+            # External TinyBirdBrain unit. We can't reach its mic directly, so we
+            # proxy the unit's own LAN /live.mp3 (it shares its mic via dsnoop).
+            # The unit's address is held in an app_setting keyed by source name so
+            # it's editable without a schema change / redeploy. ffmpeg reconnects
+            # if the unit blips; the same mp3-pump below re-serves it same-origin
+            # (needed for the in-browser spectrogram tap).
+            live_url = db.get_setting(f"live_audio_url:{name}")
+            if not live_url:
+                raise HTTPException(
+                    409, "no live-audio URL configured for this unit (set live_audio_url:<name>)"
+                )
+            input_args = [
+                "-reconnect", "1", "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5", "-i", live_url,
+            ]
         else:
             raise HTTPException(404, "No live audio for this source")
 
