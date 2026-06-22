@@ -20,10 +20,44 @@
   </label>
   <label class="check">
     <input type="checkbox" name="sync_enabled" value="true" {{ 'checked' if cfg.sync_enabled else '' }}>
-    Sync detections to central (wired up in Phase 2)
+    Sync detections to central
   </label>
   <button type="submit">Save</button>
 </form>
+
+<div class="mic-test">
+  <button type="button" id="mic-test-btn">🎤 Test microphone (record 4s &amp; play)</button>
+  <span id="mic-test-status" class="hint"></span>
+  <audio id="mic-test-audio" controls style="display:none; margin-top:.6rem; width:100%"></audio>
+</div>
+<script>
+  // Records a few seconds from the configured mic and plays it here — no deps.
+  // Works when the pipeline isn't holding the mic; otherwise shows why not.
+  (function () {
+    const btn = document.getElementById('mic-test-btn');
+    const status = document.getElementById('mic-test-status');
+    const audio = document.getElementById('mic-test-audio');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; audio.style.display = 'none'; status.textContent = ' recording 4s…';
+      try {
+        const r = await fetch('/setup/mic-sample?seconds=4', { cache: 'no-store' });
+        if (!r.ok) {
+          let msg = r.status + '';
+          try { msg = (await r.json()).detail || msg; } catch (e) {}
+          status.textContent = ' ' + msg;
+          return;
+        }
+        audio.src = URL.createObjectURL(await r.blob());
+        audio.style.display = ''; status.textContent = ' playing back';
+        audio.play();
+      } catch (e) {
+        status.textContent = ' error: ' + e;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  })();
+</script>
 <p class="hint">
   Microphones detected via <code>arecord -l</code>. Location
   ({{ cfg.lat if cfg.lat is not none else '—' }}, {{ cfg.lon if cfg.lon is not none else '—' }})

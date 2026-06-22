@@ -266,6 +266,31 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
         log.info("tbb.setup_saved", unit=unit_id, device=mic_device, sync=sync_enabled)
         return RedirectResponse(url="/setup?saved=1", status_code=303)
 
+    @app.get("/setup/mic-sample")
+    def mic_sample(seconds: int = Query(default=4, ge=1, le=10)) -> Response:
+        """Record a few seconds from the configured mic and return it as OGG for
+        the Setup page to play back — a quick "is the mic working?" check.
+
+        The pipeline holds the ALSA device exclusively, so this works when the
+        pipeline is paused / during first-boot setup; while it's capturing, this
+        returns 409 with a clear message rather than fighting for the device."""
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "alsa", "-i", cfg.tbb_mic_device,
+            "-t", str(seconds), "-ac", "1", "-ar", "48000",
+            "-c:a", "libvorbis", "-f", "ogg", "pipe:1",
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=seconds + 15, check=False)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            raise HTTPException(503, f"mic capture failed: {e}") from e
+        if proc.returncode != 0 or not proc.stdout:
+            detail = (proc.stderr or b"").decode("utf-8", "replace").strip()[-200:]
+            raise HTTPException(
+                409, f"microphone unavailable (in use by the pipeline?): {detail or 'no audio'}"
+            )
+        return Response(content=proc.stdout, media_type="audio/ogg")
+
     @app.get("/spectrograms/{detection_id}.png")
     def spectrogram(detection_id: int) -> Response:
         """Lazy PNG spectrogram thumbnail, cached next to the clip."""

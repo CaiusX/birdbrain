@@ -81,6 +81,35 @@ def test_clip_404_when_missing(tmp_path):
     assert client.get("/clips/9999").status_code == 404
 
 
+def test_setup_page_has_mic_test_button(tmp_path):
+    r = TestClient(_make_app(tmp_path)).get("/setup")
+    assert "/setup/mic-sample" in r.text
+    assert "Test microphone" in r.text
+
+
+def test_mic_sample_returns_ogg_on_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        tbb_app.subprocess, "run",
+        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=b"OggS-fake-audio", stderr=b""),
+    )
+    r = TestClient(_make_app(tmp_path)).get("/setup/mic-sample?seconds=2")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "audio/ogg"
+    assert r.content == b"OggS-fake-audio"
+
+
+def test_mic_sample_409_when_device_busy(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        tbb_app.subprocess, "run",
+        lambda *a, **k: types.SimpleNamespace(
+            returncode=1, stdout=b"", stderr=b"Device or resource busy"
+        ),
+    )
+    r = TestClient(_make_app(tmp_path)).get("/setup/mic-sample")
+    assert r.status_code == 409
+    assert "in use" in r.json()["detail"]
+
+
 def test_list_alsa_devices_parses_cards(monkeypatch):
     sample = (
         "card 0: Headset [Logitech USB Headset], device 0: USB Audio [USB Audio]\n"
