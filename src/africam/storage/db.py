@@ -210,6 +210,17 @@ class Database:
         with self._Session() as s:
             return list(s.scalars(select(DeviceRow).order_by(DeviceRow.unit_id)))
 
+    def private_unit_source_names(self) -> set[str]:
+        """source_names of registered units NOT flagged ``public`` — these are
+        hidden from public (Cloudflare-tunnel) views. Non-device sources
+        (YouTube/RTSP cams) aren't in this table, so they're never hidden."""
+        with self._Session() as s:
+            return {
+                r for (r,) in s.execute(
+                    select(DeviceRow.unit_id).where(DeviceRow.public.is_(False))
+                )
+            }
+
     def set_device_sync(self, unit_id: str, enabled: bool) -> bool:
         """Enable/revoke a device's sync. Revoking (enabled=False) makes its
         token stop authorising ingest without deleting its history. Returns

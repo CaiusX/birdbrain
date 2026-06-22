@@ -380,6 +380,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 return Response(status_code=404)
         return await call_next(request)
 
+    def _hidden_source_names(request: Request) -> set[str]:
+        """Source names to hide from THIS request. Over the public tunnel,
+        non-public TBB units are hidden (privacy, Phase 3); on the LAN/admin
+        side nothing is hidden so the operator sees every unit."""
+        if getattr(request.state, "is_public", False):
+            return db.private_unit_source_names()
+        return set()
+
     def _runtime_to_cfg(row) -> SourceConfig:
         from africam.config import OcrConfig
         return SourceConfig(
@@ -718,18 +726,19 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request) -> HTMLResponse:
         _, sources_by_name, tiles = _all_sources()
+        hidden = _hidden_source_names(request)
+        if hidden:
+            sources_by_name = {k: v for k, v in sources_by_name.items() if k not in hidden}
+            tiles = [t for t in tiles if t.name not in hidden]
         # Initial render uses default grouping; JS swaps the URL on toggle.
         group_minutes = 5
         with db.session() as s:
             # Pull a wider window than ``limit`` so we have enough raw rows to
             # form ``limit`` groups when grouping is on.
-            raw = list(
-                s.scalars(
-                    select(DetectionRow)
-                    .order_by(desc(DetectionRow.started_at))
-                    .limit(500)
-                )
-            )
+            stmt = select(DetectionRow).order_by(desc(DetectionRow.started_at)).limit(500)
+            if hidden:
+                stmt = stmt.where(DetectionRow.source_name.not_in(hidden))
+            raw = list(s.scalars(stmt))
             rows = _group_detections(raw, group_minutes * 60)[:50]
 
         sites_activity, front_stats, site_pairs = _front_activity(sources_by_name)
@@ -788,6 +797,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raw_limit = limit
         # Normalise source filter: drop empty entries; empty list means "all".
         sources_filter = [s for s in (source or []) if s]
+        hidden = _hidden_source_names(request)
         with db.session() as s:
             stmt = (
                 select(DetectionRow)
@@ -796,6 +806,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
             if sources_filter:
                 stmt = stmt.where(DetectionRow.source_name.in_(sources_filter))
+            if hidden:
+                stmt = stmt.where(DetectionRow.source_name.not_in(hidden))
             if last_minutes > 0:
                 cutoff = datetime.now(UTC) - timedelta(minutes=last_minutes)
                 stmt = stmt.where(DetectionRow.started_at >= cutoff)
@@ -2128,6 +2140,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     def site_detail(request: Request, name: str) -> HTMLResponse:
         """Per-site detail page. Mirrors /species/{scientific}: AI commentary
         on top, then top species, hourly rhythm, and recent detections."""
+        # A private unit's page is not visible over the public tunnel.
+        if name in _hidden_source_names(request):
+            raise HTTPException(404, f"No site or detections for {name!r}")
         _, sources_by_name, _ = _all_sources()
         src_cfg = sources_by_name.get(name)
         site_note = db.get_site_note(name)
