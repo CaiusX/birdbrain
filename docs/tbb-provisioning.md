@@ -127,6 +127,27 @@ loginctl enable-linger "$USER"
 The `pi` user must be able to read the mic — it's in the `audio` group by
 default on Pi OS (`groups | grep audio`; `sudo usermod -aG audio "$USER"` if not).
 
+## 4b. Self-update (optional)
+
+Deployed units can update themselves so you never have to touch them. The
+updater (`scripts/tbb-update.sh`) fast-forwards the unit's branch, `uv sync`s,
+restarts the services, and checks `/healthz`. It's **forward-only**: if it can't
+fast-forward (e.g. the unit's local tflite dependency edit conflicts with an
+incoming `pyproject.toml` change) it aborts and leaves the unit running. There's
+no auto-rollback yet — that needs the unit on an unmodified checkout (the `tbb`
+dependency-profile cleanup; see `tbb-build-plan.md`).
+
+```sh
+cp ~/birdbrain/scripts/tbb-update.service ~/.config/systemd/user/
+cp ~/birdbrain/scripts/tbb-update.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tbb-update.timer      # nightly, random ≤1h jitter
+# update on demand + watch:
+systemctl --user start tbb-update && journalctl --user -u tbb-update -n 20 --no-pager
+```
+
+(Override the tracked branch with `AFRICAM_TBB_UPDATE_REF`, e.g. a release tag.)
+
 ## 5. Verify
 
 ```sh

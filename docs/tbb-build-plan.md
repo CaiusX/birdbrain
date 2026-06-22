@@ -274,6 +274,44 @@ following only `docs/tbb-provisioning.md`, with no manual SSH surgery.
 
 **Commit(s):** per item, prefixed `tbb:` / `central:`.
 
+### Phase 3 — decision record (2026-06-22)
+
+Built and unit-tested on the branch (testing against *local* central, per the
+deploy decision below). Not yet exercised on production.
+
+- **Enrollment (claim-code self-enroll).** `claim_codes` table + `POST /enroll`:
+  unit redeems a one-time code (printed on box) + owner name/lat-lon → central
+  assigns a slug `unit_id`, mints a token, registers the device, burns the code
+  (atomic single-use). Driven from the unit's `/setup` "Connect to central" form;
+  no SSH. `/enroll` is allowed over the tunnel like `/ingest`, gated by the code,
+  rate-limited per IP. **Token lifecycle:** `tbb-claim-new` mints codes,
+  `tbb-device-revoke` cuts a unit's sync (token rejected, data kept).
+- **First-boot wifi → bake-at-flash (captive AP deferred).** Decided against the
+  hostapd/dnsmasq captive portal for now (heavy, fragile, only pays off for
+  sealed-box give-to-strangers). Documented the Imager bake-at-flash flow; AP is
+  a Phase-4 option if needed.
+- **Privacy (§10.3 decision).** Honour `devices.public`: over the public tunnel,
+  non-public units are hidden from the feed/map/`/site` page; LAN/admin sees all.
+  *Scope:* a species *common name* can still appear in the global species
+  autocomplete (not unit-identifying) — deferred to the pi-account integration.
+- **Updates → 4-simple (forward-only pull).** `scripts/tbb-update.sh` + a nightly
+  user timer: ff-only pull → `uv sync` → restart → `/healthz`. Safe-aborts if it
+  can't fast-forward; **no auto-rollback** because the unit's local tflite/3.11
+  `pyproject` edit makes `git reset --hard` destructive. Auto-rollback is gated
+  on the deferred **`tbb` dependency-profile cleanup** (commit the tflite/3.11
+  choice so units run an unmodified checkout).
+- **Deploy decision.** Production runs the **`pi`** branch, which has diverged
+  far from `tbb` (pi +56 / tbb +32 commits since the split) and includes a
+  **tester-accounts / per-user-scoring** auth system that overlaps TBB's central
+  files (`web/app.py`, `storage/*`). So TBB is being developed + tested against a
+  **local central**; integration is one careful `tbb`→`pi` merge once TBB is
+  complete (reconcile the public-gate/auth and the privacy model with pi's
+  accounts then). Do **not** deploy mid-build.
+
+**Outstanding before "done":** the `tbb` dependency-profile cleanup (enables
+clean updates + auto-rollback), and the `tbb`→`pi` integration. Per-owner login
+is Phase 4.
+
 ---
 
 ## What to hand back after each phase
