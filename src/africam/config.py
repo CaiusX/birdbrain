@@ -32,6 +32,9 @@ class SourceConfig(BaseModel):
     # ALSA capture device for the "mic" kind (e.g. "plughw:1,0"). Ignored by the
     # youtube/rtsp kinds. Lives here so a MicSource's config travels with it.
     device: str = "plughw:1,0"
+    # Drop BirdNET's non-bird noise classes (Engine, Dog, Siren, …). Off by
+    # default so central is unchanged; the TBB profile turns it on.
+    exclude_non_bird: bool = False
     lat: float | None = None
     lon: float | None = None
     min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)

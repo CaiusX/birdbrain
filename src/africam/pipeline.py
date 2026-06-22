@@ -216,6 +216,7 @@ def _consume_stream(
                 lon=resolved.longitude,
                 week=cfg.week,
                 min_confidence=cfg.min_confidence,
+                drop_non_bird=cfg.exclude_non_bird,
             )
         except Exception:
             slog.exception("detect.failed")

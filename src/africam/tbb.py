@@ -43,6 +43,8 @@ def tbb_source_config(app: AppConfig) -> SourceConfig:
         min_confidence=app.tbb_min_confidence,
         timezone=app.tbb_timezone,
         multisite=False,
+        # A consumer unit shows birds, not Engine/Dog/Siren noise classes.
+        exclude_non_bird=True,
     )
 
 

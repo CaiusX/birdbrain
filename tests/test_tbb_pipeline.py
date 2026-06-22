@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from africam.audio import MicSource
 from africam.config import AppConfig
-from africam.detector.birdnet import Detection
+from africam.detector.birdnet import NON_BIRD_CLASSES, Detection
 from africam.pipeline import build_source
 from africam.storage import Database, DetectionRow
 from africam.tbb import prune_clips, tbb_source_config
@@ -28,6 +28,16 @@ def test_tbb_source_config_is_a_single_mic_source():
     assert cfg.min_confidence == 0.6
     # No site resolution on a unit — it's a single static-location source.
     assert cfg.multisite is False
+    # The unit drops BirdNET's non-bird noise classes.
+    assert cfg.exclude_non_bird is True
+
+
+def test_non_bird_classes_cover_noise_not_birds():
+    # The noise classes a unit should hide...
+    assert {"Engine", "Dog", "Siren", "Human vocal"} <= NON_BIRD_CLASSES
+    assert len(NON_BIRD_CLASSES) == 11
+    # ...but never a real species.
+    assert "Pycnonotus tricolor" not in NON_BIRD_CLASSES
 
 
 def test_build_source_constructs_micsource_for_mic_kind():
