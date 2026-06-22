@@ -49,6 +49,37 @@ uv sync                 # ~10-20 min on a Zero 2 W
 uv run python -c "import tflite_runtime; print('tflite', tflite_runtime.__version__)"
 ```
 
+### 2b. Audio input options
+
+The unit reads any ALSA device (`AFRICAM_TBB_MIC_DEVICE`), so the mic is a
+hardware choice, not a code change:
+
+- **USB mic** (e.g. a lavalier or USB headset): plug in, `arecord -l`, use its
+  `plughw:<card>,<dev>`. No extra setup.
+- **Raspberry Pi Codec Zero** (integrated HAT, onboard MEMS mic — cleaner for a
+  puck). It's I2S, so:
+  ```sh
+  # enable the codec overlay, reboot
+  sudo sed -i 's/^dtparam=audio=on/#dtparam=audio=on/' /boot/firmware/config.txt
+  echo 'dtoverlay=rpi-codeczero' | sudo tee -a /boot/firmware/config.txt
+  sudo reboot
+  # load the mixer routing for the onboard mic (states from Raspberry Pi)
+  git clone https://github.com/raspberrypi/Pi-Codec.git ~/Pi-Codec
+  sudo alsactl restore -f ~/Pi-Codec/Codec_Zero_OnboardMIC_record_and_SPK_playback.state
+  arecord -l   # shows card "Zero"  →  AFRICAM_TBB_MIC_DEVICE=plughw:CARD=Zero,DEV=0
+  ```
+  Other presets in that repo: `Codec_Zero_StereoMIC_record_and_HP_playback.state`
+  (external MIC1/MIC2), `Codec_Zero_AUXIN_record_and_HP_playback.state` (line in).
+  The codec loses its routing on power-off, so install
+  [`scripts/tbb-codec.service`](../scripts/tbb-codec.service) to re-apply it at
+  boot before the pipeline starts:
+  ```sh
+  sudo cp ~/birdbrain/scripts/tbb-codec.service /etc/systemd/system/
+  sudo systemctl daemon-reload && sudo systemctl enable --now tbb-codec
+  ```
+  (Edit the unit's `ExecStart` path/preset if you cloned elsewhere or use a
+  different mic.)
+
 ## 3. Unit configuration (`.env`)
 
 The unit runs the same `africam` package under the `tbb` profile, driven by
