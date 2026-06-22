@@ -294,12 +294,17 @@ deploy decision below). Not yet exercised on production.
   non-public units are hidden from the feed/map/`/site` page; LAN/admin sees all.
   *Scope:* a species *common name* can still appear in the global species
   autocomplete (not unit-identifying) — deferred to the pi-account integration.
-- **Updates → 4-simple (forward-only pull).** `scripts/tbb-update.sh` + a nightly
-  user timer: ff-only pull → `uv sync` → restart → `/healthz`. Safe-aborts if it
-  can't fast-forward; **no auto-rollback** because the unit's local tflite/3.11
-  `pyproject` edit makes `git reset --hard` destructive. Auto-rollback is gated
-  on the deferred **`tbb` dependency-profile cleanup** (commit the tflite/3.11
-  choice so units run an unmodified checkout).
+- **Updates → pull-based with rollback.** `scripts/tbb-update.sh` + a nightly
+  user timer: ff-only pull → reinstall tbb requirements → restart → `/healthz`,
+  and **rolls back** (`git reset --hard` + reinstall) on a post-update health
+  failure.
+- **Dependency-profile cleanup (done).** The unit no longer edits `pyproject`:
+  its deps live in `deploy/tbb/requirements-tbb.txt` (central deps − tensorflow +
+  tflite-runtime), installed into a self-managed 3.11 venv; services + updater
+  call `.venv/bin/africam` directly (not `uv run`, which would re-pull TF).
+  `pyproject`/`uv.lock` stay TF-based for the dev box/central; only change is
+  `requires-python>=3.11`. The unmodified checkout is what makes the updater's
+  rollback safe. A drift test (`test_tbb_deps.py`) keeps the two dep lists aligned.
 - **Deploy decision.** Production runs the **`pi`** branch, which has diverged
   far from `tbb` (pi +56 / tbb +32 commits since the split) and includes a
   **tester-accounts / per-user-scoring** auth system that overlaps TBB's central
@@ -308,9 +313,8 @@ deploy decision below). Not yet exercised on production.
   complete (reconcile the public-gate/auth and the privacy model with pi's
   accounts then). Do **not** deploy mid-build.
 
-**Outstanding before "done":** the `tbb` dependency-profile cleanup (enables
-clean updates + auto-rollback), and the `tbb`→`pi` integration. Per-owner login
-is Phase 4.
+**Outstanding before "done":** the `tbb`→`pi` integration (deploy to production —
+reconcile with pi's tester-accounts/auth). Per-owner login is Phase 4.
 
 ---
 

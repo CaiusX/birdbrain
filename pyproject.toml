@@ -2,7 +2,7 @@
 name = "africam"
 version = "0.1.0"
 description = "Real-time bird species recognition from YouTube and IP camera audio streams"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "birdnetlib>=0.18.0",
     # tflite-runtime has no cp312 wheels, so use full tensorflow on every

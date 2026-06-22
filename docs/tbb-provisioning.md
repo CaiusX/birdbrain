@@ -28,7 +28,13 @@ adds the config profile + services that make the unit run unattended.
 Phase 0 measured full TensorFlow at ~474 MB — too big for 512 MB. The unit runs
 `tflite-runtime` instead (190 MB peak, proven on metal). `birdnetlib` prefers
 `tflite_runtime` automatically, and `tflite-runtime` only ships a **cp311**
-aarch64 wheel, so the unit pins **Python 3.11**.
+aarch64 wheel, so the unit runs **Python 3.11**.
+
+The unit's deps live in `deploy/tbb/requirements-tbb.txt` (the central deps with
+tensorflow swapped for tflite-runtime). Central's `pyproject`/`uv.lock` stay
+TensorFlow-based, so the unit installs into its **own venv** and the git
+checkout stays **unmodified** — which is what lets the self-updater fast-forward
+and roll back cleanly.
 
 ```sh
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -36,18 +42,20 @@ source "$HOME/.local/bin/env"
 git clone -b tbb https://github.com/CaiusX/birdbrain.git ~/birdbrain
 cd ~/birdbrain
 
-# Interim tbb dependency profile: drop full TF, add tflite-runtime, target 3.11.
-# (Central's pyproject stays on TensorFlow/3.12 — do NOT commit this edit; it is
-#  the unit's local install only. A first-class tbb dependency profile is a
-#  tracked follow-up — see the Phase 0 decision record in tbb-build-plan.md.)
-sed -i 's/^requires-python = .*/requires-python = ">=3.11"/' pyproject.toml
-sed -i '/^    "tensorflow>=2.16",/d' pyproject.toml
-sed -i 's/^    "birdnetlib>=0.18.0",/&\n    "tflite-runtime>=2.14",/' pyproject.toml
-
-uv python pin 3.11      # sticky — every `uv run` uses 3.11, not uv's default 3.12
-uv sync                 # ~10-20 min on a Zero 2 W
-uv run python -c "import tflite_runtime; print('tflite', tflite_runtime.__version__)"
+uv venv --python 3.11 .venv                          # 3.11 (tflite has no cp312 wheel)
+uv pip install -r deploy/tbb/requirements-tbb.txt    # ~10-20 min on a Zero 2 W
+uv pip install --no-deps -e .                        # the africam package itself
+.venv/bin/python -c "import tflite_runtime; print('tflite', tflite_runtime.__version__)"
+.venv/bin/python -c "import tensorflow" 2>&1 | head -1   # expect ModuleNotFoundError
 ```
+
+The services and the updater call `~/birdbrain/.venv/bin/africam` directly (not
+`uv run`, whose auto-sync would reinstall full TensorFlow from `pyproject`).
+
+> **Migrating a unit that used the old sed-edit install:** discard the local
+> edit and rebuild the venv —
+> `git checkout -- pyproject.toml && git pull && rm -rf .venv` then the three
+> `uv` commands above.
 
 ### 2b. Audio input options
 
@@ -102,8 +110,8 @@ AFRICAM_CLIPS_DIR=/home/pi/birdbrain/data/clips
 Smoke-test before installing services:
 
 ```sh
-uv run africam tbb-listen --device plughw:0,0 --seconds 30   # detections + timing
-uv run africam tbb-pipeline    # Ctrl-C after you see a heartbeat/detection
+.venv/bin/africam tbb-listen --device plughw:0,0 --seconds 30   # detections + timing
+.venv/bin/africam tbb-pipeline    # Ctrl-C after you see a heartbeat/detection
 ```
 
 ## 4. Services (systemd **user** units)
@@ -130,12 +138,11 @@ default on Pi OS (`groups | grep audio`; `sudo usermod -aG audio "$USER"` if not
 ## 4b. Self-update (optional)
 
 Deployed units can update themselves so you never have to touch them. The
-updater (`scripts/tbb-update.sh`) fast-forwards the unit's branch, `uv sync`s,
-restarts the services, and checks `/healthz`. It's **forward-only**: if it can't
-fast-forward (e.g. the unit's local tflite dependency edit conflicts with an
-incoming `pyproject.toml` change) it aborts and leaves the unit running. There's
-no auto-rollback yet — that needs the unit on an unmodified checkout (the `tbb`
-dependency-profile cleanup; see `tbb-build-plan.md`).
+updater (`scripts/tbb-update.sh`) fast-forwards the unit's branch, reinstalls
+the tbb requirements, restarts the services, and checks `/healthz`. It's
+fast-forward-only, and because the unit runs an unmodified checkout it **rolls
+back** (`git reset --hard` + reinstall) if the new version fails its health
+check.
 
 ```sh
 cp ~/birdbrain/scripts/tbb-update.service ~/.config/systemd/user/

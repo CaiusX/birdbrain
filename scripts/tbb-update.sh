@@ -1,54 +1,66 @@
 #!/usr/bin/env bash
-# TinyBirdBrain forward-only self-update.
+# TinyBirdBrain self-update with rollback.
 #
-# Pulls the unit's current branch, syncs deps, restarts the services, and
-# verifies /healthz. Designed to be safe on a remote unit:
-#   * fast-forward only — if the pull can't ff (e.g. the unit's local
-#     dependency edit conflicts with an incoming pyproject change), it aborts
-#     and leaves the running unit untouched;
-#   * NO hard rollback — `git reset --hard` would discard the unit's local
-#     tflite/3.11 dependency edit, so on a post-update health failure we log
-#     loudly and leave it for a power-cycle instead. (Auto-rollback arrives once
-#     the tbb dependency profile is committed — see docs/tbb-build-plan.md.)
+# Fast-forwards the unit's branch, reinstalls the tbb dependency profile,
+# restarts the services, and verifies /healthz. The unit runs an UNMODIFIED
+# checkout (deps live in deploy/tbb/requirements-tbb.txt + a self-managed venv,
+# not a local pyproject edit), so:
+#   * fast-forward only — never rewrites local history;
+#   * on a post-update health failure it ROLLS BACK to the previous commit
+#     (`git reset --hard`), reinstalls, and restarts — safe because nothing in
+#     the working tree is locally modified.
 #
 # Run by tbb-update.timer, or manually: `systemctl --user start tbb-update`.
 set -uo pipefail
 
 REPO="${TBB_REPO_DIR:-$HOME/birdbrain}"
 PORT="${TBB_WEB_PORT:-8080}"
+UV="${UV:-$HOME/.local/bin/uv}"
 cd "$REPO" || { echo "tbb-update: no repo at $REPO"; exit 1; }
 
-# Track whatever branch the unit is on (override with AFRICAM_TBB_UPDATE_REF).
 REF="${AFRICAM_TBB_UPDATE_REF:-origin/$(git rev-parse --abbrev-ref HEAD)}"
+
+reinstall() {
+  "$UV" pip install -q -r deploy/tbb/requirements-tbb.txt && "$UV" pip install -q --no-deps -e .
+}
+restart() {
+  systemctl --user restart tbb-pipeline tbb-web
+}
+healthy() {
+  for _ in $(seq 1 10); do
+    sleep 3
+    curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
 
 before=$(git rev-parse HEAD)
 if ! git fetch --quiet origin; then
-  echo "tbb-update: fetch failed (offline?) — nothing to do"
-  exit 0
+  echo "tbb-update: fetch failed (offline?) — nothing to do"; exit 0
 fi
 target=$(git rev-parse "$REF" 2>/dev/null) || { echo "tbb-update: unknown ref $REF"; exit 1; }
 if [ "$before" = "$target" ]; then
-  echo "tbb-update: already current ($before)"
-  exit 0
+  echo "tbb-update: already current ($before)"; exit 0
 fi
 
 echo "tbb-update: $before -> $target ($REF)"
 if ! git merge --ff-only "$REF"; then
-  echo "tbb-update: cannot fast-forward (local changes / diverged) — skipping, unit untouched"
-  exit 1
+  echo "tbb-update: cannot fast-forward (diverged) — skipping, unit untouched"; exit 1
 fi
 
-if ! uv sync --quiet; then
-  echo "tbb-update: WARNING uv sync failed; restarting on pulled code anyway"
+reinstall || echo "tbb-update: WARNING dependency install reported errors"
+restart
+if healthy; then
+  echo "tbb-update: updated to $target and healthy"; exit 0
 fi
-systemctl --user restart tbb-pipeline tbb-web
 
-for _ in $(seq 1 10); do
-  sleep 3
-  if curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
-    echo "tbb-update: updated to $target and healthy"
-    exit 0
-  fi
-done
-echo "tbb-update: WARNING health check failed after update to $target — power-cycle if it doesn't recover"
+echo "tbb-update: health check FAILED after update — rolling back to $before"
+git reset --hard "$before"
+reinstall || echo "tbb-update: WARNING reinstall during rollback reported errors"
+restart
+if healthy; then
+  echo "tbb-update: rolled back to $before and healthy"
+else
+  echo "tbb-update: WARNING still unhealthy after rollback — power-cycle the unit"
+fi
 exit 1

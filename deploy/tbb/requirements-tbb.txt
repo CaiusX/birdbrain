@@ -1,0 +1,41 @@
+# TinyBirdBrain (TBB) unit dependency profile.
+#
+# The unit runs the SAME africam package as central but with tflite-runtime
+# instead of full TensorFlow (Phase 0: ~190 MB vs ~474 MB — fits 512 MB), on
+# Python 3.11 (tflite-runtime has no cp312 wheel). birdnetlib auto-prefers
+# tflite_runtime when it's present.
+#
+# Central's pyproject/uv.lock stay TensorFlow-based (resolvable on x86/cp312),
+# so this lives as a separate requirements file the unit installs into its own
+# venv — keeping the unit's git checkout UNMODIFIED (which is what lets the
+# self-updater fast-forward and roll back safely). Install on the unit:
+#
+#   uv venv --python 3.11 .venv
+#   uv pip install -r deploy/tbb/requirements-tbb.txt
+#   uv pip install --no-deps -e .
+#
+# Keep this in sync with [project.dependencies] in pyproject.toml (minus
+# tensorflow, plus tflite-runtime) — tests/test_tbb_deps.py guards the drift.
+birdnetlib>=0.18.0
+tflite-runtime>=2.14
+librosa>=0.10
+resampy>=0.4
+numpy>=1.26,<2.0
+yt-dlp[default]>=2024.10.7
+sqlalchemy>=2.0
+pydantic>=2.6
+pydantic-settings>=2.2
+typer>=0.12
+rich>=13.7
+structlog>=24.1
+anyio>=4.3
+fastapi>=0.110
+uvicorn[standard]>=0.29
+jinja2>=3.1
+python-multipart>=0.0.9
+tzdata>=2024.1
+pillow>=10.3
+pytesseract>=0.3.10
+anthropic>=0.71
+squarify>=0.4
+requests>=2.28

@@ -11,7 +11,9 @@ After=network.target sound.target
 [Service]
 Type=simple
 WorkingDirectory=%h/birdbrain
-ExecStart=%h/.local/bin/uv run africam tbb-pipeline
+# Call the unit's venv directly (built from deploy/tbb/requirements-tbb.txt) —
+# NOT `uv run`, whose auto-sync would reinstall full TensorFlow from pyproject.
+ExecStart=%h/birdbrain/.venv/bin/africam tbb-pipeline
 Restart=always
 RestartSec=5
 # CPU-bound tflite inference; yield a little so the web UI stays responsive on
