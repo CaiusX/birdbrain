@@ -71,6 +71,7 @@ class Database:
             ("species_notes", "range_map_page_url", "TEXT"),
             ("species_notes", "media_fetched_at", "TIMESTAMP"),
             ("runtime_sources", "timezone", "TEXT DEFAULT 'UTC'"),
+            ("runtime_sources", "external", "INTEGER DEFAULT 0"),
         ]
         with self.engine.begin() as conn:
             for table, col, ddl in added:
@@ -207,6 +208,37 @@ class Database:
     def list_devices(self) -> list[DeviceRow]:
         with self._Session() as s:
             return list(s.scalars(select(DeviceRow).order_by(DeviceRow.unit_id)))
+
+    def register_tbb_source(
+        self,
+        unit_id: str,
+        *,
+        lat: float | None = None,
+        lon: float | None = None,
+        timezone: str = "UTC",
+    ) -> bool:
+        """Ensure a push-fed (external) runtime source exists for a TBB unit so
+        it appears on the dashboard/map. Idempotent and create-only: an existing
+        row is left untouched (don't clobber admin edits or un-delete it).
+        Returns True iff a row was newly created. The ``external`` flag keeps the
+        pipeline supervisor from trying to run a local worker for it."""
+        now = datetime.now(UTC)
+        with self._Session() as s, s.begin():
+            if s.get(RuntimeSourceRow, unit_id) is not None:
+                return False
+            s.add(RuntimeSourceRow(
+                name=unit_id,
+                kind="mic",
+                url=f"tbb://{unit_id}",
+                lat=lat,
+                lon=lon,
+                min_confidence=0.0,  # unit already filtered before sending
+                multisite=False,
+                timezone=timezone or "UTC",
+                external=True,
+                created_at=now,
+            ))
+        return True
 
     # --- Source state (current site for multi-site streams) ---
 

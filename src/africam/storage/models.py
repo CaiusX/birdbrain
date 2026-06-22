@@ -62,6 +62,10 @@ class RuntimeSourceRow(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Push-fed source: a TBB capture unit that ingests detections over HTTP.
+    # The pipeline supervisor does NOT run a local worker for these — they're
+    # registered only so the dashboard/map picks them up via their lat/lon.
+    external: Mapped[bool] = mapped_column(default=False)
 
 
 class DeviceRow(Base):

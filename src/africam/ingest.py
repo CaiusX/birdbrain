@@ -72,6 +72,12 @@ def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
         ):
             inserted += 1
 
+    # Auto-register the unit as a push-fed site (idempotent) so the map/site/
+    # species/brief views pick it up, and stamp liveness — a unit that stops
+    # POSTing then shows offline via the same stale-heartbeat logic as a stalled
+    # YouTube source.
+    db.register_tbb_source(device.unit_id, lat=device.lat, lon=device.lon)
+    db.worker_heartbeat(device.unit_id)
     db.device_touch_seen(device.unit_id)
     log.info(
         "ingest.batch",

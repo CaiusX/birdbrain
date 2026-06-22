@@ -321,6 +321,10 @@ def _desired_sources(
     for row in db.list_runtime_sources():
         if row.name in disabled:
             continue
+        if getattr(row, "external", False):
+            # Push-fed TBB unit — it ingests over HTTP; central never runs a
+            # local worker for it.
+            continue
         out[row.name] = _runtime_row_to_cfg(row)
     return out
 
