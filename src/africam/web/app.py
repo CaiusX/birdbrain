@@ -42,6 +42,7 @@ from sqlalchemy import and_, case, desc, func, or_, select
 
 from africam import weather as weather_module
 from africam.config import AppConfig, SourceConfig, load_sources
+from africam.enroll import EnrollBody, enroll
 from africam.host import host_metrics
 from africam.ingest import IngestBody, hash_token, ingest_batch
 from africam.site_resolver import state_to_resolved
@@ -358,10 +359,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # read-only without putting a login in front of the whole site.
     _PUBLIC_BLOCKED_PREFIXES = ("/admin",)
     _PUBLIC_BLOCKED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
-    # The TBB ingest endpoint is the ONE mutating route allowed over the public
-    # tunnel — it enforces per-unit bearer-token auth instead of the LAN gate
-    # (see tbb-architecture.md §8). Everything else public stays read-only.
-    _PUBLIC_ALLOWED_PREFIXES = ("/ingest/",)
+    # The TBB ingest + enroll endpoints are the mutating routes allowed over the
+    # public tunnel — ingest enforces per-unit bearer-token auth, enroll requires
+    # a valid one-time claim code (see tbb-architecture.md §8). Both rate-limited
+    # + size-capped below; everything else public stays read-only.
+    _PUBLIC_ALLOWED_PREFIXES = ("/ingest/", "/enroll")
 
     @app.middleware("http")
     async def restrict_public(request: Request, call_next):
@@ -4832,6 +4834,32 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(429, "rate limit exceeded")
         try:
             return ingest_batch(db, device, body)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
+    _enroll_hits: dict[str, list[float]] = {}
+    _ENROLL_RATE_PER_MIN = 10
+
+    def _enroll_rate_ok(client_ip: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in _enroll_hits.get(client_ip, []) if now - t < 60.0]
+        if len(hits) >= _ENROLL_RATE_PER_MIN:
+            _enroll_hits[client_ip] = hits
+            return False
+        hits.append(now)
+        _enroll_hits[client_ip] = hits
+        return True
+
+    @app.post("/enroll")
+    def enroll_route(request: Request, body: EnrollBody) -> dict:
+        # Rate-limit by client IP (no unit identity yet) to blunt code guessing.
+        client_ip = request.headers.get("cf-connecting-ip") or (
+            request.client.host if request.client else "?"
+        )
+        if not _enroll_rate_ok(client_ip):
+            raise HTTPException(429, "rate limit exceeded")
+        try:
+            return enroll(db, body)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 

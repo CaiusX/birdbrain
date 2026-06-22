@@ -1,6 +1,7 @@
 from africam.storage.db import Database
 from africam.storage.models import (
     Base,
+    ClaimCodeRow,
     DailyBriefRow,
     DetectionRow,
     DeviceRow,
@@ -17,6 +18,7 @@ from africam.storage.models import (
 
 __all__ = [
     "Base",
+    "ClaimCodeRow",
     "DailyBriefRow",
     "Database",
     "DetectionRow",

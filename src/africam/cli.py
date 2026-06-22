@@ -451,6 +451,49 @@ def tbb_device_add(
     )
 
 
+@app.command(name="tbb-claim-new")
+def tbb_claim_new(
+    note: Annotated[
+        str | None, typer.Option("--note", help="Reminder of which box/owner this code is for.")
+    ] = None,
+) -> None:
+    """Generate a one-time enrollment claim code on CENTRAL (print it on the box).
+
+    A unit redeems it from its /setup page; central then issues the unit's id +
+    token automatically. Run on the central server.
+    """
+    import secrets
+
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    # Grouped 10 hex chars — short enough to type, long enough vs the /enroll
+    # rate limit. Uppercased for legibility on a printed label.
+    raw = secrets.token_hex(5).upper()
+    code = f"{raw[:5]}-{raw[5:]}"
+    db.create_claim_code(code, note=note)
+    console.print("Claim code (print on the unit's box):")
+    console.print(f"  [green]{code}[/green]")
+    if note:
+        console.print(f"  note: {note}")
+
+
+@app.command(name="tbb-device-revoke")
+def tbb_device_revoke(
+    unit_id: Annotated[str, typer.Option("--unit-id", help="Unit to cut off from sync.")],
+    enable: Annotated[
+        bool, typer.Option("--enable/--revoke", help="Re-enable instead of revoking.")
+    ] = False,
+) -> None:
+    """Revoke (or re-enable) a unit's sync on CENTRAL. Revoking makes its token
+    stop authorising ingest immediately; the unit's existing data is kept."""
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    if not db.set_device_sync(unit_id, enable):
+        console.print(f"[red]No such device: {unit_id}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"{'Enabled' if enable else 'Revoked'} sync for [bold]{unit_id}[/bold].")
+
+
 @app.command(name="seed-runtime")
 def seed_runtime(
     sources_file: Annotated[

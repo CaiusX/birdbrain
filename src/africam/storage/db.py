@@ -13,6 +13,7 @@ from africam.detector.birdnet import Detection
 from africam.storage.models import (
     AnomalyEventRow,
     Base,
+    ClaimCodeRow,
     DailyBriefRow,
     DetectionRow,
     DeviceRow,
@@ -208,6 +209,44 @@ class Database:
     def list_devices(self) -> list[DeviceRow]:
         with self._Session() as s:
             return list(s.scalars(select(DeviceRow).order_by(DeviceRow.unit_id)))
+
+    def set_device_sync(self, unit_id: str, enabled: bool) -> bool:
+        """Enable/revoke a device's sync. Revoking (enabled=False) makes its
+        token stop authorising ingest without deleting its history. Returns
+        False if the device doesn't exist."""
+        with self._Session() as s, s.begin():
+            row = s.get(DeviceRow, unit_id)
+            if row is None:
+                return False
+            row.sync_enabled = enabled
+        return True
+
+    # --- Claim codes (one-time enrollment; Phase 3) ---
+
+    def create_claim_code(self, code: str, note: str | None = None) -> ClaimCodeRow:
+        with self._Session() as s, s.begin():
+            row = ClaimCodeRow(code=code, created_at=datetime.now(UTC), note=note)
+            s.add(row)
+        return row
+
+    def get_claim_code(self, code: str) -> ClaimCodeRow | None:
+        with self._Session() as s:
+            return s.get(ClaimCodeRow, code)
+
+    def redeem_claim_code(self, code: str, unit_id: str) -> bool:
+        """Atomically mark an UNCLAIMED code as claimed by ``unit_id``. Returns
+        False if the code is missing or already claimed — the single-use guard."""
+        with self._Session() as s, s.begin():
+            row = s.get(ClaimCodeRow, code)
+            if row is None or row.claimed_at is not None:
+                return False
+            row.claimed_at = datetime.now(UTC)
+            row.claimed_unit_id = unit_id
+        return True
+
+    def list_claim_codes(self) -> list[ClaimCodeRow]:
+        with self._Session() as s:
+            return list(s.scalars(select(ClaimCodeRow).order_by(ClaimCodeRow.created_at)))
 
     def register_tbb_source(
         self,

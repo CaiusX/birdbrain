@@ -91,6 +91,20 @@ class DeviceRow(Base):
     public: Mapped[bool] = mapped_column(default=False)
 
 
+class ClaimCodeRow(Base):
+    """A one-time enrollment code (Phase 3). Generated on central and printed on
+    a unit's box; the unit redeems it via POST /enroll to be issued its unit_id
+    and device token. Single-use: ``claimed_at`` is stamped on redemption."""
+
+    __tablename__ = "claim_codes"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_unit_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+
 class SpeciesNoteRow(Base):
     """A short curated comment about a species — displayed in the audition
     modal whenever a detection of that species is opened. Used to flag known
