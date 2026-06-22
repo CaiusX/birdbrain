@@ -213,9 +213,15 @@ minimal LAN UI — with no internet.
 
 ### Phase 2 — decision record (2026-06-22)
 
-Implemented and unit-tested in the sandbox (31 tests green; central app imports
-and its lint counts unchanged from baseline). **On-metal acceptance pending** —
-needs the bench unit POSTing to a central instance.
+Implemented and unit-tested in the sandbox (34 tests green; central app imports
+and its lint counts unchanged from baseline). **Metal acceptance VERIFIED
+(2026-06-22):** the bench unit synced real detections (Hadada Ibis, Black-
+crowned Night Heron, …) Pi → a local central instance within a minute; the unit
+auto-registered as a `tbb-bench` site with a fresh `last_seen`, and resends were
+idempotent (no dupes). The mic-test on `/setup` (record-and-play, 409 when the
+pipeline holds the device) was also confirmed on metal. Production `birdbrain.
+co.za` ingest is untested — same flow, deploy + `tbb-device-add` + point the
+unit at the prod URL.
 
 - **Idempotency:** central upserts on the natural key `(source_name,
   started_at, scientific_name)` — no `client_id` *column* was added to central.
