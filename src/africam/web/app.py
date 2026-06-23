@@ -257,6 +257,14 @@ SOURCE_COLORS: dict[str, str] = {
     "Kalahari":            "#92400e",  # Kalahari red dune sand  — amber-800
     "Namib Desert":        "#fdba74",  # Namib pale dune sand    — orange-300
     "Okaukuejo":           "#d6d3d1",  # Etosha white salt pan   — stone-300
+    # Majete (Malawi, lower Shire) — six cams share one map point, so give each
+    # a well-separated hue so they're tellable apart when the dot fans out.
+    "Majete Cam 1":          "#14b8a6",  # teal-500
+    "Majete Cam 2":          "#8b5cf6",  # violet-500
+    "Majete Cam 3":          "#ec4899",  # pink-500
+    "Majete Cam 4":          "#f59e0b",  # amber-500
+    "Majete Cam 5":          "#0ea5e9",  # sky-500
+    "Majete Thawale Lodge":  "#f43f5e",  # rose-500
 }
 
 
@@ -278,6 +286,12 @@ SOURCE_BIOME: dict[str, str] = {
     "Kalahari":            "Kalahari red dune sand",
     "Namib Desert":        "Namib pale dune sand",
     "Okaukuejo":           "Etosha white salt pan",
+    "Majete Cam 1":          "Majete, Malawi — lower Shire miombo",
+    "Majete Cam 2":          "Majete, Malawi — lower Shire miombo",
+    "Majete Cam 3":          "Majete, Malawi — lower Shire miombo",
+    "Majete Cam 4":          "Majete, Malawi — lower Shire miombo",
+    "Majete Cam 5":          "Majete, Malawi — lower Shire miombo",
+    "Majete Thawale Lodge":  "Majete, Malawi — Thawale camp waterhole",
 }
 
 
