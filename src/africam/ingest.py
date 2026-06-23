@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field
 
@@ -43,7 +44,22 @@ class IngestBody(BaseModel):
 
     unit: str = Field(min_length=1, max_length=64)
     schema_version: int = Field(default=1, alias="schema")
+    # IANA tz the unit reports (e.g. "Africa/Johannesburg"). Used only to set a
+    # new unit's source timezone at first registration; None = leave at UTC.
+    timezone: str | None = Field(default=None, max_length=64)
     detections: list[IngestDetection] = Field(default_factory=list, max_length=2000)
+
+
+def _valid_tz(name: str | None) -> str:
+    """Coerce a unit-reported tz to a safe IANA name, falling back to UTC so a
+    garbage value can never poison the stored source timezone."""
+    if not name:
+        return "UTC"
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return "UTC"
+    return name
 
 
 def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
@@ -76,7 +92,9 @@ def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
     # species/brief views pick it up, and stamp liveness — a unit that stops
     # POSTing then shows offline via the same stale-heartbeat logic as a stalled
     # YouTube source.
-    db.register_tbb_source(device.unit_id, lat=device.lat, lon=device.lon)
+    db.register_tbb_source(
+        device.unit_id, lat=device.lat, lon=device.lon, timezone=_valid_tz(body.timezone)
+    )
     db.worker_heartbeat(device.unit_id)
     db.device_touch_seen(device.unit_id)
     log.info(

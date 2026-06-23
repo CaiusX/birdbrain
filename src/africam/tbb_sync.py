@@ -64,11 +64,17 @@ def fetch_batch(db: Database, since_id: int, limit: int) -> list[DetectionRow]:
         )
 
 
-def detections_payload(unit_id: str, rows: list[DetectionRow]) -> dict:
-    """Build the /ingest/detections body (see tbb-architecture.md §6.2)."""
+def detections_payload(
+    unit_id: str, rows: list[DetectionRow], timezone: str | None = None
+) -> dict:
+    """Build the /ingest/detections body (see tbb-architecture.md §6.2). The
+    unit's timezone rides along so central can register a new unit's source in
+    its real local tz instead of defaulting to UTC (it's create-only on central,
+    so this only sets the tz at first registration)."""
     return {
         "unit": unit_id,
         "schema": 1,
+        "timezone": timezone,
         "detections": [
             {
                 # Stable across resends → idempotency key alongside the natural key.
@@ -114,7 +120,7 @@ def sync_once(db: Database, cfg: AppConfig, state: SyncState) -> int:
         rows = fetch_batch(db, state.last_synced_id, cfg.tbb_sync_batch_size)
         if not rows:
             break
-        payload = detections_payload(cfg.tbb_unit_id, rows)
+        payload = detections_payload(cfg.tbb_unit_id, rows, cfg.tbb_timezone)
         if not post_batch(cfg.tbb_central_url, cfg.tbb_device_token, payload):
             break  # offline / rejected — don't advance; retry next tick
         state.last_synced_id = rows[-1].id  # rows are id-ascending
@@ -146,7 +152,7 @@ def _sync_loop(db: Database, cfg: AppConfig, stop_event: threading.Event) -> Non
                 post_batch(
                     cfg.tbb_central_url,
                     cfg.tbb_device_token,
-                    detections_payload(cfg.tbb_unit_id, []),
+                    detections_payload(cfg.tbb_unit_id, [], cfg.tbb_timezone),
                 )
         except Exception:
             log.exception("tbb_sync.tick_failed")
