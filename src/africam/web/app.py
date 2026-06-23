@@ -581,7 +581,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     # TBB ingest + enroll are mutating routes allowed over the public tunnel for
     # anonymous units — ingest enforces per-unit bearer-token auth, enroll a
     # one-time claim code (tbb-architecture.md §8). Both rate-limited + capped.
-    _PUBLIC_ALLOWED_PREFIXES = ("/ingest/", "/enroll")
+    _PUBLIC_ALLOWED_PREFIXES = ("/ingest/", "/enroll", "/api/track")
 
     @app.middleware("http")
     async def no_store_html(request: Request, call_next):
@@ -3405,10 +3405,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request) -> HTMLResponse:
+        # Opportunistic retention prune (operator views /admin only now and then).
+        db.prune_pageviews(90)
         return TEMPLATES.TemplateResponse(
             request,
             "admin.html",
-            {**_admin_view(), **_species_cutoffs_ctx(), **_health_view()},
+            {
+                **_admin_view(), **_species_cutoffs_ctx(), **_health_view(),
+                "visitors": db.pageview_stats(),
+            },
         )
 
     @app.get("/admin/replays", response_class=HTMLResponse)
@@ -5918,6 +5923,48 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             headers={"Cache-Control": "no-store"},
         )
 
+    def _unit_base_url(source: str) -> str | None:
+        """Base http://host:port for a push-fed unit, derived from its configured
+        live-audio URL (the unit serves /clips and /spectrograms on the same
+        port). None if the source has no live-audio URL set."""
+        u = db.get_setting(f"live_audio_url:{source}")
+        if not u:
+            return None
+        p = urllib.parse.urlsplit(u)
+        return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else None
+
+    def _materialize_external_clip(detection_id: int) -> Path | None:
+        """For a synced unit (TBB) detection with no local clip, fetch the clip
+        from the unit on demand, cache it under clips_root, and set clip_path so
+        the normal clip/spectrogram machinery then works. Returns the local Path,
+        or None if there's no client_id, the unit is unreachable, or the clip was
+        pruned. Clips are only pulled when a detection is actually auditioned."""
+        with db.session() as s:
+            row = s.get(DetectionRow, detection_id)
+            if row is None or row.clip_path is not None or not row.client_id:
+                return None
+            source, client_id = row.source_name, row.client_id
+        base = _unit_base_url(source)
+        if not base:
+            return None
+        local_id = client_id.rsplit(":", 1)[-1]
+        dest_dir = clips_root / "_units" / re.sub(r"[^A-Za-z0-9_.-]", "_", source)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{detection_id}.ogg"
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                 "-i", f"{base}/clips/{local_id}",
+                 "-c:a", "libvorbis", "-q:a", "4", str(dest)],
+                check=True, capture_output=True, timeout=20,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        if not dest.is_file() or dest.stat().st_size == 0:
+            return None
+        db.set_clip_path(detection_id, str(dest))
+        return dest
+
     @app.get("/spectrograms/{detection_id}.png")
     def spectrogram(
         detection_id: int,
@@ -5925,16 +5972,24 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     ) -> Response:
         """PNG spectrogram of a detection's clip. Generated lazily on first
         request via ffmpeg's showspectrumpic filter and cached next to the
-        WAV. ``size=small`` is used inline; ``large`` for the popout view."""
+        WAV. ``size=small`` is used inline; ``large`` for the popout view.
+        For push-fed (TBB) detections the clip is fetched from the unit on the
+        first request, then this works exactly as for a local clip."""
         if size not in SPEC_SIZES:
             raise HTTPException(400, "size must be 'small' or 'large'")
         with db.session() as s:
             row = s.get(DetectionRow, detection_id)
-            if row is None or row.clip_path is None:
+            if row is None:
                 raise HTTPException(404, "no clip for this detection")
-            wav = Path(row.clip_path).resolve()
+            clip_path = row.clip_path
             note = s.get(SpeciesNoteRow, row.scientific_name)
             tag = note.tag if note else None
+        if clip_path is None:
+            materialized = _materialize_external_clip(detection_id)
+            if materialized is None:
+                raise HTTPException(404, "no clip for this detection")
+            clip_path = str(materialized)
+        wav = Path(clip_path).resolve()
         try:
             wav.relative_to(clips_root)
         except ValueError as e:
@@ -5975,9 +6030,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         """
         with db.session() as s:
             row = s.get(DetectionRow, detection_id)
-            if row is None or row.clip_path is None:
+            if row is None:
                 raise HTTPException(status_code=404, detail="No clip for this detection")
-            path = Path(row.clip_path).resolve()
+            clip_path = row.clip_path
+        if clip_path is None:
+            materialized = _materialize_external_clip(detection_id)
+            if materialized is None:
+                raise HTTPException(status_code=404, detail="No clip for this detection")
+            clip_path = str(materialized)
+        path = Path(clip_path).resolve()
         try:
             path.relative_to(clips_root)
         except ValueError as e:
@@ -6055,6 +6116,59 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         hits.append(now)
         _enroll_hits[client_ip] = hits
         return True
+
+    # --- Visitor analytics: anonymous client beacon (path + dwell on tab-hide) ---
+    _TRACK_MAX_BODY = 4_000  # bytes — a tiny JSON beacon
+    _TRACK_RATE_PER_MIN = 120
+    _track_hits: dict[str, list[float]] = {}
+    # Paths that are operator/plumbing, not visitor-facing content — never logged.
+    _TRACK_SKIP_PREFIXES = (
+        "/admin", "/api/", "/auth/", "/partials/", "/static/",
+        "/clips/", "/spectrograms/", "/login", "/signup",
+    )
+
+    def _track_rate_ok(ip: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in _track_hits.get(ip, []) if now - t < 60.0]
+        if len(hits) >= _TRACK_RATE_PER_MIN:
+            _track_hits[ip] = hits
+            return False
+        hits.append(now)
+        _track_hits[ip] = hits
+        return True
+
+    @app.post("/api/track")
+    async def track(request: Request) -> Response:
+        """Record one anonymous public page view from the client beacon. Always
+        returns 204 (never errors the beacon); silently drops anything invalid,
+        non-public, oversized, or rate-limited. Only public (Cloudflare) traffic
+        is counted, so the operator's own LAN browsing isn't logged."""
+        # Only count real external visitors (LAN/operator views carry no cf header).
+        ip = request.headers.get("cf-connecting-ip")
+        if ip is None:
+            return Response(status_code=204)
+        clen = request.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > _TRACK_MAX_BODY:
+            return Response(status_code=204)
+        if not _track_rate_ok(ip):
+            return Response(status_code=204)
+        try:
+            data = await request.json()
+        except Exception:
+            return Response(status_code=204)
+        path = str(data.get("path") or "")[:256]
+        visitor = str(data.get("visitor") or "")[:64]
+        if not path.startswith("/") or not visitor or path.startswith(_TRACK_SKIP_PREFIXES):
+            return Response(status_code=204)
+        referrer = str(data.get("referrer"))[:256] if data.get("referrer") else None
+        try:
+            dwell_ms: int | None = int(data.get("dwell_ms"))
+            if dwell_ms < 0 or dwell_ms > 3_600_000:
+                dwell_ms = None
+        except (TypeError, ValueError):
+            dwell_ms = None
+        db.add_pageview(visitor=visitor, path=path, referrer=referrer, dwell_ms=dwell_ms)
+        return Response(status_code=204)
 
     @app.post("/enroll")
     def enroll_route(request: Request, body: EnrollBody) -> dict:

@@ -85,6 +85,7 @@ def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
             confidence=d.confidence,
             latitude=device.lat,
             longitude=device.lon,
+            client_id=d.client_id,
         ):
             inserted += 1
 

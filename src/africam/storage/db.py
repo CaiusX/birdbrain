@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import Integer, create_engine, func, or_, select
+from sqlalchemy import Integer, create_engine, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
@@ -25,6 +25,7 @@ from africam.storage.models import (
     PlaybackStateRow,
     DetectionRow,
     DeviceRow,
+    PageViewRow,
     RuntimeSourceRow,
     UserRow,
     SiteNoteRow,
@@ -110,6 +111,7 @@ class Database:
             ("detections", "suggested_species", "TEXT"),
             ("detections", "sound_rating", "INTEGER"),
             ("detections", "audio_hash", "TEXT"),
+            ("detections", "client_id", "TEXT"),
             ("species_notes", "conservation_status", "TEXT"),
             ("species_notes", "min_confidence", "REAL"),
             ("species_notes", "generated_at", "TIMESTAMP"),
@@ -322,13 +324,16 @@ class Database:
         site: str | None = None,
         latitude: float | None = None,
         longitude: float | None = None,
+        client_id: str | None = None,
     ) -> bool:
         """Insert one detection unless an identical-key row already exists.
 
         Idempotency key is the natural ``(source_name, started_at,
         scientific_name)`` tuple — so retried/overlapping sync batches never
         double-insert. Returns True iff a new row was created. Used by the TBB
-        ingest endpoint; the local pipeline uses :meth:`insert_detections`."""
+        ingest endpoint; the local pipeline uses :meth:`insert_detections`.
+        ``client_id`` is the unit's own detection id, kept so central can fetch
+        the clip from the unit on demand (clips stay on the unit)."""
         with self._Session() as s, s.begin():
             exists = s.scalar(
                 select(DetectionRow.id)
@@ -346,12 +351,89 @@ class Database:
                 scientific_name=scientific_name,
                 common_name=common_name,
                 confidence=confidence,
-                clip_path=None,  # clips stay on the unit in Phase 2 (metadata-only)
+                clip_path=None,  # clips stay on the unit; fetched on demand via client_id
                 site=site,
                 latitude=latitude,
                 longitude=longitude,
+                client_id=client_id,
             ))
         return True
+
+    def set_clip_path(self, detection_id: int, clip_path: str) -> bool:
+        """Point a detection at a (newly materialized) local clip file. Used when
+        central fetches a unit's clip on demand and caches it. Returns False if
+        no such row."""
+        with self._Session() as s, s.begin():
+            row = s.get(DetectionRow, detection_id)
+            if row is None:
+                return False
+            row.clip_path = clip_path
+        return True
+
+    # --- Visitor analytics (client-beacon page views) ---
+
+    def add_pageview(
+        self, *, visitor: str, path: str,
+        referrer: str | None = None, dwell_ms: int | None = None,
+    ) -> None:
+        """Record one public page view (from the client-side tracking beacon)."""
+        with self._Session() as s, s.begin():
+            s.add(PageViewRow(
+                ts=datetime.now(UTC), visitor=visitor, path=path,
+                referrer=referrer, dwell_ms=dwell_ms,
+            ))
+
+    def prune_pageviews(self, days: int = 90) -> int:
+        """Delete page views older than ``days``. Returns rows removed."""
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        with self._Session() as s, s.begin():
+            res = s.execute(delete(PageViewRow).where(PageViewRow.ts < cutoff))
+        return res.rowcount or 0
+
+    def pageview_stats(self, *, top: int = 15) -> dict:
+        """Visitor analytics for the /admin panel: views + unique visitors over
+        24h / 7d, plus the most-viewed pages with unique counts and mean dwell."""
+        now = datetime.now(UTC)
+        since_24h = now - timedelta(days=1)
+        since_7d = now - timedelta(days=7)
+        with self._Session() as s:
+            def counts(since: datetime) -> tuple[int, int]:
+                v = s.scalar(
+                    select(func.count(PageViewRow.id)).where(PageViewRow.ts >= since)
+                ) or 0
+                u = s.scalar(
+                    select(func.count(func.distinct(PageViewRow.visitor)))
+                    .where(PageViewRow.ts >= since)
+                ) or 0
+                return int(v), int(u)
+            v24, u24 = counts(since_24h)
+            v7, u7 = counts(since_7d)
+            rows = s.execute(
+                select(
+                    PageViewRow.path,
+                    func.count(PageViewRow.id),
+                    func.count(func.distinct(PageViewRow.visitor)),
+                    func.avg(PageViewRow.dwell_ms),
+                )
+                .where(PageViewRow.ts >= since_7d)
+                .group_by(PageViewRow.path)
+                .order_by(func.count(PageViewRow.id).desc())
+                .limit(top)
+            ).all()
+        top_pages = [
+            {
+                "path": p,
+                "views": int(vv),
+                "uniques": int(uu),
+                "avg_dwell_s": round(av / 1000.0, 1) if av else None,
+            }
+            for p, vv, uu, av in rows
+        ]
+        return {
+            "views_24h": v24, "unique_24h": u24,
+            "views_7d": v7, "unique_7d": u7,
+            "top_pages": top_pages,
+        }
 
     # --- Devices (registered TBB capture units; Phase 2 sync) ---
 

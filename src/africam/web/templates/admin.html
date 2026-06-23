@@ -22,6 +22,47 @@
   </div>
 </section>
 
+{% if visitors is defined %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-2 flex-wrap">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">Visitors</h2>
+    <span class="text-[11px] text-zinc-600 normal-case">anonymous · public traffic only · 90-day retention</span>
+  </div>
+  <div class="px-5 py-4">
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+      <div><div class="text-2xl font-semibold text-zinc-100 tabular-nums">{{ visitors.unique_24h }}</div><div class="text-[11px] uppercase tracking-wider text-zinc-500">unique · 24h</div></div>
+      <div><div class="text-2xl font-semibold text-zinc-100 tabular-nums">{{ visitors.views_24h }}</div><div class="text-[11px] uppercase tracking-wider text-zinc-500">views · 24h</div></div>
+      <div><div class="text-2xl font-semibold text-zinc-100 tabular-nums">{{ visitors.unique_7d }}</div><div class="text-[11px] uppercase tracking-wider text-zinc-500">unique · 7d</div></div>
+      <div><div class="text-2xl font-semibold text-zinc-100 tabular-nums">{{ visitors.views_7d }}</div><div class="text-[11px] uppercase tracking-wider text-zinc-500">views · 7d</div></div>
+    </div>
+    {% if visitors.top_pages %}
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="text-left text-[11px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
+          <th class="py-1.5 font-normal">page (last 7 days)</th>
+          <th class="py-1.5 font-normal text-right">views</th>
+          <th class="py-1.5 font-normal text-right">unique</th>
+          <th class="py-1.5 font-normal text-right">avg dwell</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in visitors.top_pages %}
+        <tr class="border-b border-zinc-800/60">
+          <td class="py-1.5 max-w-xs truncate"><a href="{{ p.path }}" class="text-zinc-300 hover:text-emerald-300">{{ p.path }}</a></td>
+          <td class="py-1.5 text-right tabular-nums text-zinc-300">{{ p.views }}</td>
+          <td class="py-1.5 text-right tabular-nums text-zinc-400">{{ p.uniques }}</td>
+          <td class="py-1.5 text-right tabular-nums text-zinc-400">{{ (p.avg_dwell_s ~ 's') if p.avg_dwell_s else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-sm text-zinc-500">No visitor data yet — views appear as people browse the public site.</p>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
 {# Live audition popup — opened by a site's 🔊 button. Native <dialog> so ESC
    and the close button work for free; closing (any way) stops the stream. #}
 <dialog id="audition-panel"

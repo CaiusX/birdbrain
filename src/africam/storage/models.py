@@ -30,6 +30,10 @@ class DetectionRow(Base):
     common_name: Mapped[str] = mapped_column(String(256))
     confidence: Mapped[float] = mapped_column(Float)
     clip_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # For push-fed (TBB) detections: the unit's "<unit_id>:<local_id>" client id
+    # (the unit's own detection id), so central can fetch the clip/spectrogram
+    # from the unit on demand. NULL for locally-captured detections.
+    client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Site that the source camera was pointed at when this detection happened.
     # NULL for single-site sources or when the resolver couldn't determine it.
     site: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
@@ -539,3 +543,19 @@ class DetectionScoreRow(Base):
         # Fast per-user "what have I not scored yet" anti-join on /review.
         Index("ix_scores_user_detection", "user_id", "detection_id"),
     )
+
+
+class PageViewRow(Base):
+    """One page view from a public visitor, reported by a client-side beacon on
+    tab-hide. ``visitor`` is an anonymous random id the browser keeps in
+    localStorage (no IP/PII stored); ``dwell_ms`` is the visible time on the
+    page. Powers the /admin visitors panel; pruned to a retention window."""
+
+    __tablename__ = "page_views"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    visitor: Mapped[str] = mapped_column(String(64), index=True)
+    path: Mapped[str] = mapped_column(String(256), index=True)
+    referrer: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    dwell_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

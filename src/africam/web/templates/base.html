@@ -149,7 +149,7 @@
               class="hidden absolute right-0 mt-1 w-72 max-h-80 overflow-y-auto bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl z-50 py-1 text-sm"></ul>
         </div>
         <div class="hidden lg:flex text-xs text-zinc-500 items-center gap-1.5 flex-wrap justify-end">
-          <span>data via <a href="https://africam.com/" target="_blank" rel="noopener" class="hover:text-zinc-200">Africam</a> + <a href="https://explore.org/" target="_blank" rel="noopener" class="hover:text-zinc-200">explore.org</a></span>
+          <span>data via <a href="https://africam.com/" target="_blank" rel="noopener" class="hover:text-zinc-200">Africam</a> + <a href="https://explore.org/" target="_blank" rel="noopener" class="hover:text-zinc-200">explore.org</a> + <a href="https://pixcams.com/" target="_blank" rel="noopener" class="hover:text-zinc-200">PixCams</a></span>
           <span class="text-zinc-700">·</span>
           <span>detection by <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="hover:text-zinc-200">BirdNET</a></span>
           <span class="text-zinc-700">·</span>
@@ -365,6 +365,46 @@
       if (document.readyState !== 'loading') enhanceAll();
       else document.addEventListener('DOMContentLoaded', () => enhanceAll());
       document.addEventListener('htmx:afterSettle', (e) => enhanceAll(e.target));
+    })();
+  </script>
+
+  {# Anonymous visitor beacon: reports path + visible dwell on first tab-hide.
+     Visitor id is a random value kept in localStorage (no IP/PII). The server
+     only records public traffic and ignores admin/api/static paths. #}
+  <script>
+    (function () {
+      try {
+        var KEY = 'bb_vid';
+        var vid = localStorage.getItem(KEY);
+        if (!vid) {
+          vid = (window.crypto && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : String(Date.now()) + Math.random().toString(16).slice(2);
+          localStorage.setItem(KEY, vid);
+        }
+        var start = Date.now(), sent = false;
+        function send() {
+          if (sent) return; sent = true;
+          var payload = JSON.stringify({
+            visitor: vid,
+            path: location.pathname,
+            referrer: document.referrer || null,
+            dwell_ms: Date.now() - start,
+          });
+          if (navigator.sendBeacon) {
+            navigator.sendBeacon('/api/track', new Blob([payload], { type: 'application/json' }));
+          } else {
+            fetch('/api/track', {
+              method: 'POST', body: payload, keepalive: true,
+              headers: { 'Content-Type': 'application/json' },
+            }).catch(function () {});
+          }
+        }
+        document.addEventListener('visibilitychange', function () {
+          if (document.visibilityState === 'hidden') send();
+        });
+        window.addEventListener('pagehide', send);
+      } catch (e) { /* tracking is best-effort; never break the page */ }
     })();
   </script>
 </body>
