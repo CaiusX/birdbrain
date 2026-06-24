@@ -3773,7 +3773,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             if first is None:
                 return {"hours": 0, "metric": metric, "buckets": [], "total": 0,
-                        "peak": 1, "bucket_label": "—", "axis": [], "boundaries": []}
+                        "peak": 1, "bucket_label": "—", "axis": [], "boundaries": [],
+                        "times": []}
             since = first.replace(tzinfo=UTC) if first.tzinfo is None else first
         else:
             since = now - timedelta(hours=hours)
@@ -3820,12 +3821,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             (since + timedelta(seconds=window_s * i / 4)).astimezone(tz).strftime(afmt)
             for i in range(5)
         ]
-        # Bucket indices that begin a new local day (or month, for long windows)
-        # so the chart can draw a separator line there.
+        # Per-bucket start time (local, for the hover readout) and the indices
+        # that begin a new local day (or month, for long windows) for separators.
         boundaries: list[int] = []
+        times: list[str] = []
         prev_key = None
         for i in range(n):
             d = (since + timedelta(seconds=bucket_s * i)).astimezone(tz)
+            times.append(d.strftime(afmt))
             key = (d.year, d.month) if long else (d.year, d.month, d.day)
             if prev_key is not None and key != prev_key:
                 boundaries.append(i)
@@ -3841,6 +3844,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "bucket_label": label,
             "axis": axis,
             "boundaries": boundaries,
+            "times": times,
         }
 
     def _detections_context(

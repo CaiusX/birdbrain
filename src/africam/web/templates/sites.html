@@ -162,9 +162,10 @@
     <div class="flex gap-2">
       <span id="act-ylabel" class="text-[10px] text-zinc-400 uppercase tracking-wider self-center"
             style="writing-mode: vertical-rl; transform: rotate(180deg);"></span>
-      <div class="flex-1 min-w-0">
+      <div class="flex-1 min-w-0 relative">
         <div id="act-chart" class="flex items-end gap-px h-48 w-full bg-zinc-950/30 rounded p-1"></div>
         <div id="act-axis" class="flex justify-between w-full text-[11px] text-zinc-400 mt-1 px-1 tabular-nums"></div>
+        <div id="act-tip" class="hidden absolute z-10 pointer-events-none px-2 py-1 rounded bg-zinc-800 border border-zinc-600 text-xs text-zinc-100 tabular-nums shadow-lg whitespace-nowrap text-center leading-tight"></div>
       </div>
     </div>
     <div class="mt-2 text-xs text-zinc-500" id="act-summary"></div>
@@ -179,6 +180,7 @@
     const modal = document.getElementById('activity-modal');
     const sel = document.getElementById('act-window');
     let actSite = null;
+    let chartUnit = 'detections', chartUColor = 'text-emerald-300';  // for hover readout
 
     // --- Metric: client-side, shared by sparklines + modal, persisted ---
     let currentMetric = 'detections';
@@ -213,6 +215,7 @@
       const metric = currentMetric;
       const unit = metric === 'species' ? 'species' : 'detections';
       const uColor = metric === 'species' ? 'text-sky-300' : 'text-emerald-300';
+      chartUnit = unit; chartUColor = uColor;
       const yl = document.getElementById('act-ylabel');
       yl.textContent = unit;
       yl.className = 'text-[10px] uppercase tracking-wider self-center ' + uColor;
@@ -225,13 +228,19 @@
           const barColor = metric === 'species' ? 'bg-sky-400/70' : 'bg-emerald-500/70';
           const bounds = new Set(d.boundaries || []);   // local day/month starts
           (d.buckets || []).forEach((b, i) => {
+            if (bounds.has(i)) {
+              // Full-height divider line at each local-day (or month) boundary.
+              const div = document.createElement('div');
+              div.className = 'w-px self-stretch bg-zinc-500/70 shrink-0';
+              c.appendChild(div);
+            }
             const bar = document.createElement('div');
-            bar.className = 'flex-1 min-w-0 rounded-sm ' + barColor +
-              (bounds.has(i) ? ' border-l border-zinc-400/60' : '');
+            bar.className = 'flex-1 min-w-0 rounded-sm ' + barColor;
             const h = Math.round(b / peak * 100);
             bar.style.height = (h > 0 ? h : 1) + '%';
             bar.style.minHeight = '2px';
-            bar.title = b + ' ' + unit;
+            bar.dataset.v = b;
+            bar.dataset.t = (d.times || [])[i] || '';
             c.appendChild(bar);
           });
           document.getElementById('act-label').textContent = d.bucket_label || '';
@@ -255,6 +264,25 @@
       modal.showModal();
     }
     sel.addEventListener('change', loadActivity);
+
+    // Floating tooltip that follows the cursor over the chart bars.
+    const chartEl = document.getElementById('act-chart');
+    const tipWrap = chartEl.parentElement;     // the relative wrapper
+    const tip = document.getElementById('act-tip');
+    chartEl.addEventListener('mousemove', (e) => {
+      const bar = e.target.closest('[data-v]');
+      if (!bar) { tip.classList.add('hidden'); return; }
+      tip.innerHTML = `${(+bar.dataset.v).toLocaleString()} ` +
+        `<span class="${chartUColor}">${chartUnit}</span>` +
+        (bar.dataset.t ? `<br><span class="text-zinc-400">${bar.dataset.t}</span>` : '');
+      const r = tipWrap.getBoundingClientRect();
+      const x = Math.max(30, Math.min(e.clientX - r.left, r.width - 30));
+      tip.style.left = x + 'px';
+      tip.style.top = (e.clientY - r.top - 12) + 'px';
+      tip.style.transform = 'translate(-50%, -100%)';
+      tip.classList.remove('hidden');
+    });
+    chartEl.addEventListener('mouseleave', () => tip.classList.add('hidden'));
 
     // --- Row interactions: health detail toggle + sparkline → modal ---
     tbody.addEventListener('click', (e) => {
