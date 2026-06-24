@@ -33,6 +33,13 @@
                 class="absolute bottom-0 left-0 right-0 text-[9px] text-center text-zinc-300 bg-black/40 px-0.5"></span>
         </div>
       </a>
+      {# Recording location — where this clip was captured, so a reviewer
+         can orient at a glance (which reserve / country). A tiny locked
+         Leaflet map with a marker; Leaflet is lazy-loaded on first open. #}
+      <div id="spec-modal-loc" class="shrink-0 hidden" title="recording location">
+        <div id="spec-modal-map"
+             class="w-16 h-16 rounded bg-zinc-800 ring-1 ring-zinc-700 overflow-hidden"></div>
+      </div>
       <div class="min-w-0">
         <div class="flex items-center gap-1.5 flex-wrap">
           <a id="spec-modal-species" href="#"
@@ -43,6 +50,7 @@
                 title=""></span>
         </div>
         <div id="spec-modal-scientific" class="text-xs italic text-zinc-500 truncate"></div>
+        <div id="spec-modal-site" class="hidden text-xs font-medium text-emerald-300/90 mt-0.5 truncate"></div>
         <div id="spec-modal-meta" class="text-xs text-zinc-500 mt-0.5 truncate"></div>
       </div>
     </div>
@@ -404,6 +412,9 @@
   const xcDistSvg    = document.getElementById('spec-modal-xcdist-svg');
   const xcDistCount  = document.getElementById('spec-modal-xcdist-count');
   const statusEl     = document.getElementById('spec-modal-status');
+  const locTileEl    = document.getElementById('spec-modal-loc');
+  const locMapEl     = document.getElementById('spec-modal-map');
+  const siteEl       = document.getElementById('spec-modal-site');
 
   const IUCN_STYLE = {
     LC: ['bg-zinc-700/40 text-zinc-300 border-zinc-600',           'Least Concern'],
@@ -518,6 +529,7 @@
     locatorLegend.classList.add('hidden');
     loopRange = null;
     loadLocators(currentId);
+    loadSiteLocation(currentId);   // recording location: site label + mini-map
     // Pre-fill the species hint + search-↗ link so they're useful even when
     // the rolldown is collapsed.
     primeXcHeader(currentSci || btn.dataset.species || '');
@@ -602,11 +614,78 @@
 
   // GBIF whole-world basemap (EPSG:3857, z0, @2x) composited behind the
   // transparent occurrence-density tile so the thumbnail shows land + coast,
-  // not dots in a void. gbif-dark blends with the dark modal and keeps the
-  // warm classic.poly hexbins prominent. Same projection/extent as the
-  // density @2x tile, so it overlays pixel-for-pixel.
+  // not dots in a void. gbif-classic draws filled continents over light
+  // water, so the land reads clearly at thumbnail size (gbif-dark blended
+  // into the modal so well the coastlines vanished). Same projection/extent
+  // as the density @2x tile, so it overlays pixel-for-pixel.
   const RANGE_BASEMAP_TILE =
-    'https://tile.gbif.org/3857/omt/0/0/0@2x.png?style=gbif-dark';
+    'https://tile.gbif.org/3857/omt/0/0/0@2x.png?style=gbif-classic';
+
+  // Leaflet is only loaded on map pages (dashboard, site/species detail), not
+  // on the review queue where this modal also lives. Lazy-load it on first
+  // need so the location map works everywhere without forcing the library
+  // onto pages that never open the modal. Resolves to window.L.
+  let _leafletPromise = null;
+  function ensureLeaflet() {
+    if (window.L) return Promise.resolve(window.L);
+    if (_leafletPromise) return _leafletPromise;
+    _leafletPromise = new Promise((resolve, reject) => {
+      const css = document.createElement('link');
+      css.rel = 'stylesheet';
+      css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(css);
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      s.onload = () => resolve(window.L);
+      s.onerror = () => { _leafletPromise = null; reject(new Error('leaflet failed')); };
+      document.head.appendChild(s);
+    });
+    return _leafletPromise;
+  }
+
+  // One reused map instance — re-centred per detection. Created lazily inside
+  // the (initially display:none) dialog, so invalidateSize() after each open
+  // fixes the tile layout once the container actually has a size.
+  let locMap = null, locMarker = null;
+  async function loadSiteLocation(detectionId) {
+    siteEl.classList.add('hidden');
+    siteEl.textContent = '';
+    locTileEl.classList.add('hidden');
+    if (detectionId == null) return;
+    try {
+      const resp = await fetch(`/api/detections/${encodeURIComponent(detectionId)}/site`);
+      if (!resp.ok) return;
+      const d = await resp.json();
+      if (String(detectionId) !== String(currentId)) return;  // modal moved on
+      if (d.site) {
+        siteEl.textContent = '📍 ' + d.site;
+        siteEl.classList.remove('hidden');
+      }
+      if (typeof d.lat !== 'number' || typeof d.lon !== 'number') return;
+      locTileEl.classList.remove('hidden');
+      const L = await ensureLeaflet();
+      if (String(detectionId) !== String(currentId)) return;
+      if (!locMap) {
+        locMap = L.map(locMapEl, {
+          zoomControl: false, attributionControl: false,
+          dragging: false, scrollWheelZoom: false, doubleClickZoom: false,
+          boxZoom: false, keyboard: false, touchZoom: false, tap: false,
+        });
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 12,
+        }).addTo(locMap);
+        locMarker = L.circleMarker([0, 0], {
+          radius: 5, color: '#ffffff', weight: 2,
+          fillColor: '#34d399', fillOpacity: 1,
+        }).addTo(locMap);
+      }
+      locMarker.setLatLng([d.lat, d.lon]);
+      locMap.setView([d.lat, d.lon], 4);
+      // Dialog had zero layout size when the map was built → recompute now
+      // that it's on screen, else only the top-left tile paints.
+      setTimeout(() => { try { locMap.invalidateSize(); } catch (_) {} }, 30);
+    } catch (_) { /* silent */ }
+  }
 
   async function loadSpeciesImage(sci, common) {
     thumbLink.classList.add('hidden');

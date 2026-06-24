@@ -5012,6 +5012,26 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
         )
 
+    @app.get("/api/detections/{detection_id}/site")
+    def detection_site(detection_id: int) -> JSONResponse:
+        """Where this detection was recorded: the site name + coordinates,
+        so the review modal can show a small location map and a clear site
+        label. Coords are stamped on every detection row; ``site`` is unused
+        in this single-site-per-source deployment, so the source name *is*
+        the site label."""
+        with db.session() as s:
+            row = s.get(DetectionRow, detection_id)
+            if row is None:
+                raise HTTPException(404, "no such detection")
+            return JSONResponse(
+                {
+                    "site": row.site or row.source_name,
+                    "source_name": row.source_name,
+                    "lat": row.latitude,
+                    "lon": row.longitude,
+                }
+            )
+
     SPEC_SIZES = {
         "small": "240x60",   # inline conf-bar background
         "large": "900x220",  # popout modal

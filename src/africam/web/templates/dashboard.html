@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import brief_body, spectrogram_clip, brand_lockup %}
+{% from "_macros.html" import brief_body, spectrogram_clip, brand_lockup, site_link %}
 {% block title %}BirdBrain · dashboard{% endblock %}
 
 {% block head_extra %}
@@ -112,11 +112,13 @@
               {% set _tz = source_tz.get(sp.source, 'UTC') %}
               {% set _meta = sp.source ~ ' · ' ~ (sp.started_at | localtime(_tz, "%m-%d %H:%M")) ~ ' ' ~ (_tz | tz_abbr) %}
               <li class="flex items-center gap-2 text-sm">
-                <a href="/species/{{ sp.scientific | urlencode }}"
-                   class="flex-1 min-w-0 text-zinc-200 hover:text-emerald-300 truncate" title="{{ sp.scientific }}">{{ sp.common }}</a>
+                <span class="flex-1 min-w-0 truncate">
+                  <a href="/species/{{ sp.scientific | urlencode }}"
+                     class="text-zinc-200 hover:text-emerald-300" title="{{ sp.scientific }}">{{ sp.common }}</a>
+                  {{ site_link(sp.source, cls="text-xs ml-1.5") }}
+                </span>
                 {{ spectrogram_clip(sp.id, confidence=sp.confidence, common=sp.common,
                      scientific=sp.scientific, meta=_meta, cls="shrink-0 w-20") }}
-                <span class="text-xs text-zinc-500 tabular-nums shrink-0 w-12 text-right">{{ ago(sp.age_s) }} ago</span>
               </li>
             {% endfor %}
           </ul>
