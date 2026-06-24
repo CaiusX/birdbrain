@@ -238,36 +238,43 @@
   <dialog id="brand-modal"
           class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0
                  w-full max-w-md backdrop:bg-black/70 backdrop:backdrop-blur-sm">
-    <div class="px-6 py-6 relative">
+    <div class="px-6 pt-6 pb-5 relative">
       <button type="button"
               onclick="document.getElementById('brand-modal').close()"
               aria-label="Close"
               class="absolute top-3 right-3 text-zinc-500 hover:text-zinc-100
                      text-xl leading-none px-2 py-0.5">×</button>
 
-      <div class="flex justify-center mb-4">
+      <div class="flex flex-col items-center text-center">
         <img src="/static/birdbrain-logo.svg" alt="BirdBrain logo"
-             class="w-full max-w-[300px] h-auto">
+             class="w-full max-w-[220px] h-auto">
+        <h2 class="text-2xl font-semibold tracking-tight mt-2">{{ brand_word() }}</h2>
+        <p class="text-[11px] uppercase tracking-[0.18em] text-zinc-500 mt-1.5">
+          birdsong ID from live African wildlife streams
+        </p>
       </div>
 
-      <h2 class="text-2xl font-semibold tracking-tight text-center mb-3">
-        {{ brand_word() }}
-      </h2>
-
-      <p class="text-sm text-zinc-300 leading-relaxed text-center mx-auto max-w-sm">
-        Real-time bird species recognition from live African wildlife streams.
-        Listens to <a href="https://africam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">Africam</a>,
+      <p class="text-sm text-zinc-300 leading-relaxed mt-4">
+        BirdBrain listens to the audio of live wildlife cams &mdash;
+        <a href="https://africam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">Africam</a>,
         <a href="https://explore.org/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">explore.org</a>,
-        and other live wildlife channels, runs
+        <a href="https://namibiacam.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">NamibiaCam</a>,
+        <a href="https://pixcams.com/" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">PixCams</a> (Majete, Malawi)
+        &mdash; plus a garden mic in Johannesburg, and runs
         <a href="https://github.com/kahst/BirdNET-Analyzer" target="_blank" rel="noopener" class="text-emerald-300 hover:text-emerald-200">BirdNET</a>
-        on rolling 3-second windows, and surfaces what it hears here. Hosted on
-        a Raspberry Pi 5.
+        on rolling 3-second windows to name the birds it hears. Everything here is
+        logged automatically, around the clock &mdash; no one is sitting and listening.
       </p>
 
-      <div class="mt-5 flex justify-center text-xs">
-        <a href="/about" class="text-emerald-300 hover:text-emerald-200">
-          full credits and citations →
-        </a>
+      <p class="text-xs text-zinc-500 text-center mt-3">
+        Built on prior work with
+        <a href="https://github.com/mcguirepr89/BirdNET-Pi" target="_blank" rel="noopener" class="text-zinc-400 hover:text-zinc-200 underline decoration-dotted underline-offset-2">BirdNET-Pi</a>,
+        running entirely on a Raspberry&nbsp;Pi&nbsp;5.
+      </p>
+
+      <div class="mt-5 pt-4 border-t border-zinc-800 flex items-center justify-center gap-5 text-xs">
+        <a href="/help" class="text-emerald-300 hover:text-emerald-200">how to read this site &rarr;</a>
+        <a href="/about" class="text-emerald-300 hover:text-emerald-200">credits &amp; citations &rarr;</a>
       </div>
     </div>
   </dialog>

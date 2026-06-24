@@ -55,8 +55,8 @@
 {# Link a species name to its detail page. `source` (optional) carries the
    origin page's active site filter through to the detail page so it opens
    pre-scoped to that site; omit it to land on the all-sites view. #}
-{% macro species_link(common, scientific, source=None, cls="") -%}
-<a href="/species/{{ scientific | urlencode }}{% if source %}?source={{ source | urlencode }}{% endif %}"{% if cls %} class="{{ cls }}"{% endif %}>{{ common }}</a>
+{% macro species_link(common, scientific, source=None, cls="", title="") -%}
+<a href="/species/{{ scientific | urlencode }}{% if source %}?source={{ source | urlencode }}{% endif %}"{% if cls %} class="{{ cls }}"{% endif %}{% if title %} title="{{ title }}"{% endif %}>{{ common }}</a>
 {%- endmacro %}
 
 {# Link a site name to its site-detail page. Use this anywhere a site name

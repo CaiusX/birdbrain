@@ -32,6 +32,17 @@
   </button>
 {%- endmacro %}
 
+{# Humanised duration. Defined at template top-level so both the header
+   health tooltip and the uptime panel at the bottom can use it. #}
+{%- macro dur(s) -%}
+  {%- if s is none or s == 0 -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h {{ ((s % 3600) // 60)|int }}m
+  {%- else -%}{{ (s // 86400)|int }}d {{ ((s % 86400) // 3600)|int }}h
+  {%- endif -%}
+{%- endmacro -%}
+
 {% block content %}
 <a href="/" class="text-xs text-zinc-500 hover:text-zinc-200">← dashboard</a>
 
@@ -39,10 +50,72 @@
        Leaflet map on the right with a dot at this site's coords. The
        uptime/downtime panel now lives at the very bottom of the page (it's
        operational metadata, not the first thing a visitor needs). ---- #}
+{# Health chip palette + label, keyed by a status token. A live outage wins
+   over the heartbeat state. (Play-CDN Tailwind generates these classes from
+   the rendered DOM, so the literal strings here are all that's needed.) #}
+{% set hkey = 'down' if downtime.current_outage_s is not none
+              else (health.status if health else 'never') %}
+{% set HEALTH = {
+  'down':    ('text-rose-300',    'bg-rose-500/10',    'border-rose-500/40',   '● down'),
+  'running': ('text-emerald-300', 'bg-emerald-500/10', 'border-emerald-500/40','● live'),
+  'backoff': ('text-amber-300',   'bg-amber-500/10',   'border-amber-500/40',  '◐ reconnecting'),
+  'stale':   ('text-amber-300',   'bg-amber-500/10',   'border-amber-500/40',  '● stale'),
+  'stopped': ('text-zinc-400',    'bg-zinc-700/20',    'border-zinc-700',      '○ stopped'),
+  'never':   ('text-zinc-500',    'bg-zinc-800/40',    'border-zinc-700',      '○ no signal'),
+} %}
+{% set hc = HEALTH.get(hkey, HEALTH['never']) %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-3">
-  <div class="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-4 px-5 py-4 items-stretch">
-    <div class="min-w-0 flex flex-col justify-center">
-      <h2 class="text-2xl font-semibold text-zinc-100">{{ name }}</h2>
+  <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_auto] gap-x-5 gap-y-4 px-5 py-4 items-start">
+    {# ---- Identity column: coloured name + health chip, meta, time/weather ---- #}
+    <div class="min-w-0">
+      <div class="flex items-center gap-2.5 flex-wrap">
+        <h2 class="text-2xl font-semibold" style="color: {{ source_color }};">{{ name }}</h2>
+        {# Health chip — hover for the full operational picture (liveness,
+           downtime, and audio quality, which used to be its own panel). #}
+        <div class="relative group">
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border cursor-help
+                       {{ hc[0] }} {{ hc[1] }} {{ hc[2] }}"
+                tabindex="0">{{ hc[3] }}</span>
+          <div class="hidden group-hover:block group-focus-within:block absolute left-0 top-full mt-1.5 z-30 w-72
+                      rounded-lg border border-zinc-700 bg-zinc-950/95 shadow-xl shadow-black/50 p-3 text-xs">
+            <div class="font-medium {{ hc[0] }} mb-1.5">{{ hc[3] }}</div>
+            <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-zinc-400">
+              {% if downtime.current_outage_s is not none %}
+                <dt class="text-zinc-500">down for</dt><dd class="text-rose-300 tabular-nums">{{ dur(downtime.current_outage_s) }}</dd>
+                {% if downtime.current_reason %}
+                  <dt class="text-zinc-500">reason</dt><dd class="text-rose-400/90 break-words">{{ downtime.current_reason }}</dd>
+                {% endif %}
+              {% elif health and health.since_s is not none %}
+                <dt class="text-zinc-500">heartbeat</dt><dd class="tabular-nums">{{ dur(health.since_s) }} ago</dd>
+              {% endif %}
+              <dt class="text-zinc-500">downtime 24h</dt>
+              <dd class="tabular-nums">{% if downtime.down_24h_s %}{{ dur(downtime.down_24h_s) }}{% else %}none{% endif %}</dd>
+              <dt class="text-zinc-500">downtime 7d</dt>
+              <dd class="tabular-nums">{% if downtime.down_7d_s %}{{ dur(downtime.down_7d_s) }}{% else %}none{% endif %}</dd>
+              {% if audio_quality %}
+                {% set aqc = 'text-zinc-400' if audio_quality.stale
+                     else ('text-emerald-300' if audio_quality.score >= 70
+                     else ('text-amber-300' if audio_quality.score >= 40 else 'text-rose-300')) %}
+                <dt class="col-span-2 border-t border-zinc-800 pt-1.5 mt-0.5 text-zinc-500 uppercase tracking-wider text-[10px]">audio quality</dt>
+                <dt class="text-zinc-500">score</dt>
+                <dd class="{{ aqc }} tabular-nums">{{ audio_quality.score }}/100 · {{ audio_quality.issue }}{{ ' · stale' if audio_quality.stale else '' }}</dd>
+                <dt class="text-zinc-500">level</dt><dd class="tabular-nums">{{ '%.1f'|format(audio_quality.level_dbfs) }} dBFS</dd>
+                <dt class="text-zinc-500">yield</dt><dd class="tabular-nums">{{ '%.1f'|format(audio_quality.det_per_h) }}/h</dd>
+                <dt class="text-zinc-500">freq range</dt>
+                <dd class="tabular-nums {{ 'text-amber-300' if audio_quality.band_limited else '' }}">
+                  {%- if audio_quality.band_hz_high -%}
+                    {{ audio_quality.band_hz_low }} Hz–{{ '%.1f'|format(audio_quality.band_hz_high / 1000) }} kHz{% if audio_quality.band_limited %} · band-limited{% endif %}
+                  {%- else -%}— (too quiet){%- endif -%}
+                </dd>
+              {% endif %}
+              {% if health and health.last_error %}
+                <dt class="col-span-2 border-t border-zinc-800 pt-1.5 mt-0.5 text-zinc-500">last error</dt>
+                <dd class="col-span-2 text-rose-400/90 break-words leading-relaxed">{{ health.last_error }}</dd>
+              {% endif %}
+            </dl>
+          </div>
+        </div>
+      </div>
       {% if src_cfg %}
         <div class="text-zinc-400 text-sm mt-1">
           {% if src_cfg.lat is not none and src_cfg.lon is not none %}
@@ -50,38 +123,50 @@
           {% endif %}
           {{ src_cfg.kind }} · timezone {{ tz_name }}
         </div>
-        {# Local "now" line: ticking clock in the site's tz + current weather
-           from Open-Meteo (cached 1h). The clock is initialised server-side
-           so it shows the right value pre-JS, and a tiny script re-renders
-           it every 30 s with Intl.DateTimeFormat so it stays correct on
-           long-open tabs without a page reload. #}
-        <div class="text-zinc-300 text-sm mt-2 flex items-center gap-2 flex-wrap">
-          <span class="tabular-nums font-medium"
-                data-local-clock="{{ tz_name }}">{{ local_now }}</span>
-          <span class="text-zinc-500 text-xs">{{ tz_abbr }}</span>
+        {# Local time + current weather, in a distinct boxed readout so it
+           reads as a discrete "conditions right now" panel rather than just
+           more grey meta text. The clock is server-rendered then re-ticked
+           every 30 s by the script below (Intl.DateTimeFormat) so long-open
+           tabs stay correct without a reload. #}
+        <div class="mt-3 inline-flex items-stretch rounded-lg border border-zinc-800 bg-zinc-950/40 divide-x divide-zinc-800">
+          <div class="px-3 py-2">
+            <div class="text-2xl font-semibold tabular-nums text-zinc-100 leading-none"
+                 data-local-clock="{{ tz_name }}">{{ local_now }}</div>
+            <div class="text-[10px] uppercase tracking-wider text-zinc-500 mt-1">{{ tz_abbr }} · local time</div>
+          </div>
           {% if current_weather %}
-            <span class="text-zinc-600">·</span>
-            <span class="text-zinc-300 inline-flex items-center gap-1.5">
-              <span class="text-zinc-200">{{ weather_icon(current_weather.icon, size=20) }}</span>
-              {% if current_weather.temp is not none %}
-                <span class="tabular-nums">{{ "%.0f"|format(current_weather.temp) }}°C</span>
-              {% endif %}
-              {% if current_weather.label %}
-                <span class="text-zinc-500">{{ current_weather.label }}</span>
-              {% endif %}
-            </span>
-            {% if current_weather.wind is not none %}
-              <span class="text-zinc-600">·</span>
-              <span class="text-zinc-500 text-xs tabular-nums">wind {{ "%.0f"|format(current_weather.wind) }} km/h</span>
-            {% endif %}
+            <div class="px-3 py-2 flex items-center gap-2">
+              <span class="text-zinc-200 shrink-0">{{ weather_icon(current_weather.icon, size=26) }}</span>
+              <div>
+                <div class="text-lg font-medium tabular-nums text-zinc-100 leading-none">
+                  {% if current_weather.temp is not none %}{{ "%.0f"|format(current_weather.temp) }}°C{% else %}—{% endif %}
+                </div>
+                <div class="text-[10px] text-zinc-500 mt-1">
+                  {% if current_weather.label %}{{ current_weather.label }}{% endif %}
+                  {%- if current_weather.wind is not none %} · {{ "%.0f"|format(current_weather.wind) }} km/h{% endif %}
+                </div>
+              </div>
+            </div>
           {% endif %}
         </div>
       {% endif %}
     </div>
+
+    {# ---- Brief summary column: a short read on what this site is, drawn
+           from the AI site narrative (the full text lives further down). ---- #}
+    <div class="min-w-0 lg:border-l border-zinc-800 lg:pl-5">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">about this site</div>
+      {% if note and note.note %}
+        <p class="text-sm text-zinc-300 leading-relaxed line-clamp-6">{{ note.note }}</p>
+        <a href="#site-narrative" class="text-xs text-emerald-300 hover:text-emerald-200 mt-1 inline-block">full narrative ↓</a>
+      {% else %}
+        <p class="text-sm text-zinc-600 italic">No summary yet — the notes worker writes one once enough has been heard here.</p>
+      {% endif %}
+    </div>
+
     {% if src_cfg and src_cfg.lat is not none and src_cfg.lon is not none %}
       <div id="site-mini-map"
-           class="rounded overflow-hidden border border-zinc-800"
-           style="width: 280px; height: 160px;"
+           class="rounded overflow-hidden border border-zinc-800 w-full lg:w-[280px] h-[160px]"
            title="{{ name }} on the world map"></div>
     {% endif %}
   </div>
@@ -152,112 +237,6 @@
   </div>
 </section>
 
-{# ---- Audio quality: current score + dominant issue + 24h trend ---- #}
-{% if audio_quality %}
-{% set aqc = 'text-zinc-400' if audio_quality.stale
-     else ('text-emerald-300' if audio_quality.score >= 70
-     else ('text-amber-300' if audio_quality.score >= 40 else 'text-rose-300')) %}
-<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
-  <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline gap-2 flex-wrap">
-    <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">audio quality</h3>
-    <span class="text-[10px] normal-case tracking-normal text-zinc-500">how usable this feed's audio is for detection</span>
-  </div>
-  <div class="px-5 py-4 flex items-center gap-6 flex-wrap">
-    <button type="button" onclick="document.getElementById('audio-detail').showModal()"
-            class="text-left group" title="See how this score is calculated">
-      <div class="text-3xl font-semibold tabular-nums {{ aqc }} group-hover:underline decoration-dotted underline-offset-4">{{ audio_quality.score }}<span class="text-base text-zinc-600">/100</span></div>
-      <div class="text-xs {{ aqc }}">{{ audio_quality.issue }}{{ ' · stale' if audio_quality.stale else '' }} <span class="text-zinc-600 group-hover:text-zinc-400">· details ›</span></div>
-    </button>
-    <dl class="text-xs text-zinc-400 grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5">
-      <dt class="text-zinc-500">level</dt><dd class="tabular-nums">{{ '%.1f'|format(audio_quality.level_dbfs) }} dBFS</dd>
-      <dt class="text-zinc-500" title="recent detection yield — the masking signal">yield</dt><dd class="tabular-nums">{{ '%.2f'|format(audio_quality.structure) }}</dd>
-      <dt class="text-zinc-500" title="effective frequency band the feed carries; a low upper edge = band-limited mic/source that loses high-pitched calls">freq range</dt>
-      <dd class="tabular-nums {{ 'text-amber-300' if audio_quality.band_limited else '' }}">
-        {%- if audio_quality.band_hz_high -%}
-          {{ audio_quality.band_hz_low }} Hz – {{ '%.1f'|format(audio_quality.band_hz_high / 1000) }} kHz{% if audio_quality.band_limited %} · band-limited{% endif %}
-        {%- else -%}— <span class="text-zinc-600">(too quiet)</span>{%- endif -%}
-      </dd>
-    </dl>
-    {% if audio_sparkline %}
-      <div class="ml-auto">
-        <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">last 24h</div>
-        <svg viewBox="0 0 100 30" preserveAspectRatio="none" class="w-56 h-10">
-          <line x1="0" y1="9" x2="100" y2="9" stroke="#3f3f46" stroke-width="0.4" stroke-dasharray="2 2"/>
-          <polyline points="{{ audio_sparkline }}" fill="none" stroke="{{ source_color }}" stroke-width="1.2" vector-effect="non-scaling-stroke"/>
-        </svg>
-        <div class="text-[10px] text-zinc-600 text-right">dashed = score 70</div>
-      </div>
-    {% endif %}
-  </div>
-
-  {# Click-through breakdown: the components that build the score #}
-  <dialog id="audio-detail"
-          class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-full max-w-lg
-                 backdrop:bg-black/70 backdrop:backdrop-blur-sm">
-    <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3">
-      <h3 class="text-sm font-semibold uppercase tracking-wider text-zinc-200">audio quality · how the score is built</h3>
-      <button type="button" onclick="document.getElementById('audio-detail').close()"
-              class="text-zinc-500 hover:text-zinc-100 text-xl leading-none px-2" aria-label="Close">×</button>
-    </div>
-    <div class="px-5 py-4 space-y-4">
-      <p class="text-xs text-zinc-500">score = (0.35·level + 0.25·availability + 0.40·yield) × clip-penalty × yield-gate × band-penalty</p>
-      {% set comps = [
-        ('Level', audio_quality.level_score, '0.35', audio_quality.w_level, '%.1f dBFS'|format(audio_quality.level_dbfs), '#10b981'),
-        ('Availability', audio_quality.avail_score, '0.25', audio_quality.w_avail, '%d%% silent'|format(audio_quality.silence_pct), '#0ea5e9'),
-        ('Yield (detections)', audio_quality.yield_score, '0.40', audio_quality.w_yield, '%.1f/h'|format(audio_quality.det_per_h), '#f59e0b'),
-      ] %}
-      {% for label, sub, w, contrib, raw, col in comps %}
-        <div>
-          <div class="flex items-baseline justify-between text-xs mb-1">
-            <span class="text-zinc-300">{{ label }} <span class="text-zinc-600">({{ raw }})</span></span>
-            <span class="tabular-nums text-zinc-400">{{ '%.2f'|format(sub) }} × {{ w }} = <span class="text-zinc-200">{{ '%.2f'|format(contrib) }}</span></span>
-          </div>
-          <div class="h-2 rounded bg-zinc-800 overflow-hidden">
-            <div class="h-full rounded" style="width: {{ (sub * 100) | int }}%; background: {{ col }};"></div>
-          </div>
-        </div>
-      {% endfor %}
-      <div class="border-t border-zinc-800 pt-3 text-xs space-y-1 tabular-nums text-zinc-400">
-        <div class="flex justify-between"><span>weighted sum</span><span class="text-zinc-200">{{ '%.2f'|format(audio_quality.weighted_sum) }}</span></div>
-        <div class="flex justify-between"><span>× clip penalty <span class="text-zinc-600">({{ audio_quality.clip_pct }}% clipped)</span></span><span>×{{ '%.2f'|format(audio_quality.clip_penalty) }}</span></div>
-        <div class="flex justify-between"><span>× yield gate <span class="text-zinc-600">(low yield ⇒ masked)</span></span><span>×{{ '%.2f'|format(audio_quality.yield_gate) }}</span></div>
-        {% if audio_quality.band_penalty < 1.0 %}
-        <div class="flex justify-between text-amber-300"><span>× band penalty <span class="text-amber-300/60">({{ '%.1f'|format(audio_quality.band_hz_high / 1000) }} kHz — loses highs)</span></span><span>×{{ '%.2f'|format(audio_quality.band_penalty) }}</span></div>
-        {% endif %}
-        <div class="flex justify-between text-sm font-semibold text-zinc-100 pt-1 border-t border-zinc-800 mt-1"><span>score</span><span>{{ audio_quality.score }} / 100 · {{ audio_quality.issue }}</span></div>
-      </div>
-      {% if audio_quality.band_hz_high %}
-      <div class="border-t border-zinc-800 pt-3 text-xs">
-        <div class="flex justify-between {{ 'text-amber-300' if audio_quality.band_limited else 'text-zinc-300' }}">
-          <span>frequency band carried</span>
-          <span class="tabular-nums">{{ audio_quality.band_hz_low }} Hz – {{ '%.1f'|format(audio_quality.band_hz_high / 1000) }} kHz</span>
-        </div>
-        <p class="text-[11px] text-zinc-600 mt-1 leading-relaxed">
-          {% if audio_quality.band_limited %}
-            Band-limited well below the ~16 kHz YouTube codec ceiling — the mic/source caps the high
-            end, so high-pitched calls (sunbirds, white-eyes, many cisticolas) are lost here.
-          {% else %}
-            Full usable range up to the ~16 kHz YouTube-AAC ceiling (the codec limit shared by every
-            stream). Not a per-site limitation.
-          {% endif %}
-        </p>
-      </div>
-      {% endif %}
-      <p class="text-[11px] text-zinc-600 leading-relaxed">
-        Level &amp; availability are measured from the live audio; yield is recent detections/hour
-        (the masking signal — loud audio with ~no detections scores low). The yield gate pulls the
-        whole score down when there's adequate audio but nothing's being detected.
-      </p>
-    </div>
-  </dialog>
-</section>
-<script>
-  (function () {
-    var d = document.getElementById('audio-detail');
-    if (d) d.addEventListener('click', function (e) { if (e.target === d) d.close(); });
-  })();
-</script>
-{% endif %}
 
 {# ---- 3. Live video (half) + recent unique species (half, scroll) ---- #}
 {% if src_cfg and src_cfg.url %}
@@ -298,15 +277,17 @@
     </div>
     <div class="overflow-y-auto divide-y divide-zinc-800/80 flex-1" style="max-height: 360px;">
       {% for sp in recent_unique %}
-        <div class="px-5 py-2 flex items-baseline justify-between gap-3">
-          <div class="min-w-0">
-            {{ species_link(sp.common_name, sp.scientific_name, source=name, cls="text-sm text-zinc-100 hover:text-emerald-300") }}
-            <span class="italic text-zinc-500 text-xs ml-1">{{ sp.scientific_name }}</span>
+        <div class="px-5 py-2 grid grid-cols-[1fr_auto] items-center gap-3">
+          <div class="min-w-0 truncate">
+            {# Common name only; the scientific name rides along as a tooltip. #}
+            {{ species_link(sp.common_name, sp.scientific_name, source=name, title=sp.scientific_name, cls="text-sm text-zinc-100 hover:text-emerald-300") }}
+            <span class="text-[11px] text-zinc-500 tabular-nums ml-1.5"
+                  title="{{ sp.started_at | localtime('UTC') }} UTC">
+              {{ sp.started_at | localtime(tz_name, '%H:%M') }}
+            </span>
           </div>
-          <span class="text-[11px] text-zinc-500 tabular-nums shrink-0"
-                title="{{ sp.last_seen | localtime('UTC') }} UTC">
-            {{ sp.last_seen | localtime(tz_name, '%H:%M') }}
-          </span>
+          {# Clickable spectrogram of this species' most recent clip here. #}
+          <div class="w-28 shrink-0">{{ spectrogram_button(sp) }}</div>
         </div>
       {% else %}
         <p class="px-5 py-6 text-sm text-zinc-500">No detections yet.</p>
@@ -317,7 +298,7 @@
 {% endif %}
 
 {# ---- 4. Site narrative (AI commentary) — moved below the video ---- #}
-<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
+<section id="site-narrative" class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4 scroll-mt-20">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline gap-2 flex-wrap">
     <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">site narrative</h3>
     {% if note and note.generated_at %}
@@ -468,14 +449,6 @@
 
 {# ---- Uptime / downtime — moved to the bottom: it's operational data,
        not what a visitor opens this page to see first. ---- #}
-{%- macro dur(s) -%}
-  {%- if s is none or s == 0 -%}—
-  {%- elif s < 90 -%}{{ s|int }}s
-  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
-  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h {{ ((s % 3600) // 60)|int }}m
-  {%- else -%}{{ (s // 86400)|int }}d {{ ((s % 86400) // 3600)|int }}h
-  {%- endif -%}
-{%- endmacro -%}
 {% set d = downtime %}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-4">
   <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline justify-between flex-wrap gap-2">

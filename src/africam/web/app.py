@@ -2883,18 +2883,33 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
             # Recent unique species at this site — one row per species, most-
             # recently-heard first. Drives the scrollable panel beside the
-            # video; complements top_species (sorted by count).
-            recent_unique = list(s.execute(
+            # video; complements top_species (sorted by count). We pick the
+            # actual most-recent detection row per species (via a row_number
+            # window) so the panel can show a clickable spectrogram of that
+            # clip, not just the name.
+            _ru = (
                 select(
+                    DetectionRow.id,
+                    DetectionRow.source_name,
                     DetectionRow.scientific_name,
                     DetectionRow.common_name,
-                    func.count(DetectionRow.id).label("n"),
-                    func.max(DetectionRow.confidence).label("max_conf"),
-                    func.max(DetectionRow.started_at).label("last_seen"),
+                    DetectionRow.confidence,
+                    DetectionRow.started_at,
+                    DetectionRow.label,
+                    DetectionRow.suggested_species,
+                    DetectionRow.sound_rating,
+                    func.row_number().over(
+                        partition_by=DetectionRow.scientific_name,
+                        order_by=desc(DetectionRow.started_at),
+                    ).label("rn"),
                 )
                 .where(DetectionRow.source_name == name)
-                .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
-                .order_by(desc("last_seen"))
+                .subquery()
+            )
+            recent_unique = list(s.execute(
+                select(_ru)
+                .where(_ru.c.rn == 1)
+                .order_by(desc(_ru.c.started_at))
                 .limit(40)
             ))
 
@@ -2963,6 +2978,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "down_24h_s": db.downtime_seconds_since(name, now_utc - timedelta(hours=24)),
             "down_7d_s": db.downtime_seconds_since(name, now_utc - timedelta(days=7)),
             "recent": db.recent_downtime(name, limit=5),
+        }
+
+        # Liveness for the header health chip: the worker's heartbeat status,
+        # how long since it beat, and its last error. Combined client-side
+        # with the downtime + audio-quality data already loaded so the chip's
+        # hover tooltip can show the full operational picture in one place.
+        site_hb = {h.source_name: h for h in db.list_worker_heartbeats()}.get(name)
+        hb_status, hb_since_s, _hb_state, hb_error = _hb_status(site_hb, now_utc)
+        health = {
+            "status": hb_status,
+            "since_s": hb_since_s,
+            "last_error": hb_error,
         }
 
         # Notable-day anomalies for the panel between the AI narrative and
@@ -3070,6 +3097,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "video_id": video_id,
                 "audio_quality": audio_quality,
                 "audio_sparkline": audio_sparkline,
+                "health": health,
                 "multisite": bool(src_cfg and src_cfg.multisite),
                 "note": site_note,
                 "total": total,
