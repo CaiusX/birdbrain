@@ -2819,7 +2819,66 @@ class Database:
                 ).all():
                     common_lookup[sci] = com
 
-        # Group top species by site (keep top 3 per site).
+            # --- Baseline signals: what's DIFFERENT today vs this site's norm ---
+            # Prior-7-day activity per site/day → how many days a site was
+            # active (onboarding guard) and its typical daily volume (so the
+            # brief can say "2× normal" / "near silent" instead of reciting the
+            # same loud residents every day).
+            prior_by_site_day = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    func.strftime("%Y-%m-%d", DetectionRow.started_at),
+                    func.count(DetectionRow.id),
+                )
+                .where(DetectionRow.started_at >= week_start)
+                .where(DetectionRow.started_at < start)
+                .group_by(
+                    DetectionRow.source_name,
+                    func.strftime("%Y-%m-%d", DetectionRow.started_at),
+                )
+            ).all()
+            prior_active_days: dict[str, int] = {}
+            prior_total: dict[str, int] = {}
+            for src_n, _day, c in prior_by_site_day:
+                prior_active_days[src_n] = prior_active_days.get(src_n, 0) + 1
+                prior_total[src_n] = prior_total.get(src_n, 0) + int(c)
+
+            # Per (site, species): on how many of the prior 7 days was it heard?
+            # High = a resident regular ("usual suspect", skip unless a twist);
+            # low/zero = genuinely notable today.
+            prior_days_seen = {
+                (src_n, sci): int(n)
+                for src_n, sci, n in s.execute(
+                    select(
+                        DetectionRow.source_name,
+                        DetectionRow.scientific_name,
+                        func.count(func.distinct(
+                            func.strftime("%Y-%m-%d", DetectionRow.started_at)
+                        )),
+                    )
+                    .where(DetectionRow.started_at >= week_start)
+                    .where(DetectionRow.started_at < start)
+                    .group_by(
+                        DetectionRow.source_name, DetectionRow.scientific_name
+                    )
+                ).all()
+            }
+
+            # Anomalies the SQL detector flagged for this date (with whatever
+            # interpretation has been written so far) — ready-made story angles.
+            anomaly_rows = s.execute(
+                select(
+                    AnomalyEventRow.source_name,
+                    AnomalyEventRow.kind,
+                    AnomalyEventRow.magnitude,
+                    AnomalyEventRow.detection_count,
+                    AnomalyEventRow.interpretation,
+                ).where(AnomalyEventRow.date_utc == date_utc)
+            ).all()
+
+        # Group top species by site (keep top 3 per site), tagging each with
+        # how many of the prior 7 days it was heard at that site so the brief
+        # can tell a regular from a newcomer.
         per_site_top_by_src: dict[str, list[dict]] = {}
         for src, sci, com, c, mc in per_site_top:
             bucket = per_site_top_by_src.setdefault(src, [])
@@ -2829,7 +2888,42 @@ class Database:
                     "common_name": com,
                     "count": int(c),
                     "max_confidence": round(float(mc), 3),
+                    "days_seen_prior_7d": prior_days_seen.get((src, sci), 0),
                 })
+
+        def _site_baseline(src: str, today_count: int) -> dict:
+            """Per-site 'vs typical' context: typical daily volume over the
+            prior 7 active days, today's ratio to it, and a recently-added
+            flag (≤1 prior day of data) so a flood of 'firsts' isn't treated
+            as news."""
+            active = prior_active_days.get(src, 0)
+            typical = round(prior_total.get(src, 0) / active) if active else None
+            ratio = (
+                round(today_count / typical, 2)
+                if typical not in (None, 0) else None
+            )
+            return {
+                "typical_daily_count": typical,
+                "count_ratio": ratio,           # today ÷ typical; >1 busy, <1 quiet
+                "recently_added": active <= 1,  # too new for a baseline
+            }
+
+        # Newly heard: drop entries from brand-new sites (≤1 prior day → every
+        # species reads as "new", which is onboarding noise not a story), then
+        # cap the list so a roster expansion can't bury the digest.
+        NEWLY_HEARD_CAP = 15
+        filtered_new = sorted(
+            (src, sci) for src, sci in new_pairs
+            if prior_active_days.get(src, 0) >= 2
+        )
+        newly_heard = [
+            {
+                "source_name": src,
+                "scientific_name": sci,
+                "common_name": common_lookup.get(sci, ""),
+            }
+            for src, sci in filtered_new[:NEWLY_HEARD_CAP]
+        ]
 
         return {
             "date_utc": date_utc.isoformat(),
@@ -2841,6 +2935,7 @@ class Database:
                     "count": int(per_site_count.get(src, 0)),
                     "peak_hour_utc": per_site_peak.get(src),
                     "top_species": per_site_top_by_src.get(src, []),
+                    **_site_baseline(src, int(per_site_count.get(src, 0))),
                 }
                 for src in sorted(per_site_count.keys())
             ],
@@ -2853,13 +2948,17 @@ class Database:
                 }
                 for sci, com, src, conf in standouts
             ],
-            "newly_heard_this_week": [
+            "newly_heard_this_week": newly_heard,
+            "newly_heard_omitted": max(0, len(new_pairs) - len(newly_heard)),
+            "anomalies": [
                 {
                     "source_name": src,
-                    "scientific_name": sci,
-                    "common_name": common_lookup.get(sci, ""),
+                    "kind": kind,
+                    "magnitude": round(float(mag), 2) if mag is not None else None,
+                    "detection_count": int(dc) if dc is not None else None,
+                    "interpretation": interp,
                 }
-                for src, sci in sorted(new_pairs)
+                for src, kind, mag, dc, interp in anomaly_rows
             ],
         }
 

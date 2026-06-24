@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import copy
@@ -256,51 +257,69 @@ Output as plain text, one bullet per line, nothing else."""
 
 _DAILY_BRIEF_PROMPT_TEMPLATE = """\
 You are the resident analyst for an African live-stream bird monitor network,
-writing a daily newspaper-style soundscape brief.
+writing a daily soundscape brief. The brief's whole value is telling the
+operator what was DIFFERENT today — not re-describing the same loud residents
+that top the charts every single day.
 {sites_context}
 
-The operator gives you a JSON evidence dossier for ONE UTC date: per-site
-detection counts, each site's top species and peak hour (``peak_hour_local`` —
-already in that site's local clock; quote it as-is), high-confidence
-standouts across all sites, a "newly heard this week" list (species that
-appeared at a site yesterday but not in the prior seven days at the same
-site — the most interesting story angle), and a ``weather`` block on each
-per-site entry summarizing that date's local conditions at that site
-(min/max/mean temp, total rain in mm, hours of rain, sunrise/sunset, modal
-condition). ``weather`` may be missing if Open-Meteo didn't respond.
+The operator gives you a JSON evidence dossier for ONE UTC date. Read it for
+CHANGE, not volume. Key fields:
+  • per_site[].count + ``count_ratio`` — today's detections ÷ this site's
+    typical day. >1.5 = unusually busy; <0.5 = unusually quiet; ~1 = normal
+    (not a story). ``typical_daily_count`` is the baseline. ``recently_added``
+    = too new for a baseline, so go easy on it.
+  • per_site[].top_species[].``days_seen_prior_7d`` — on how many of the last
+    7 days that species was already among the site's regulars. 5–7 = a USUAL
+    SUSPECT (e.g. the resident sandgrouse/nightjar/goose); mention it ONLY if
+    there's a twist (record loudness, odd hour, suddenly absent). 0–1 = genuinely
+    notable — lead with these.
+  • peak_hour_local — already in the site's local clock; quote as-is. A peak
+    shifted from the site's usual dawn/dusk is worth a bullet.
+  • newly_heard_this_week — species new to a site vs its prior 7 days (firsts
+    from brand-new cameras are already filtered out). ``newly_heard_omitted``
+    counts any capped overflow.
+  • anomalies — days the detector already flagged (volume_spike, nocturnal_burst,
+    new_species_wave …) with any interpretation. Strong story angles.
+  • high_confidence_standouts — only newsworthy if the species is NOT a usual
+    suspect; a 1.0-confidence resident is not news.
+  • weather — per-site local conditions; use only when it explains the day
+    (rain killing the dawn chorus, a front, fog at sunrise).
+  • recent_headlines — the LAST FEW DAYS' ledes. Do NOT reuse the same species
+    or site as the opener; pick a different angle so the brief reads fresh.
 
-Your job is a skimmable digest: ONE short overall paragraph, then crisp
-per-site bullet points. Return it as STRICT JSON, nothing else:
+Return STRICT JSON, nothing else:
 
 {{
-  "overall": "<2-3 sentence highlights paragraph for the whole network>",
+  "overall": "<≤45-word headline of what changed across the network today>",
   "sites": [
     {{"site": "<exact source_name from the evidence>",
       "bullets": ["<short note>", "<short note>"]}}
   ]
 }}
 
-The "overall" paragraph (≤55 words) is the day's headline across all
-sites — usually a "newly heard" species or a striking confidence
-standout, plus the broad shape of the day (who was loud, who was quiet).
+The "overall" leads with the day's most genuinely unusual thing: a real first,
+a site well above/below its norm, an anomaly, a shifted peak — explicitly NOT
+"<resident species> dominates <site>" unless something about it actually
+changed. Vary it from recent_headlines.
 
-Each "sites" entry gets 1–4 TELEGRAPHIC bullets — fragments, not
-sentences. Lead with the concrete fact. Good bullets:
+Each "sites" entry gets 1–3 TELEGRAPHIC bullets — fragments, not sentences,
+leading with the concrete change. Good bullets:
   • "New this week: Black Cuckoo"
-  • "Busiest dawn of the week (peak 05:00)"
-  • "Fish Eagle standout — conf 0.97"
-  • "Near silent — overnight rain"
-Cover, per site, whatever's worth flagging: newly-heard species, a top
-or high-confidence call (common name), peak timing, notable silence, and
-weather ONLY when it's part of the story (rain suppressing dawn, a front,
-fog at sunrise). Skip weather when conditions are unremarkable.
+  • "2.4× a normal day — busiest since the front"
+  • "Near silent (0.3×) — overnight rain"
+  • "Dawn peak slid to 08:00 (usually 05:00)"
+  • "Fish Eagle at 0.97 — first standout here in a week"
+Bad bullets (these are the ruts to avoid):
+  • "Namaqua Sandgrouse dominates — 1,432 detections" (usual suspect + raw count)
+  • "Fiery-necked Nightjar peaks at dusk" (true every day)
 
 Rules:
   • Output ONLY the JSON object — no markdown fences, no preamble.
   • Use the EXACT source_name strings from the evidence for "site".
-  • Include a site only if it has something worth saying; order the most
-    interesting sites first.
-  • Species by common name. Convey shape, don't recite raw counts.
+  • Cover the 6–8 MOST NEWSWORTHY sites only, most interesting first. Skip any
+    site having an ordinary day — silence is fine, don't pad.
+  • Species by common name. Convey shape with ratios/relative terms; do NOT
+    recite raw detection counts.
   • No throat-clearing, no sign-offs, no full-sentence padding in bullets."""
 
 
@@ -596,6 +615,36 @@ def _localize_brief_evidence(evidence: dict, src_list, db) -> dict:
     return ev
 
 
+def _recent_brief_headlines(db: Database, before_date, limit: int = 3) -> list[dict]:
+    """The last few days' brief ledes, so the model can avoid repeating the
+    same headline species/site day after day. Returns [{date, overall}] newest
+    first; skips stub/no-data days."""
+    out: list[dict] = []
+    try:
+        rows = db.list_daily_briefs(limit=limit + 6)
+    except Exception:
+        return out
+    for r in rows:
+        if r.date_utc >= before_date:
+            continue
+        raw = (r.brief_text or "").strip()
+        m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.S | re.I)
+        if m:
+            raw = m.group(1).strip()
+        overall = ""
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                overall = (data.get("overall") or "").strip()
+        except (ValueError, TypeError):
+            overall = raw[:200]
+        if overall and not overall.lower().startswith("no detections"):
+            out.append({"date": r.date_utc.isoformat(), "overall": overall})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _format_evidence_for_prompt(evidence: dict) -> str:
     return json.dumps(evidence, indent=2, sort_keys=True)
 
@@ -873,18 +922,24 @@ def _daily_brief_tick(
 
         _enrich_brief_evidence_with_weather(evidence, src_list)
 
+        localized = _localize_brief_evidence(evidence, src_list, db)
+        # Give the model the last few days' ledes so it can deliberately vary
+        # the headline instead of re-running "X dominates" every day.
+        localized["recent_headlines"] = _recent_brief_headlines(db, d)
+
         sites_context = _build_sites_context(_live_source_names(src_list, db))
         brief_text = _call_claude(
             system_prompt=daily_brief_system_prompt(sites_context),
             user_text=(
                 "Return the JSON soundscape digest for this date.\n\n"
-                f"{_format_evidence_for_prompt(_localize_brief_evidence(evidence, src_list, db))}"
+                f"{_format_evidence_for_prompt(localized)}"
             ),
             model=cfg.notes_model,
             client=client,
-            # Room for an overall paragraph + ~9 sites × 4 bullets. 800 was
-            # truncating mid-JSON once the cam roster grew past 5.
-            max_tokens=1800,
+            # Overall paragraph + up to ~8 selected sites × ≤3 bullets. The
+            # prompt caps site coverage so this no longer truncates mid-JSON
+            # the way an all-sites dump did once the roster passed ~15.
+            max_tokens=2000,
         )
         if not brief_text:
             log.warning("notes.empty_response", kind="brief", date=d.isoformat())
