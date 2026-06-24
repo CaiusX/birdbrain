@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% from "_macros.html" import site_link %}
+{% block title %}BirdBrain · sites{% endblock %}
+
+{%- macro dur(s) -%}
+  {%- if s is none or s == 0 -%}—
+  {%- elif s < 90 -%}{{ s|int }}s
+  {%- elif s < 5400 -%}{{ (s // 60)|int }}m
+  {%- elif s < 172800 -%}{{ (s // 3600)|int }}h {{ ((s % 3600) // 60)|int }}m
+  {%- else -%}{{ (s // 86400)|int }}d {{ ((s % 86400) // 3600)|int }}h
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro metric_buttons() -%}
+  <button type="button" data-metric-btn="detections"
+          class="metric-btn px-2 py-0.5 rounded border border-zinc-700 text-emerald-300">detections</button>
+  <button type="button" data-metric-btn="species"
+          class="metric-btn px-2 py-0.5 rounded border border-zinc-700 text-sky-300">species</button>
+{%- endmacro -%}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Sites
+      <span class="text-zinc-200 ml-2">{{ site_rows | length }}</span>
+      <span class="text-zinc-500 text-xs ml-1 normal-case">system health + activity · last {{ window_label }}</span>
+    </h2>
+    <div class="flex items-center gap-3 text-xs">
+      <a href="/diurnal" class="text-zinc-500 hover:text-emerald-300">hour-of-day patterns →</a>
+      <div class="flex items-center gap-1">
+        <span class="text-zinc-500 mr-0.5">metric</span>{{ metric_buttons() }}
+      </div>
+      <label class="flex items-center gap-1.5">
+        <span class="text-zinc-500">window</span>
+        <select onchange="location.href='/sites?hours='+this.value"
+                class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200">
+          {% for w, lbl in windows %}
+            <option value="{{ w }}" {{ 'selected' if w == hours }}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+  </div>
+
+  {% if site_rows %}
+    <table id="sites-table" class="w-full text-sm">
+      <thead class="text-zinc-400 text-xs uppercase tracking-wider select-none">
+        <tr class="border-b border-zinc-800">
+          <th class="th-sort text-left font-medium pl-5 pr-4 py-2 cursor-pointer hover:text-zinc-200" data-col="0" data-type="num" title="uptime + audio quality — click to sort">Health<span class="sort-arrow text-emerald-300"></span></th>
+          <th class="th-sort text-left font-medium px-3 py-2 cursor-pointer hover:text-zinc-200" data-col="1" data-type="str">Site<span class="sort-arrow text-emerald-300"></span></th>
+          <th class="th-sort text-right font-medium px-4 py-2 cursor-pointer hover:text-zinc-200" data-col="2" data-type="num"><span class="text-sky-300">Species</span><span class="sort-arrow text-zinc-300"></span></th>
+          <th class="th-sort text-right font-medium px-4 py-2 cursor-pointer hover:text-zinc-200" data-col="3" data-type="num"><span class="text-emerald-300">Detections</span><span class="sort-arrow text-zinc-300"></span></th>
+          <th class="th-sort text-right font-medium px-4 py-2 cursor-pointer hover:text-zinc-200" data-col="4" data-type="num">Last heard<span class="sort-arrow text-emerald-300"></span></th>
+          <th class="text-left font-medium px-5 py-2">Activity <span class="normal-case text-zinc-600">· <span id="activity-metric-word" class="text-emerald-300">detections</span> · last {{ window_label }}</span></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-zinc-800">
+        {% for r in site_rows %}
+          {% set down = r.current_outage_s is not none %}
+          {% set online = r.status == 'running' %}
+          {% set offline = not online and not down %}
+          {% set hc = 'text-emerald-300' if r.health >= 70 else ('text-amber-300' if r.health >= 40 else 'text-rose-300') %}
+          {% set hd = 'bg-emerald-400' if r.health >= 70 else ('bg-amber-400' if r.health >= 40 else 'bg-rose-400') %}
+          {% set ac = 'text-zinc-600' if r.audio_score is none
+               else ('text-zinc-500' if r.audio_stale
+               else ('text-emerald-300' if r.audio_score >= 70
+               else ('text-amber-300' if r.audio_score >= 40 else 'text-rose-300'))) %}
+          {% set tz = source_tz.get(r.source, 'UTC') %}
+          <tr class="site-row hover:bg-zinc-800/40 {{ 'bg-rose-500/5' if down }} {{ 'opacity-60' if offline }}">
+            <td class="pl-5 pr-4 py-3" data-sort="{{ -2 if down else (-1 if offline else r.health) }}">
+              <button type="button" class="health-toggle inline-flex items-center gap-1.5 group">
+                {% if down %}
+                  <span class="px-2 py-0.5 rounded text-xs bg-rose-500/15 text-rose-300 border border-rose-500/40">● down</span>
+                {% elif offline %}
+                  <span class="inline-block w-2 h-2 rounded-full bg-zinc-600"></span>
+                  <span class="text-zinc-500">offline</span>
+                {% else %}
+                  <span class="inline-block w-2 h-2 rounded-full {{ hd }}"></span>
+                  <span class="tabular-nums {{ hc }} group-hover:text-zinc-100">{{ r.health }}</span>
+                  {% if not r.audio_ok %}<span class="text-zinc-600 text-[10px]" title="audio quality unknown — score reflects uptime only">~</span>{% endif %}
+                {% endif %}
+                <span class="text-zinc-600 text-[10px] group-hover:text-zinc-400">▾</span>
+              </button>
+            </td>
+            <td class="px-3 py-3 font-medium" data-sort="{{ r.source | lower }}">{{ site_link(r.source) }}</td>
+            <td class="px-4 py-3 text-right tabular-nums" data-sort="{{ r.species }}">{{ r.species }}</td>
+            <td class="px-4 py-3 text-right tabular-nums text-zinc-100" data-sort="{{ r.count }}">{{ "{:,}".format(r.count) }}</td>
+            <td class="px-4 py-3 text-right tabular-nums text-zinc-400 text-xs"
+                data-sort="{{ r.last_seen | localtime('UTC', '%Y%m%d%H%M%S') if r.last_seen else '0' }}"
+                title="{{ (r.last_seen | localtime('UTC')) ~ ' UTC' if r.last_seen else '' }}">
+              {{ r.last_seen | localtime(tz, "%m-%d %H:%M") if r.last_seen else '—' }}
+            </td>
+            <td class="px-5 py-3">
+              <button type="button" class="spark-open block w-40 hover:opacity-80 cursor-pointer"
+                      data-site="{{ r.source }}" data-hours="{{ hours }}"
+                      title="click to expand · oldest → most recent">
+                <span class="spark-det flex items-end gap-px h-7 w-40">
+                  {% for b in r.det_buckets %}{% set bh = (b / r.det_peak * 100) | round(0) | int %}<span class="flex-1 min-w-0 bg-emerald-500/70 rounded-sm" style="height: {{ bh if bh > 0 else 2 }}%; min-height: 2px;"></span>{% endfor %}
+                </span>
+                <span class="spark-sp flex items-end gap-px h-7 w-40 hidden">
+                  {% for b in r.sp_buckets %}{% set bh = (b / r.sp_peak * 100) | round(0) | int %}<span class="flex-1 min-w-0 bg-sky-400/70 rounded-sm" style="height: {{ bh if bh > 0 else 2 }}%; min-height: 2px;"></span>{% endfor %}
+                </span>
+              </button>
+              <div class="flex justify-between w-40 text-[10px] leading-none text-zinc-400 mt-1 tabular-nums">
+                <span>{{ since | localtime(tz, "%m-%d %H:%M") }}</span><span>now</span>
+              </div>
+            </td>
+          </tr>
+          <tr class="health-detail hidden">
+            <td colspan="6" class="px-5 py-2.5 bg-zinc-950/40 text-xs border-t border-zinc-800/60">
+              <div class="flex flex-wrap items-center gap-x-6 gap-y-1">
+                <span><span class="text-zinc-500 uppercase tracking-wider text-[10px] mr-1.5">liveness</span>
+                  <span class="{{ 'text-rose-300' if down else ('text-emerald-300' if r.status == 'running' else 'text-amber-300') }}">{{ ('down ' ~ dur(r.current_outage_s)) if down else r.status }}</span></span>
+                <span><span class="text-zinc-500 uppercase tracking-wider text-[10px] mr-1.5">uptime 24h</span>
+                  <span class="{{ 'text-rose-300' if r.down_24h_s > 3600 else ('text-amber-300' if r.down_24h_s > 0 else 'text-emerald-300') }}">{{ r.uptime_pct }}%{% if r.down_24h_s %} · {{ dur(r.down_24h_s) }} down{% endif %}</span></span>
+                <span><span class="text-zinc-500 uppercase tracking-wider text-[10px] mr-1.5">audio</span>
+                  {% if r.audio_score is not none %}<span class="{{ ac }}">{{ r.audio_score }}{% if r.audio_issue %} · {{ r.audio_issue }}{% endif %}{% if r.audio_stale %} · stale{% endif %}</span>{% else %}<span class="text-zinc-600">no signal</span>{% endif %}</span>
+                <a href="/site/{{ r.source | urlencode }}" class="text-emerald-300 hover:text-emerald-200 ml-auto">full detail →</a>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="text-zinc-500 text-sm px-5 py-6">No live sites configured.</p>
+  {% endif %}
+</section>
+
+{# Expandable per-site activity chart with adjustable timescale + metric. #}
+<dialog id="activity-modal"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-full max-w-3xl backdrop:bg-black/70 backdrop:backdrop-blur-sm">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3">
+    <h3 class="text-sm font-semibold text-zinc-100">
+      <span id="act-site"></span>
+      <span class="text-zinc-500 text-xs font-normal ml-1" id="act-label"></span>
+    </h3>
+    <button type="button" onclick="document.getElementById('activity-modal').close()"
+            class="px-2.5 py-1 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-zinc-800">✕</button>
+  </div>
+  <div class="px-5 py-4">
+    <div class="flex items-center gap-4 text-xs mb-4 flex-wrap">
+      <label class="flex items-center gap-2">
+        <span class="text-zinc-500">timescale</span>
+        <select id="act-window" class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200">
+          <option value="1">1h</option>
+          <option value="6">6h</option>
+          <option value="24" selected>24h</option>
+          <option value="48">48h</option>
+          <option value="168">7d</option>
+          <option value="720">30d</option>
+          <option value="4380">6m</option>
+          <option value="8760">1y</option>
+          <option value="0">all time</option>
+        </select>
+      </label>
+      <div class="flex items-center gap-1">
+        <span class="text-zinc-500 mr-0.5">metric</span>{{ metric_buttons() }}
+      </div>
+    </div>
+    <div class="flex gap-2">
+      <span id="act-ylabel" class="text-[10px] text-zinc-400 uppercase tracking-wider self-center"
+            style="writing-mode: vertical-rl; transform: rotate(180deg);"></span>
+      <div class="flex-1 min-w-0">
+        <div id="act-chart" class="flex items-end gap-px h-48 w-full bg-zinc-950/30 rounded p-1"></div>
+        <div id="act-axis" class="flex justify-between w-full text-[11px] text-zinc-400 mt-1 px-1 tabular-nums"></div>
+      </div>
+    </div>
+    <div class="mt-2 text-xs text-zinc-500" id="act-summary"></div>
+  </div>
+</dialog>
+
+<script>
+  (function () {
+    const table = document.getElementById('sites-table');
+    if (!table) return;
+    const tbody = table.querySelector('tbody');
+    const modal = document.getElementById('activity-modal');
+    const sel = document.getElementById('act-window');
+    let actSite = null;
+
+    // --- Metric: client-side, shared by sparklines + modal, persisted ---
+    let currentMetric = 'detections';
+    try { currentMetric = localStorage.getItem('bb_sites_metric') || 'detections'; } catch (e) {}
+
+    function applyMetric() {
+      const isSp = currentMetric === 'species';
+      document.querySelectorAll('.spark-det').forEach((e) => e.classList.toggle('hidden', isSp));
+      document.querySelectorAll('.spark-sp').forEach((e) => e.classList.toggle('hidden', !isSp));
+      document.querySelectorAll('[data-metric-btn]').forEach((b) => {
+        const on = b.dataset.metricBtn === currentMetric;
+        b.classList.toggle('bg-zinc-800', on);
+        b.classList.toggle('ring-1', on);
+        b.classList.toggle('opacity-40', !on);
+      });
+      const w = document.getElementById('activity-metric-word');
+      if (w) { w.textContent = currentMetric; w.className = isSp ? 'text-sky-300' : 'text-emerald-300'; }
+      if (modal.open) loadActivity();
+    }
+    function setMetric(m) {
+      currentMetric = m;
+      try { localStorage.setItem('bb_sites_metric', m); } catch (e) {}
+      applyMetric();
+    }
+    document.querySelectorAll('[data-metric-btn]').forEach((b) =>
+      b.addEventListener('click', () => setMetric(b.dataset.metricBtn)));
+
+    // --- Activity modal ---
+    function loadActivity() {
+      const hours = +sel.value;
+      const label = sel.options[sel.selectedIndex].text;
+      const metric = currentMetric;
+      const unit = metric === 'species' ? 'species' : 'detections';
+      const uColor = metric === 'species' ? 'text-sky-300' : 'text-emerald-300';
+      const yl = document.getElementById('act-ylabel');
+      yl.textContent = unit;
+      yl.className = 'text-[10px] uppercase tracking-wider self-center ' + uColor;
+      fetch(`/api/sites/${encodeURIComponent(actSite)}/activity?hours=${hours}&metric=${metric}`)
+        .then((r) => r.json())
+        .then((d) => {
+          const c = document.getElementById('act-chart');
+          c.innerHTML = '';
+          const peak = d.peak || 1;
+          const barColor = metric === 'species' ? 'bg-sky-400/70' : 'bg-emerald-500/70';
+          const bounds = new Set(d.boundaries || []);   // local day/month starts
+          (d.buckets || []).forEach((b, i) => {
+            const bar = document.createElement('div');
+            bar.className = 'flex-1 min-w-0 rounded-sm ' + barColor +
+              (bounds.has(i) ? ' border-l border-zinc-400/60' : '');
+            const h = Math.round(b / peak * 100);
+            bar.style.height = (h > 0 ? h : 1) + '%';
+            bar.style.minHeight = '2px';
+            bar.title = b + ' ' + unit;
+            c.appendChild(bar);
+          });
+          document.getElementById('act-label').textContent = d.bucket_label || '';
+          document.getElementById('act-summary').innerHTML =
+            `${(d.total || 0).toLocaleString()} <span class="${uColor}">${unit}</span> · last ${label}`;
+          const axis = document.getElementById('act-axis');
+          axis.innerHTML = '';
+          (d.axis || []).forEach((t) => {
+            const span = document.createElement('span');
+            span.textContent = t;
+            axis.appendChild(span);
+          });
+        })
+        .catch(() => {});
+    }
+    function openActivity(site, hours) {
+      actSite = site;
+      document.getElementById('act-site').textContent = site;
+      if ([...sel.options].some((o) => +o.value === hours)) sel.value = String(hours);
+      loadActivity();
+      modal.showModal();
+    }
+    sel.addEventListener('change', loadActivity);
+
+    // --- Row interactions: health detail toggle + sparkline → modal ---
+    tbody.addEventListener('click', (e) => {
+      const ht = e.target.closest('.health-toggle');
+      if (ht) {
+        const detail = ht.closest('tr').nextElementSibling;
+        if (detail && detail.classList.contains('health-detail')) detail.classList.toggle('hidden');
+        return;
+      }
+      const sp = e.target.closest('.spark-open');
+      if (sp) openActivity(sp.dataset.site, +sp.dataset.hours);
+    });
+
+    // --- Column sort (detail rows ride along with their main row) ---
+    let curCol = 2, curDir = -1;               // server pre-sorts by species desc
+    const speciesArrow = table.querySelector('th[data-col="2"] .sort-arrow');
+    if (speciesArrow) speciesArrow.textContent = ' ▼';
+
+    table.querySelectorAll('th.th-sort').forEach((th) => {
+      th.addEventListener('click', () => {
+        const col = +th.dataset.col;
+        const numeric = th.dataset.type === 'num';
+        if (curCol === col) { curDir = -curDir; } else { curCol = col; curDir = numeric ? -1 : 1; }
+        const rows = Array.from(tbody.querySelectorAll('tr.site-row'));
+        rows.sort((a, b) => {
+          const av = a.children[col].dataset.sort || '';
+          const bv = b.children[col].dataset.sort || '';
+          const cmp = numeric ? (parseFloat(av) - parseFloat(bv)) : av.localeCompare(bv);
+          return cmp * curDir;
+        });
+        rows.forEach((r) => {
+          const detail = (r.nextElementSibling && r.nextElementSibling.classList.contains('health-detail'))
+            ? r.nextElementSibling : null;
+          tbody.appendChild(r);
+          if (detail) tbody.appendChild(detail);
+        });
+        table.querySelectorAll('.sort-arrow').forEach((s) => { s.textContent = ''; });
+        const arrow = th.querySelector('.sort-arrow');
+        if (arrow) arrow.textContent = curDir > 0 ? ' ▲' : ' ▼';
+      });
+    });
+
+    applyMetric();   // reflect the persisted metric on load
+  })();
+</script>
+{% endblock %}

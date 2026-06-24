@@ -3301,6 +3301,49 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             status = "stale"
         return status, since_s, state, error
 
+    def _site_health_map() -> dict[str, dict]:
+        """Per-source operational health for the Sites index: liveness status,
+        current outage, 24h downtime, and audio-quality score. Composes the same
+        per-source maps /admin uses (heartbeats, downtime, audio quality) — keyed
+        by source name. Sites absent from a given map just lack that signal."""
+        now = datetime.now(UTC)
+        last_24h = now - timedelta(hours=24)
+        heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        current_downs = db.current_downtime_by_source()
+        audio_q = db.audio_quality_by_source()
+        AUDIO_STALE_S = 180
+        out: dict[str, dict] = {}
+        for name in set(heartbeats) | set(current_downs) | set(audio_q):
+            status, since_s, _state, _err = _hb_status(heartbeats.get(name), now)
+            cur = current_downs.get(name)
+            cur_started = cur.started_at if cur else None
+            if cur_started is not None and cur_started.tzinfo is None:
+                cur_started = cur_started.replace(tzinfo=UTC)
+            current_outage_s = (
+                int((now - cur_started).total_seconds()) if cur_started else None
+            )
+            aq = audio_q.get(name)
+            audio_score = None
+            audio_issue = None
+            audio_stale = False
+            if aq is not None:
+                upd = aq.updated_at
+                if upd.tzinfo is None:
+                    upd = upd.replace(tzinfo=UTC)
+                audio_score = aq.score
+                audio_issue = aq.issue_label
+                audio_stale = (now - upd).total_seconds() > AUDIO_STALE_S
+            out[name] = {
+                "status": status,
+                "since_s": since_s,
+                "current_outage_s": current_outage_s,
+                "down_24h_s": db.downtime_seconds_since(name, last_24h),
+                "audio_score": audio_score,
+                "audio_issue": audio_issue,
+                "audio_stale": audio_stale,
+            }
+        return out
+
     def _admin_row(
         cfg_src: SourceConfig,
         runtime_row,
@@ -3655,6 +3698,243 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return RedirectResponse(
             "/scoreboard" + (("?" + q) if q else ""), status_code=307
         )
+
+    @app.get("/sites", response_class=HTMLResponse)
+    def sites_index(
+        request: Request,
+        hours: int = Query(default=24, ge=0, le=8760),  # 0 = all-time, up to 1y
+    ) -> HTMLResponse:
+        """Sites index (WIP alternative to /scoreboard): one compact row per
+        site combining activity (species/detections/sparkline/last-heard) with
+        the operational-health signals that otherwise live only on each detail
+        page (liveness, 24h uptime, audio-quality). Currently-down sites are
+        included even with no detections in-window so outages surface."""
+        from sqlalchemy import Integer
+        from sqlalchemy import cast as sa_cast
+
+        _, sources_by_name, _ = _all_sources()
+        now = datetime.now(UTC)
+        # Inline sparkline: fixed 40 bars across whatever window is selected.
+        n_spark = 40
+        with db.session() as s:
+            if hours <= 0:  # all-time → back to the first detection on record
+                first = s.scalar(select(func.min(DetectionRow.started_at)))
+                since = (
+                    (first.replace(tzinfo=UTC) if first.tzinfo is None else first)
+                    if first is not None else now
+                )
+            else:
+                since = now - timedelta(hours=hours)
+            window_s = max(60.0, (now - since).total_seconds())
+            since_epoch = since.timestamp()
+            spark_s = window_s / n_spark
+            # Per-source totals — SQL aggregation, no row loading, so long
+            # windows (6m/1y/all) stay cheap.
+            agg = {
+                row[0]: (int(row[1]), int(row[2]), row[3])
+                for row in s.execute(
+                    select(
+                        DetectionRow.source_name,
+                        func.count(DetectionRow.id),
+                        func.count(func.distinct(DetectionRow.scientific_name)),
+                        func.max(DetectionRow.started_at),
+                    )
+                    .where(DetectionRow.started_at >= since)
+                    .group_by(DetectionRow.source_name)
+                ).all()
+            }
+            # Per-source sparkline buckets, also via GROUP BY (strftime → epoch).
+            bucket_col = sa_cast(
+                (func.strftime("%s", DetectionRow.started_at) - since_epoch) / spark_s,
+                Integer,
+            )
+            # Both metrics per bucket: detection count and distinct-species count.
+            det_spark: dict[str, list[int]] = {}
+            sp_spark: dict[str, list[int]] = {}
+            for src, bk, dcnt, scnt in s.execute(
+                select(
+                    DetectionRow.source_name,
+                    bucket_col,
+                    func.count(),
+                    func.count(func.distinct(DetectionRow.scientific_name)),
+                )
+                .where(DetectionRow.started_at >= since)
+                .group_by(DetectionRow.source_name, bucket_col)
+            ).all():
+                if bk is None or bk < 0:
+                    continue
+                i = min(int(bk), n_spark - 1)
+                det_spark.setdefault(src, [0] * n_spark)[i] += int(dcnt)
+                sp_spark.setdefault(src, [0] * n_spark)[i] += int(scnt)
+
+        total = sum(v[0] for v in agg.values())
+        health = _site_health_map()
+        # Full live roster: every configured source (online or offline). Admin-
+        # disabled sources are already dropped by _all_sources(), so the list is
+        # stable regardless of window — quiet/offline cams stay visible.
+        roster = set(sources_by_name)
+
+        site_rows = []
+        for name in roster:
+            count, species, last_seen = agg.get(name, (0, 0, None))
+            if last_seen is not None and getattr(last_seen, "tzinfo", None) is None:
+                last_seen = last_seen.replace(tzinfo=UTC)
+            det_b = det_spark.get(name, [0] * n_spark)
+            sp_b = sp_spark.get(name, [0] * n_spark)
+            h = health.get(name, {})
+            down_24h_s = h.get("down_24h_s", 0)
+            current_outage_s = h.get("current_outage_s")
+            audio_score = h.get("audio_score")
+            audio_stale = h.get("audio_stale", False)
+            # Composite system-health 0-100: half uptime, half audio quality.
+            # Currently-down → 0; audio unknown/stale → uptime-only (flagged).
+            uptime_pct = (
+                100.0 if down_24h_s <= 0
+                else max(0.0, 100.0 * (86400 - down_24h_s) / 86400)
+            )
+            audio_ok = audio_score is not None and not audio_stale
+            if current_outage_s is not None:
+                health_score = 0
+            elif audio_ok:
+                health_score = round(0.5 * uptime_pct + 0.5 * audio_score)
+            else:
+                health_score = round(uptime_pct)
+            site_rows.append(
+                {
+                    "source": name,
+                    "count": count,
+                    "species": species,
+                    "det_buckets": det_b,
+                    "det_peak": max(det_b) or 1,
+                    "sp_buckets": sp_b,
+                    "sp_peak": max(sp_b) or 1,
+                    "last_seen": last_seen,
+                    "status": h.get("status", "never"),
+                    "current_outage_s": current_outage_s,
+                    "down_24h_s": down_24h_s,
+                    "uptime_pct": round(uptime_pct, 1),
+                    "audio_score": audio_score,
+                    "audio_issue": h.get("audio_issue"),
+                    "audio_stale": audio_stale,
+                    "audio_ok": audio_ok,
+                    "health": health_score,
+                }
+            )
+        # Rank by species diversity (count breaks ties), as the scoreboard did;
+        # currently-down rows are tinted in the template rather than re-sorted.
+        site_rows.sort(key=lambda r: (r["species"], r["count"]), reverse=True)
+        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        windows = [
+            (1, "1h"), (6, "6h"), (24, "24h"), (48, "48h"), (168, "7d"),
+            (720, "30d"), (4380, "6m"), (8760, "1y"), (0, "all time"),
+        ]
+        window_label = dict(windows).get(hours, f"{hours}h")
+        return TEMPLATES.TemplateResponse(
+            request,
+            "sites.html",
+            {
+                "hours": hours,
+                "since": since,
+                "total": total,
+                "site_rows": site_rows,
+                "source_tz": source_tz,
+                "windows": windows,
+                "window_label": window_label,
+            },
+        )
+
+    @app.get("/api/sites/{name:path}/activity")
+    def site_activity(
+        name: str,
+        hours: int = Query(default=24, ge=0, le=24 * 400),
+        metric: str = Query(default="detections"),  # detections | species
+    ) -> dict:
+        """Per-bucket activity for one site over the last ``hours`` (``hours=0``
+        = all-time). ``metric`` selects detection counts or distinct-species
+        counts. Bars adapt in width to the window; returns five absolute
+        date:time axis labels in the site's local timezone."""
+        metric = metric if metric in ("detections", "species") else "detections"
+        _, sources_by_name, _ = _all_sources()
+        cfg_src = sources_by_name.get(name)
+        tz = _zone_info(cfg_src.timezone if cfg_src else "UTC")
+        now = datetime.now(UTC)
+        if hours <= 0:  # all-time
+            with db.session() as s:
+                first = s.scalar(
+                    select(func.min(DetectionRow.started_at))
+                    .where(DetectionRow.source_name == name)
+                )
+            if first is None:
+                return {"hours": 0, "metric": metric, "buckets": [], "total": 0,
+                        "peak": 1, "bucket_label": "—", "axis": [], "boundaries": []}
+            since = first.replace(tzinfo=UTC) if first.tzinfo is None else first
+        else:
+            since = now - timedelta(hours=hours)
+        window_s = max(60.0, (now - since).total_seconds())
+        with db.session() as s:
+            rows = s.execute(
+                select(DetectionRow.started_at, DetectionRow.scientific_name)
+                .where(DetectionRow.source_name == name)
+                .where(DetectionRow.started_at >= since)
+            ).all()
+        n = 120 if hours <= 0 else min(120, max(12, hours))
+        bucket_s = window_s / n
+        if metric == "species":
+            sets: list[set] = [set() for _ in range(n)]
+            seen: set = set()
+            for t, sci in rows:
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=UTC)
+                idx = int((t - since).total_seconds() // bucket_s)
+                if 0 <= idx < n:
+                    sets[idx].add(sci)
+                seen.add(sci)
+            buckets = [len(x) for x in sets]
+            total = len(seen)
+        else:
+            buckets = [0] * n
+            for t, _sci in rows:
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=UTC)
+                idx = int((t - since).total_seconds() // bucket_s)
+                if 0 <= idx < n:
+                    buckets[idx] += 1
+            total = len(rows)
+        if bucket_s < 3600:
+            label = f"{int(round(bucket_s / 60))}-min bars"
+        elif bucket_s < 86400:
+            label = f"{round(bucket_s / 3600, 1)}h bars"
+        else:
+            label = f"{round(bucket_s / 86400, 1)}d bars"
+        # Five absolute date:time ticks across the window, in the site's tz.
+        long = window_s > 30 * 86400
+        afmt = "%Y-%m-%d" if long else "%m-%d %H:%M"
+        axis = [
+            (since + timedelta(seconds=window_s * i / 4)).astimezone(tz).strftime(afmt)
+            for i in range(5)
+        ]
+        # Bucket indices that begin a new local day (or month, for long windows)
+        # so the chart can draw a separator line there.
+        boundaries: list[int] = []
+        prev_key = None
+        for i in range(n):
+            d = (since + timedelta(seconds=bucket_s * i)).astimezone(tz)
+            key = (d.year, d.month) if long else (d.year, d.month, d.day)
+            if prev_key is not None and key != prev_key:
+                boundaries.append(i)
+            prev_key = key
+        if len(boundaries) > 40:  # too dense to be useful
+            boundaries = []
+        return {
+            "hours": hours,
+            "metric": metric,
+            "buckets": buckets,
+            "total": total,
+            "peak": max(buckets) or 1,
+            "bucket_label": label,
+            "axis": axis,
+            "boundaries": boundaries,
+        }
 
     def _detections_context(
         source: str | None,
