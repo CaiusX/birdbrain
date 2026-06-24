@@ -29,6 +29,9 @@ class AlsaSource(AudioSource):
         # Set live by the worker from the per-source setting; changing it
         # relaunches ffmpeg (a filter is fixed for the life of the process).
         self.highpass_hz: int | None = None
+        # Self-heal a wedged/silent capture: if the feed stays silent for 10
+        # min while ffmpeg keeps emitting, relaunch it (see AudioSource.stream).
+        self.silence_reconnect_s = 600.0
 
     def _ffmpeg_command(self) -> list[str]:
         # url is either a raw ALSA device ("plughw:CARD=...") or a PipeWire/

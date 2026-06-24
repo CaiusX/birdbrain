@@ -26,6 +26,10 @@ class MicSource(AudioSource):
         # No network URL for a mic; expose the device so logging/current_url have
         # something meaningful rather than an unset attribute.
         self.url = f"alsa:{device}"
+        # Self-heal a wedged/silent mic on unattended field units: if the feed
+        # stays silent for 10 min while ffmpeg keeps emitting, relaunch it (see
+        # AudioSource.stream). This is the field-reliability fix for TBB.
+        self.silence_reconnect_s = 600.0
 
     def _ffmpeg_command(self) -> list[str]:
         return [
