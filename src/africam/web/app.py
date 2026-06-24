@@ -3593,111 +3593,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             request, "_system_health.html", _health_view()
         )
 
-    @app.get("/scoreboard", response_class=HTMLResponse)
-    def scoreboard(
-        request: Request,
-        hours: int = Query(default=24, ge=1, le=24 * 14),
-        top: int = Query(default=8, ge=1, le=50),
-    ) -> HTMLResponse:
-        _, sources_by_name, _ = _all_sources()
-        since = datetime.now(UTC) - timedelta(hours=hours)
-        with db.session() as s:
-            rows = list(
-                s.scalars(
-                    select(DetectionRow)
-                    .where(DetectionRow.started_at >= since)
-                )
-            )
-
-        by_source: dict[str, list[DetectionRow]] = {}
-        for r in rows:
-            by_source.setdefault(r.source_name, []).append(r)
-
-        # Per-source rollup with hourly histogram.
-        rollup_rows = []
-        per_source_top = []
-        for src_name in sorted(by_source):
-            src_rows = by_source[src_name]
-            species = {r.scientific_name for r in src_rows}
-            mean_conf = sum(r.confidence for r in src_rows) / len(src_rows)
-            buckets = [0] * hours
-            for r in src_rows:
-                idx = int((r.started_at.replace(tzinfo=UTC) - since).total_seconds() // 3600)
-                if 0 <= idx < hours:
-                    buckets[idx] += 1
-            peak = max(buckets) or 1
-            rollup_rows.append(
-                {
-                    "source": src_name,
-                    "count": len(src_rows),
-                    "species": len(species),
-                    "mean_conf": mean_conf,
-                    "buckets": buckets,
-                    "peak": peak,
-                }
-            )
-
-            # Top species for this source, with a 24-hour-of-day histogram
-            # computed in the source's local timezone (so dawn-chorus peaks
-            # land on the morning hours regardless of where the camera is).
-            cfg_for_src = sources_by_name.get(src_name)
-            stats: dict[str, dict] = {}
-            for r in src_rows:
-                d = stats.setdefault(
-                    r.scientific_name,
-                    {
-                        "common": r.common_name,
-                        "scientific": r.scientific_name,
-                        "count": 0,
-                        "max_conf": 0.0,
-                        "best_id": r.id,
-                        "best_at": r.started_at,
-                    },
-                )
-                d["count"] += 1
-                if r.confidence > d["max_conf"]:
-                    d["max_conf"] = r.confidence
-                    d["best_id"] = r.id
-                    d["best_at"] = r.started_at
-            # Hour-of-day patterns live on /diurnal; here we just rank species.
-            ordered = sorted(stats.values(), key=lambda d: d["count"], reverse=True)[:top]
-            per_source_top.append(
-                {
-                    "source": src_name,
-                    "tz": cfg_for_src.timezone if cfg_for_src else "UTC",
-                    "species": ordered,
-                }
-            )
-
-        # Rank by species diversity (count breaks ties) — it's a scoreboard.
-        # Keep the per-site species sections in the same order.
-        rollup_rows.sort(key=lambda r: (r["species"], r["count"]), reverse=True)
-        rank = {r["source"]: i for i, r in enumerate(rollup_rows)}
-        per_source_top.sort(key=lambda x: rank.get(x["source"], 1 << 30))
-
-        source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
-        return TEMPLATES.TemplateResponse(
-            request,
-            "scoreboard.html",
-            {
-                "hours": hours,
-                "top": top,
-                "since": since,
-                "total": len(rows),
-                "rollup_rows": rollup_rows,
-                "per_source_top": per_source_top,
-                "source_tz": source_tz,
-                "windows": [1, 6, 24, 48, 168],
-            },
-        )
+    @app.get("/scoreboard")
+    def scoreboard_redirect(request: Request) -> RedirectResponse:
+        """Retired — the per-site rollup is now the richer /sites page. Keep the
+        old URL (and any bookmarks/links) working."""
+        q = request.url.query
+        return RedirectResponse("/sites" + (("?" + q) if q else ""), status_code=307)
 
     @app.get("/rollup")
     def rollup_redirect(request: Request) -> RedirectResponse:
-        """Old name for the site scoreboard — keep the URL working."""
+        """Even older name for the site rollup — also lands on /sites."""
         q = request.url.query
-        return RedirectResponse(
-            "/scoreboard" + (("?" + q) if q else ""), status_code=307
-        )
+        return RedirectResponse("/sites" + (("?" + q) if q else ""), status_code=307)
 
     @app.get("/sites", response_class=HTMLResponse)
     def sites_index(
