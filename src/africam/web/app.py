@@ -2247,13 +2247,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         CONF_MIN = 0.10  # bucket index = floor((conf - 0.10) * 100), clamped
 
         # Per-(source, species) max confidence — drives the species curves.
+        # common_name comes along (1:1 with scientific in BirdNET labels, so
+        # grouping by it doesn't fragment counts) to label the drop-out roster.
         stmt_max = (
             select(
                 DetectionRow.source_name,
                 DetectionRow.scientific_name,
+                DetectionRow.common_name,
                 func.max(DetectionRow.confidence).label("max_conf"),
             )
-            .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+            .group_by(
+                DetectionRow.source_name,
+                DetectionRow.scientific_name,
+                DetectionRow.common_name,
+            )
         )
         # Per-(source, bucket) detection counts — drives the detection curves.
         bucket = sa_cast(
@@ -2278,11 +2285,45 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         per_source_maxconfs: dict[str, list[float]] = {}
         species_global_max: dict[str, float] = {}
+        # Drop-out roster: every species with its max confidence, both per-site
+        # and overall (each species at its global best). The client splits these
+        # into kept/dropped at the slider's cutoff. Bucket index matches the
+        # curve's (see species_buckets) so the roster's kept count equals the
+        # headline "species kept". Species below CONF_MIN never enter the curve
+        # floor, so we skip them here too.
+        def _bucket(c: float) -> int:
+            return max(0, min(N_BUCKETS - 1, int((c - CONF_MIN) * 100)))
+
+        roster_by_site: dict[str, list[dict]] = {}
+        species_global: dict[str, dict] = {}  # sci -> {c: common, s: sci, v, b}
         for r in rows_max:
             c = float(r.max_conf or 0)
             per_source_maxconfs.setdefault(r.source_name, []).append(c)
             if c > species_global_max.get(r.scientific_name, 0.0):
                 species_global_max[r.scientific_name] = c
+            if c >= CONF_MIN:
+                entry = {
+                    "c": r.common_name,
+                    "s": r.scientific_name,
+                    "v": round(c, 2),
+                    "b": _bucket(c),
+                }
+                roster_by_site.setdefault(r.source_name, []).append(entry)
+                g = species_global.get(r.scientific_name)
+                if g is None or c > g["_raw"]:
+                    species_global[r.scientific_name] = {**entry, "_raw": c}
+
+        def _sorted_roster(entries: list[dict]) -> list[dict]:
+            # Highest confidence first; drop the internal _raw helper key.
+            return [
+                {k: v for k, v in e.items() if k != "_raw"}
+                for e in sorted(entries, key=lambda e: -e["v"])
+            ]
+
+        roster_overall = _sorted_roster(list(species_global.values()))
+        roster_by_site = {
+            src: _sorted_roster(entries) for src, entries in roster_by_site.items()
+        }
 
         per_source_hist: dict[str, list[int]] = {}
         for r in rows_hist:
@@ -2408,6 +2449,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "total_dets_floor": (
                     overall_det_curve[0] if overall_det_curve else 0
                 ),
+                "roster_overall": roster_overall,
+                "roster_by_site": roster_by_site,
             },
         )
 

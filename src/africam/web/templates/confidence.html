@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import site_link %}
+{% from "_macros.html" import site_link, species_link %}
 {% block title %}BirdBrain · confidence cutoff{% endblock %}
 
 {% block content %}
@@ -141,6 +141,39 @@
     </div>
   </div>
 
+  {# --- Drop-out roster: which species survive / fall away at this cutoff --- #}
+  <div class="px-5 py-4 border-t border-zinc-800">
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mb-3">
+      <div class="text-xs uppercase tracking-wider text-zinc-500">
+        species at this cutoff
+      </div>
+      <div class="text-xs tabular-nums">
+        <span class="text-emerald-300 font-semibold"><span id="roster-kept">0</span> kept</span>
+        <span class="text-zinc-600 mx-1">·</span>
+        <span class="text-zinc-500"><span id="roster-dropped">0</span> dropped</span>
+      </div>
+      <label class="ml-auto flex items-center gap-2 text-xs">
+        <span class="text-zinc-500">scope</span>
+        <select id="roster-scope"
+                class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-zinc-100">
+          <option value="">overall</option>
+          {% for src in site_names %}
+            <option value="{{ src }}">{{ src }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    {# Rows are built client-side from the embedded roster data and reordered
+       under #roster-list; sorted high→low confidence so the cutoff is a single
+       moving frontier. #}
+    <ul id="roster-list"
+        class="relative max-h-[60vh] overflow-y-auto divide-y divide-zinc-800/60 rounded-lg border border-zinc-800 bg-zinc-950/40"></ul>
+    <p class="text-[11px] text-zinc-600 mt-2">
+      Each species sits at its best (max) confidence; it drops out the moment the
+      floor passes that value. Rows by the line are “on the bubble”.
+    </p>
+  </div>
+
   {# --- Per-site cards at current cutoff --- #}
   <div class="px-5 py-4 border-t border-zinc-800">
     <div class="text-xs uppercase tracking-wider text-zinc-500 mb-3">
@@ -184,7 +217,9 @@
   "confMin": conf_min,
   "nBuckets": n_buckets,
   "chart": chart,
-  "yMax": y_max_species
+  "yMax": y_max_species,
+  "rosterOverall": roster_overall,
+  "rosterBySite": roster_by_site
 } | tojson }}
 </script>
 
@@ -200,6 +235,10 @@
   const siteDots = document.querySelectorAll('.conf-dot');
   const cardSpecies = document.querySelectorAll('[data-card-species]');
   const cardDets = document.querySelectorAll('[data-card-dets]');
+  const rosterList = document.getElementById('roster-list');
+  const rosterScope = document.getElementById('roster-scope');
+  const rosterKept = document.getElementById('roster-kept');
+  const rosterDropped = document.getElementById('roster-dropped');
 
   const ch = data.chart;
   const N = data.nBuckets;
@@ -209,6 +248,86 @@
 
   function fmt(n) {
     return n.toLocaleString();
+  }
+
+  // --- Drop-out roster -----------------------------------------------------
+  // Rows for the active scope (overall or one site), built once per scope
+  // change and then re-styled per slider tick. Bar width maps confidence onto
+  // the 0.10–0.99 span the slider covers.
+  let rosterRows = [];     // <li> elements, high→low confidence
+  let rosterDivider = null;
+  const CONF_HI = 0.99;
+  const barPct = v =>
+    Math.max(0, Math.min(100, (v - data.confMin) / (CONF_HI - data.confMin) * 100));
+
+  function makeDivider() {
+    const li = document.createElement('li');
+    li.id = 'roster-divider';
+    li.className = 'flex items-center gap-2 px-3 py-1 bg-amber-500/5 '
+      + 'text-[10px] uppercase tracking-wider text-amber-300/90 select-none';
+    li.innerHTML = '<span class="flex-1 border-t border-dashed border-amber-500/40"></span>'
+      + '<span id="roster-divider-label">cutoff</span>'
+      + '<span class="flex-1 border-t border-dashed border-amber-500/40"></span>';
+    return li;
+  }
+
+  function renderRoster(list) {
+    rosterList.innerHTML = '';
+    rosterRows = [];
+    const scope = rosterScope.value;
+    const frag = document.createDocumentFragment();
+    list.forEach(sp => {
+      const li = document.createElement('li');
+      li.className = 'conf-sp flex items-center gap-3 px-3 py-1.5 text-sm';
+      li.dataset.b = sp.b;
+      const href = '/species/' + encodeURIComponent(sp.s)
+        + (scope ? '?source=' + encodeURIComponent(scope) : '');
+      li.innerHTML =
+        '<a class="min-w-0 flex-1 truncate text-zinc-100 hover:text-emerald-300" '
+        + 'href="' + href + '" title="' + escAttr(sp.s) + '">' + escHtml(sp.c) + '</a>'
+        + '<span class="relative h-1.5 w-24 shrink-0 rounded bg-zinc-800 overflow-hidden">'
+        + '<span class="absolute inset-y-0 left-0 rounded bg-emerald-500/70" '
+        + 'style="width:' + barPct(sp.v).toFixed(1) + '%"></span></span>'
+        + '<span class="w-9 text-right tabular-nums text-xs text-zinc-400">'
+        + sp.v.toFixed(2) + '</span>';
+      frag.appendChild(li);
+      rosterRows.push(li);
+    });
+    rosterDivider = makeDivider();
+    frag.appendChild(rosterDivider);   // repositioned by update()
+    rosterList.appendChild(frag);
+  }
+
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function escAttr(s) { return escHtml(s).replace(/"/g, '&quot;'); }
+
+  function updateRoster(idx) {
+    const scope = rosterScope.value;
+    const curve = scope ? data.speciesCurves[scope] : data.overallSpecies;
+    const kept = (curve && curve[idx]) || 0;
+    rosterKept.textContent = kept;
+    rosterDropped.textContent = rosterRows.length - kept;
+    const lbl = document.getElementById('roster-divider-label');
+    if (lbl) lbl.textContent = '≥ ' + (data.confMin + idx * 0.01).toFixed(2);
+
+    let firstDropped = null;
+    rosterRows.forEach(li => {
+      const b = +li.dataset.b;
+      const dropped = b < idx;
+      li.classList.toggle('opacity-40', dropped);
+      li.classList.toggle('line-through', dropped);
+      // "on the bubble": within a bucket of the cutoff either way.
+      li.classList.toggle('bg-amber-500/10', Math.abs(b - idx) <= 1);
+      if (dropped && firstDropped === null) firstDropped = li;
+    });
+    // Park the cutoff divider between the last kept and first dropped row.
+    if (rosterDivider) {
+      if (firstDropped) rosterList.insertBefore(rosterDivider, firstDropped);
+      else rosterList.appendChild(rosterDivider);
+    }
   }
 
   function update(idx) {
@@ -241,6 +360,8 @@
       const curve = data.detCurves[site];
       if (curve) el.textContent = fmt(curve[idx]);
     });
+
+    updateRoster(idx);
   }
 
   let pending = null;
@@ -252,7 +373,25 @@
     });
   });
 
-  // Initial dot positions.
+  // Switching scope rebuilds the roster from the chosen dataset, then re-styles
+  // it at the current slider position.
+  rosterScope.addEventListener('change', () => {
+    const scope = rosterScope.value;
+    renderRoster(scope ? (data.rosterBySite[scope] || []) : data.rosterOverall);
+    update(parseInt(slider.value, 10));
+  });
+
+  // On release (not every drag tick, which would fight the drag), bring the
+  // cutoff frontier into view — scrolling only within the roster list, not the
+  // whole page.
+  slider.addEventListener('change', () => {
+    if (!rosterDivider) return;
+    const target = rosterDivider.offsetTop - rosterList.clientHeight / 2;
+    rosterList.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+  });
+
+  // Initial render + dot positions.
+  renderRoster(data.rosterOverall);
   update(parseInt(slider.value, 10));
 })();
 </script>
