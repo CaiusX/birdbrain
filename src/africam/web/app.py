@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import functools
 import json
 import math
@@ -236,6 +237,11 @@ def _parse_brief(text: str | None) -> dict:
 TEMPLATES.env.filters["localtime"] = _localtime
 TEMPLATES.env.filters["tz_abbr"] = _tz_abbr
 TEMPLATES.env.filters["parse_brief"] = _parse_brief
+
+
+# Advisory-flock fds held for the process lifetime, so background singletons
+# (the media sweeper) run in only one uvicorn worker when there are several.
+_SINGLETON_LOCKS: list = []
 
 
 # Per-source colour palette for the /species treemap. Hand-picked to evoke
@@ -6209,7 +6215,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
                 raise HTTPException(500, f"failed to render spectrogram: {e}") from e
-        return FileResponse(png, media_type="image/png")
+        return FileResponse(
+            png, media_type="image/png",
+            headers={"Cache-Control": "public, max-age=86400"},  # CDN-cacheable; recoloured only on rare re-tag
+        )
 
     @app.get("/clips/{detection_id}")
     def clip(detection_id: int, fmt: str = Query(default="auto")) -> FileResponse:
@@ -6256,10 +6265,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     # Fall back to OGG if transcode fails for any reason.
                     mp3 = None
             if mp3 and mp3.is_file():
-                return FileResponse(mp3, media_type="audio/mpeg")
+                return FileResponse(
+                    mp3, media_type="audio/mpeg",
+                    headers={"Cache-Control": "public, max-age=31536000, immutable"},
+                )
 
         media_types = {".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac", ".mp3": "audio/mpeg"}
-        return FileResponse(path, media_type=media_types.get(path.suffix.lower(), "audio/wav"))
+        return FileResponse(
+            path, media_type=media_types.get(path.suffix.lower(), "audio/wav"),
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     # --- TBB ingest: token-authed detection upload from capture units (Phase 2) ---
     # Public-reachable but token-gated (see the restrict_public allowlist above).
@@ -6404,9 +6419,19 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             time.sleep(1800 if drained else 30)
 
     if cfg.media_cache_enabled:
-        threading.Thread(
-            target=_media_sweep_loop, name="media-sweeper", daemon=True
-        ).start()
+        # Run the sweeper in only ONE web worker (advisory flock in the data dir)
+        # so multiple uvicorn workers don't all hammer Wikimedia or double the
+        # DB writes / load spikes.
+        _sweep_lock = open(clips_root.parent / ".media-sweeper.lock", "w")
+        try:
+            fcntl.flock(_sweep_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _SINGLETON_LOCKS.append(_sweep_lock)  # hold the lock for process lifetime
+            threading.Thread(
+                target=_media_sweep_loop, name="media-sweeper", daemon=True
+            ).start()
+        except OSError:
+            _sweep_lock.close()  # another worker already runs the sweeper
+            log.info("media_sweep.not_leader")
 
     return app
 

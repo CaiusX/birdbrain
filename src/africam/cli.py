@@ -646,6 +646,7 @@ def web(
     host: Annotated[str, typer.Option("--host", "-H")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p")] = 8000,
     reload: Annotated[bool, typer.Option("--reload")] = False,
+    workers: Annotated[int, typer.Option("--workers", "-w")] = 1,
 ) -> None:
     """Run the web dashboard. Reads from the same SQLite as the pipeline."""
     import uvicorn
@@ -657,6 +658,11 @@ def web(
         host=host,
         port=port,
         reload=reload,
+        # >1 spins up a multiprocess supervisor. SQLite is WAL + busy_timeout so
+        # concurrent readers/writers are safe; background singletons (media
+        # sweeper) are flock-gated to one worker. reload and workers>1 are
+        # mutually exclusive, so only pass workers when actually scaling out.
+        workers=workers if workers > 1 else None,
         log_level=cfg.log_level.lower(),
     )
 
