@@ -315,18 +315,31 @@
       });
       wrap.appendChild(chip);
     }
-    if (sel.size !== all.length) {
-      const reset = document.createElement('button');
-      reset.type = 'button';
-      reset.textContent = 'all';
-      reset.className = baseCls + ' border-zinc-800 text-zinc-400 hover:text-zinc-100';
-      reset.addEventListener('click', () => {
-        saveSourceFilter(null);
-        renderSourceChips();
-        refreshDetections();
-      });
-      wrap.appendChild(reset);
-    }
+    // Persistent select-all / select-none controls, set off from the chips.
+    const sep = document.createElement('span');
+    sep.className = 'mx-1 text-zinc-700 select-none';
+    sep.textContent = '|';
+    wrap.appendChild(sep);
+    const bulk = (label, active, onClick) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.className = baseCls + ' ' + (active
+        ? 'bg-zinc-200/10 border-zinc-500 text-zinc-200'
+        : 'border-zinc-800 text-zinc-400 hover:text-zinc-100');
+      b.addEventListener('click', onClick);
+      wrap.appendChild(b);
+    };
+    bulk('all', sel.size === all.length, () => {
+      saveSourceFilter(null);   // null = no filter = every site
+      renderSourceChips();
+      refreshDetections();
+    });
+    bulk('none', sel.size === 0, () => {
+      saveSourceFilter([]);     // empty = nothing selected
+      renderSourceChips();
+      refreshDetections();
+    });
   }
 
   function rowsUrl() {
@@ -357,6 +370,13 @@
     else                                label = sel.length + ' sites';
     const lbl = document.getElementById('rows-source-label');
     if (lbl) lbl.textContent = label;
+    // "none" selected: show an empty state and skip the fetch — an empty
+    // filter sends no source params, which the server reads as "all", so we
+    // must short-circuit here for select-none to mean nothing.
+    if (sel.length === 0) {
+      list.innerHTML = '<p class="text-zinc-500 text-sm px-5 py-6">No sites selected — choose a site, or “all”.</p>';
+      return;
+    }
     fetch(rowsUrl(), { headers: { 'HX-Request': 'true' } })
       .then((r) => (r.ok ? r.text() : null))
       .then((html) => { if (html != null) list.innerHTML = html; })
