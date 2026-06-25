@@ -47,7 +47,11 @@
             <div class="italic text-zinc-500 text-xs hidden lg:block">{{ r.scientific_name }}</div>
           </td>
           <td class="px-5 py-2 text-right">
-            {% if r.clip_path %}
+            {# clip_path is NULL for synced unit (TBB) detections — their audio
+               lives on the unit and is fetched on demand by /spectrograms and
+               /clips via client_id. Treat a client_id as "has a clip" too, or
+               the unit's rows render a dead, non-clickable bar. #}
+            {% if r.clip_path or r.client_id %}
               <button type="button"
                       data-spectrogram-trigger
                       data-detection-id="{{ r.id }}"
