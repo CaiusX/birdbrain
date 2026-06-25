@@ -243,9 +243,15 @@
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4 items-stretch">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
     <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-2">
-      <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">live video</h3>
-      <a href="{{ src_cfg.url }}" target="_blank" rel="noopener"
-         class="text-xs text-emerald-300 hover:text-emerald-200">open original ↗</a>
+      <h3 class="text-sm font-semibold text-zinc-200 uppercase tracking-wider">
+        {% if video_id %}live video{% else %}live audio{% endif %}
+      </h3>
+      {# "open original" only for YouTube — an audio-only source's url is an
+         alsa:/pulse:/tbb:// handle that a browser can't open. #}
+      {% if video_id %}
+        <a href="{{ src_cfg.url }}" target="_blank" rel="noopener"
+           class="text-xs text-emerald-300 hover:text-emerald-200">open original ↗</a>
+      {% endif %}
     </div>
     {% if video_id %}
       <div class="aspect-video bg-black">
@@ -257,9 +263,13 @@
                 referrerpolicy="strict-origin-when-cross-origin"></iframe>
       </div>
     {% else %}
-      <p class="px-5 py-6 text-sm text-zinc-500">
-        Not a YouTube stream — open the original feed via the link above.
-      </p>
+      {# Audio-only source: no video feed, so fill the panel with the brand
+         mark rather than leaving dead space. #}
+      <div class="aspect-video bg-zinc-950 flex flex-col items-center justify-center gap-3 text-center px-6">
+        <img src="/static/birdbrain-logo.svg" alt="BirdBrain"
+             class="w-28 h-auto opacity-25 select-none" draggable="false">
+        <p class="text-xs text-zinc-600 uppercase tracking-wider">audio-only · no video feed</p>
+      </div>
     {% endif %}
     {% if multisite %}
       <div id="site-panel-{{ name }}"
