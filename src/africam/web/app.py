@@ -6101,6 +6101,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         via yt-dlp (off the event loop), then pipes it through ffmpeg to mono
         MP3. Async so client disconnect cancels the generator and kills ffmpeg
         promptly; a 10-min ffmpeg cap is the backstop for a forgotten tab."""
+        # LAN-only: each listener spawns a dedicated ffmpeg (+ a yt-dlp resolve
+        # for YouTube sources) on the Pi, so this is real per-request load — and
+        # it's purely an /admin auditioning tool, which is itself LAN-only. The
+        # restrict_public middleware lets anonymous public GETs through, so gate
+        # it here against the tunnel. 404 (not 403) to mirror the admin block.
+        if getattr(request.state, "is_public", False):
+            raise HTTPException(404, "Not found")
         cfg_src = _all_sources()[1].get(name)
         if cfg_src is None:
             raise HTTPException(404, "No such source")
