@@ -66,6 +66,13 @@
       <div id="spec-modal-playhead"
            class="absolute top-0 bottom-0 w-px bg-emerald-300 shadow-[0_0_6px_2px_rgba(110,231,183,0.7)] pointer-events-none"
            style="left: 0%; display: none;"></div>
+      {# Frequency axis: the image is rendered 80 Hz–12 kHz on a log scale
+         (ffmpeg start=80:stop=12000, legend off), so label the bottom/top
+         edges. pointer-events-none keeps click-to-seek working. #}
+      <span class="absolute left-1 top-0.5 text-[10px] font-medium text-white/85 tabular-nums
+                   drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none select-none">12&nbsp;kHz</span>
+      <span class="absolute left-1 bottom-0.5 text-[10px] font-medium text-white/85 tabular-nums
+                   drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none select-none">80&nbsp;Hz</span>
     </div>
     <div id="spec-modal-locator-legend"
          class="hidden mt-2 flex items-center gap-3 flex-wrap text-[11px] text-zinc-400">
