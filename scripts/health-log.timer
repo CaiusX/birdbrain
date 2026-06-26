@@ -1,0 +1,11 @@
+# Sample TBB unit resources every minute (see health-log.service).
+[Unit]
+Description=Sample TBB unit resources every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

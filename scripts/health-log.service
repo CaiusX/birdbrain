@@ -1,0 +1,9 @@
+# TinyBirdBrain resource sampler (hang diagnostics). User service, triggered
+# every minute by health-log.timer. Install: scripts/tbb-finish.sh copies this
+# + the timer into ~/.config/systemd/user/ and enables the timer.
+[Unit]
+Description=TBB unit resource sampler (hang diagnostics)
+
+[Service]
+Type=oneshot
+ExecStart=%h/birdbrain/scripts/health-log.sh

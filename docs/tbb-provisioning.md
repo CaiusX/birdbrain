@@ -85,6 +85,15 @@ hardware choice, not a code change:
   sudo cp ~/birdbrain/scripts/tbb-codec.service /etc/systemd/system/
   sudo systemctl daemon-reload && sudo systemctl enable --now tbb-codec
   ```
+  > **Always add the explicit `dtoverlay=rpi-codeczero`.** A genuine Codec Zero
+  > HAT's EEPROM auto-probes and names the ALSA card **`IQaudIOCODEC`** (not
+  > `Zero`) if you *don't* add the overlay — which breaks the `CARD=Zero` device
+  > string, the stock `state.Zero` mixer file, and `tbb-codec.service`. With the
+  > explicit overlay the card is `Zero` and everything lines up.
+  >
+  > Alternative to `tbb-codec.service`: after the `alsactl restore` above, run
+  > `sudo alsactl store` once — the **standard** `alsa-restore.service` then
+  > replays the saved `/var/lib/alsa/asound.state` at every boot, no custom unit.
   (Edit the unit's `ExecStart` path/preset if you cloned elsewhere or use a
   different mic.)
 
@@ -154,6 +163,28 @@ systemctl --user start tbb-update && journalctl --user -u tbb-update -n 20 --no-
 ```
 
 (Override the tracked branch with `AFRICAM_TBB_UPDATE_REF`, e.g. a release tag.)
+
+## 4c. Stability tooling (network resilience — REQUIRED on a Zero 2 W)
+
+The Zero 2 W's wifi defaults to **power-save ON**, which makes a unit silently
+drop off the LAN (mdns/ssh/web all go "no route to host") under light load or
+idle — and without a watchdog it never rejoins until it happens to reboot. A
+unit missing these will look healthy on the bench and then vanish in the field.
+`scripts/tbb-finish.sh` installs all three automatically; the pieces are:
+
+- **Wifi power-save off** — [`scripts/wifi-powersave-off.conf`](../scripts/wifi-powersave-off.conf)
+  → `/etc/NetworkManager/conf.d/` (`wifi.powersave = 2`). The fix that keeps the
+  radio up. Verify with `iw dev wlan0 get power_save` → `off`.
+- **Network watchdog** — [`scripts/africam-net-watchdog.sh`](../scripts/africam-net-watchdog.sh)
+  → `/usr/local/bin/`, with its `.service`/`.timer` as a **root** systemd timer.
+  Probes DNS each minute; cycles wifi after 5 consecutive failures, reboots
+  after 20. The safety net (no shared fate with the python process).
+- **Health-log** — [`scripts/health-log.sh`](../scripts/health-log.sh) + user
+  timer: per-minute resource sampler to `data/health.log` for diagnosing a hang
+  after the fact (read the lines just before the gap).
+
+To add them to an already-provisioned unit, just re-run `tbb-finish.sh` (it's
+idempotent), or install by hand following the copies above.
 
 ## 5. Verify
 

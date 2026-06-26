@@ -45,6 +45,39 @@ systemctl --user enable --now tbb-pipeline tbb-web
 systemctl --user enable --now tbb-update.timer >/dev/null 2>&1 || true
 loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null || true
 
+echo "=== installing stability tooling (wifi power-save off + net-watchdog + health-log) ==="
+# Pi Zero 2 W wifi defaults to power-save ON → the unit silently drops off the
+# LAN. Disable it (system-wide, persists across reconnects). We only reload NM
+# here (not a radio cycle) so we don't kill the SSH session running this script;
+# it takes full effect on the next reconnect/reboot.
+if [ -f scripts/wifi-powersave-off.conf ]; then
+  sudo cp scripts/wifi-powersave-off.conf /etc/NetworkManager/conf.d/ 2>/dev/null \
+    && sudo systemctl reload NetworkManager 2>/dev/null \
+    && echo "  wifi-powersave: installed (effective after reconnect/reboot)" \
+    || echo "  (could not install wifi-powersave-off.conf — need sudo + NetworkManager)"
+fi
+# Network watchdog (root timer): probes DNS each minute, cycles wifi after 5
+# consecutive failures, reboots after 20 — recovers a wedged radio with no
+# shared fate with the python process.
+if [ -f scripts/africam-net-watchdog.sh ]; then
+  if sudo install -m 0755 scripts/africam-net-watchdog.sh /usr/local/bin/africam-net-watchdog 2>/dev/null \
+     && sudo cp scripts/africam-net-watchdog.service scripts/africam-net-watchdog.timer /etc/systemd/system/ 2>/dev/null; then
+    sudo systemctl daemon-reload 2>/dev/null || true
+    sudo systemctl enable --now africam-net-watchdog.timer 2>/dev/null || true
+    echo "  net-watchdog: $(systemctl is-active africam-net-watchdog.timer 2>/dev/null)"
+  else
+    echo "  (could not install net-watchdog — need sudo)"
+  fi
+fi
+# Health-log (user timer): per-minute resource sampler for hang diagnostics.
+if [ -f scripts/health-log.service ]; then
+  chmod +x scripts/health-log.sh 2>/dev/null || true
+  cp scripts/health-log.service scripts/health-log.timer "$HOME/.config/systemd/user/" 2>/dev/null || true
+  systemctl --user daemon-reload
+  systemctl --user enable --now health-log.timer >/dev/null 2>&1 || true
+  echo "  health-log: $(systemctl --user is-active health-log.timer 2>/dev/null)"
+fi
+
 sleep 4
 echo "=== service state ==="
 echo "tbb-pipeline: $(systemctl --user is-active tbb-pipeline)"
