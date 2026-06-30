@@ -88,6 +88,7 @@ from africam.host import host_metrics
 from africam.ingest import IngestBody, hash_token, ingest_batch
 from africam.site_resolver import state_to_resolved
 from africam.sites import Site, load_sites
+from africam.storage.db import ALL_SITES_SENTINEL
 from africam.storage import (
     DailyBriefRow,
     Database,
@@ -3535,6 +3536,81 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "visitors": db.pageview_stats(),
             },
         )
+
+    # Ecologically-implausible marine/coastal/pelagic species — the FP-suggestion
+    # basis for /admin/suppressions. Over-inclusive is harmless: only species
+    # actually detected here surface. (See the marine-FP root-cause analysis.)
+    _MARINE_FP_CANDIDATES = [
+        # Coastal/passage waders & terns
+        "Pluvialis squatarola", "Numenius phaeopus", "Numenius arquata",
+        "Thalasseus sandvicensis", "Sterna hirundo", "Sterna paradisaea",
+        "Arenaria interpres", "Phalacrocorax carbo", "Limosa limosa",
+        "Limosa lapponica", "Calidris alba", "Calidris canutus", "Calidris alpina",
+        "Haematopus ostralegus", "Larus argentatus", "Larus canus",
+        "Chroicocephalus ridibundus",
+        # Pelagic seabirds — impossible inland (albatross/shearwater/petrel/gannet/skua)
+        "Calonectris diomedea", "Puffinus puffinus", "Hydrobates leucorhous",
+        "Morus bassanus", "Fulmarus glacialis", "Stercorarius parasiticus",
+        "Stercorarius skua",
+    ]
+
+    def _suppressions_ctx() -> dict:
+        rules = db.list_species_suppressions()
+        active = {(r["source_name"], r["scientific_name"]) for r in rules}
+        suggestions = [
+            s for s in db.species_site_hi_counts(_MARINE_FP_CANDIDATES)
+            if (s["source_name"], s["scientific_name"]) not in active
+        ][:25]
+        return {
+            # Split for the template: all-sites ("*") rules vs per-site rules.
+            "global_rules": [r for r in rules if r["source_name"] == ALL_SITES_SENTINEL],
+            "site_rules": [r for r in rules if r["source_name"] != ALL_SITES_SENTINEL],
+            "all_sites": ALL_SITES_SENTINEL,
+            "suggestions": suggestions,
+            "sources": sorted(_all_sources()[1].keys()),
+        }
+
+    @app.get("/admin/suppressions", response_class=HTMLResponse)
+    def admin_suppressions(request: Request) -> HTMLResponse:
+        """Manage per-site false-positive suppression rules. The pipeline polls
+        these on its 60s cadence, so a rule lands within a minute, no restart."""
+        return TEMPLATES.TemplateResponse(
+            request, "admin_suppressions.html", _suppressions_ctx()
+        )
+
+    @app.post("/api/suppressions")
+    async def add_suppression(
+        request: Request,
+        source_name: str = Form(...),
+        scientific_name: str = Form(...),
+        common_name: str = Form(default=""),
+        note: str = Form(default=""),
+    ) -> RedirectResponse:
+        if source_name.strip() and scientific_name.strip():
+            db.add_species_suppression(
+                source_name.strip(), scientific_name.strip(),
+                common_name.strip() or None, created_by="admin",
+                note=note.strip() or None,
+            )
+        return RedirectResponse("/admin/suppressions", status_code=303)
+
+    @app.post("/api/suppressions/delete")
+    async def delete_suppression(
+        request: Request,
+        source_name: str = Form(...),
+        scientific_name: str = Form(...),
+    ) -> RedirectResponse:
+        db.remove_species_suppression(source_name.strip(), scientific_name.strip())
+        return RedirectResponse("/admin/suppressions", status_code=303)
+
+    @app.post("/api/suppressions/reactivate-all")
+    async def reactivate_suppression_everywhere(
+        request: Request,
+        scientific_name: str = Form(...),
+    ) -> RedirectResponse:
+        """Fully re-enable a species: drop ALL its rules (all-sites + per-site)."""
+        db.remove_species_everywhere(scientific_name.strip())
+        return RedirectResponse("/admin/suppressions", status_code=303)
 
     @app.get("/admin/replays", response_class=HTMLResponse)
     def admin_replays(

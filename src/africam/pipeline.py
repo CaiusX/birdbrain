@@ -257,6 +257,9 @@ def _consume_stream(
     # Per-source detection-floor override for THIS source (admin UI). None =
     # use cfg.min_confidence. Polled on the same cadence.
     source_min: float | None = None
+    # Per-site false-positive suppression: scientific names to drop for THIS
+    # source (admin UI, /admin/suppressions). Polled on the same cadence.
+    suppressed_species: set[str] = set()
     # How often to refresh per-species threshold overrides. Cheap query, but
     # we don't need millisecond freshness — once a minute is plenty given the
     # UI tweaks land seconds-to-minutes after the user wants them.
@@ -295,6 +298,7 @@ def _consume_stream(
                 species_floor = db.species_min_confidence_map()
                 global_min = db.global_min_confidence()
                 source_min = db.source_min_confidence(cfg.name)
+                suppressed_species = db.species_suppressions_for(cfg.name)
                 # Follow the live on/off switch from /admin: start or stop the
                 # frame watcher to match the gate_highlights setting.
                 if highlight_gate is not None:
@@ -381,6 +385,15 @@ def _consume_stream(
                 d for d in detections
                 if d.confidence >= species_floor.get(d.scientific_name, effective_min)
             ]
+
+        # Per-site false-positive suppression: hard-drop species flagged at this
+        # source (e.g. the site-locked marine-bird phantoms) regardless of
+        # confidence — a coarse range filter can't veto them, so we do it here.
+        if suppressed_species and detections:
+            kept = [d for d in detections if d.scientific_name not in suppressed_species]
+            if len(kept) != len(detections):
+                slog.debug("detect.suppressed", dropped=len(detections) - len(kept))
+            detections = kept
 
         # Sandbox: feed the live monitor and skip ALL persistence (no clips, no
         # DB row). Detection above already ran, so the operator sees real

@@ -33,6 +33,7 @@ from africam.storage.models import (
     SourceStateRow,
     SpeciesNoteRow,
     SpeciesSiteNoteRow,
+    SpeciesSuppressionRow,
     WeatherObservationRow,
     WorkerDowntimeRow,
     WorkerHeartbeatRow,
@@ -50,6 +51,11 @@ GLOBAL_MIN_CONFIDENCE_KEY = "global_min_confidence"
 # runtime sources uniformly, so editing a cutoff on /admin is live for any
 # source without a worker restart.
 SOURCE_MIN_CONFIDENCE_PREFIX = "source_min_confidence:"
+
+# Sentinel source_name for an ALL-SITES species suppression rule (see
+# SpeciesSuppressionRow). species_suppressions_for(site) returns both the
+# site's own rules and any "*" rules, so one row suppresses everywhere.
+ALL_SITES_SENTINEL = "*"
 
 
 class Database:
@@ -1490,6 +1496,105 @@ class Database:
             SOURCE_MIN_CONFIDENCE_PREFIX + source_name,
             None if value is None else repr(float(value)),
         )
+
+    # --- Per-site species suppression (false-positive rules) ---------------
+    def species_suppressions_for(self, source_name: str) -> set[str]:
+        """Scientific names suppressed at this source — the site's own rules
+        PLUS any all-sites (``*``) rules. The worker polls this on its 60s
+        cadence and drops matching detections post-analyze."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(SpeciesSuppressionRow.scientific_name)
+                .where(SpeciesSuppressionRow.source_name.in_(
+                    (source_name, ALL_SITES_SENTINEL)))
+            ).all()
+        return {r[0] for r in rows}
+
+    def list_species_suppressions(self) -> list[dict]:
+        """All suppression rules (newest first) for the admin page."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(SpeciesSuppressionRow)
+                .order_by(SpeciesSuppressionRow.created_at.desc())
+            ).scalars().all()
+            return [
+                {
+                    "source_name": r.source_name,
+                    "scientific_name": r.scientific_name,
+                    "common_name": r.common_name,
+                    "created_at": r.created_at,
+                    "created_by": r.created_by,
+                    "note": r.note,
+                }
+                for r in rows
+            ]
+
+    def add_species_suppression(
+        self, source_name: str, scientific_name: str,
+        common_name: str | None = None, created_by: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Upsert a per-site suppression rule (idempotent on (site, species))."""
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesSuppressionRow, (source_name, scientific_name))
+            if row is None:
+                row = SpeciesSuppressionRow(
+                    source_name=source_name, scientific_name=scientific_name
+                )
+                s.add(row)
+            row.common_name = common_name
+            row.created_at = datetime.now(UTC)
+            row.created_by = created_by
+            row.note = note
+
+    def remove_species_suppression(
+        self, source_name: str, scientific_name: str
+    ) -> bool:
+        """Delete one suppression rule (= re-enable at that site/scope). False
+        if it didn't exist."""
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesSuppressionRow, (source_name, scientific_name))
+            if row is None:
+                return False
+            s.delete(row)
+        return True
+
+    def remove_species_everywhere(self, scientific_name: str) -> int:
+        """Fully re-enable a species: delete ALL its suppression rules (the
+        all-sites ``*`` rule and every per-site one). Returns rows removed."""
+        with self._Session() as s, s.begin():
+            res = s.execute(
+                delete(SpeciesSuppressionRow)
+                .where(SpeciesSuppressionRow.scientific_name == scientific_name)
+            )
+            return res.rowcount or 0
+
+    def species_site_hi_counts(
+        self, scientific_names: list[str], min_conf: float = 0.7
+    ) -> list[dict]:
+        """Per (source, species) count of detections >= ``min_conf`` for the
+        given species, busiest first. Feeds the admin FP-suggestion list (e.g.
+        the marine-bird phantoms) so a site-locked FP is one click to suppress."""
+        if not scientific_names:
+            return []
+        with self._Session() as s:
+            rows = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    DetectionRow.scientific_name,
+                    func.min(DetectionRow.common_name),
+                    func.count(),
+                )
+                .where(DetectionRow.scientific_name.in_(scientific_names))
+                .where(DetectionRow.confidence >= min_conf)
+                .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
+                .order_by(func.count().desc())
+            ).all()
+        return [
+            {"source_name": r[0], "scientific_name": r[1],
+             "common_name": r[2], "n_hi": r[3]}
+            for r in rows
+        ]
 
     def list_detected_species(self) -> list[tuple[str, str]]:
         """Distinct (scientific_name, common_name) ever detected, ordered by

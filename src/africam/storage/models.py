@@ -295,6 +295,25 @@ class SourceDisableRow(Base):
     disabled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class SpeciesSuppressionRow(Base):
+    """A per-site false-positive suppression rule: drop detections of
+    ``scientific_name`` at ``source_name`` in the pipeline. For the site-locked
+    high-confidence phantoms (e.g. "Grey Plover @ Tau") that a coarse range
+    filter can't veto. The worker polls these on its 60s species-floor cadence,
+    so adding a rule on /admin takes effect within a minute, no restart; deleting
+    the row re-enables the species at that site. Composite key = (site, species).
+    """
+
+    __tablename__ = "species_suppressions"
+
+    source_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    scientific_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    common_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class DailyBriefRow(Base):
     """One-paragraph cross-site digest of a single UTC date. Generated once
     after midnight UTC and never regenerated — the day's data is fixed.
