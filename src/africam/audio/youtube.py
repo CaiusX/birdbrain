@@ -78,6 +78,16 @@ class YouTubeSource(AudioSource):
         runtime = _detect_js_runtime()
         if runtime:
             cmd += ["--js-runtimes", runtime]
+        # Force the mweb player client. As of 2026-07 YouTube gates live-stream
+        # formats such that yt-dlp's default clients return "No video formats
+        # found!" — resolution silently fails and the source goes dark on its
+        # next manifest expiry. The mweb client still publishes a working HLS
+        # manifest for these live streams. We pin mweb alone (rather than
+        # default,mweb) to keep each resolve to a single client query: on a
+        # pipeline restart every source re-resolves at once, and doubling the
+        # YouTube request burst raises the odds of tripping the IP bot-block.
+        # Revisit/drop this once yt-dlp is upgraded (the durable fix).
+        cmd += ["--extractor-args", "youtube:player_client=mweb"]
         cmd += [self.url]
 
         try:
