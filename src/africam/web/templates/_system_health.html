@@ -38,6 +38,12 @@
     {% endfor %}
   </div>
 {% endif %}
+{% if h.notes and h.notes.failing %}
+  <div class="px-4 py-2 bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs rounded-lg mb-3">
+    ⚠ Notes worker stalled — daily briefs &amp; AI commentary aren't generating.
+    <span class="text-rose-200/70">{{ h.notes.error_msg }}{% if h.notes.error_age_s is not none %} ({{ dur(h.notes.error_age_s) }} ago){% endif %}</span>
+  </div>
+{% endif %}
 
 <div class="grid grid-cols-2 md:grid-cols-3 gap-px bg-zinc-800/50">
 
@@ -110,6 +116,21 @@
   {% set a = h.last_det_age_s %}
   {% set dc = 'text-zinc-600' if a is none else ('text-emerald-300' if a < 900 else ('text-amber-300' if a < 3600 else 'text-rose-300')) %}
   {{ card('Last detection', dur(a) ~ (' ago' if a is not none else ''), dc, h.det_24h ~ ' in last 24h') }}
+
+  {# Notes AI (daily briefs + commentary flowing?) — catches a silent worker
+     stall, e.g. exhausted API credits, that only shows as missing briefs days later #}
+  {% set nz = h.notes %}
+  {% if nz and nz.failing %}
+    {{ card('Notes AI', 'stalled', 'text-rose-300',
+            (nz.error_msg or 'worker error') ~ (' · ' ~ dur(nz.error_age_s) ~ ' ago' if nz.error_age_s is not none else '')) }}
+  {% elif not nz or nz.brief_age_days is none %}
+    {{ card('Notes AI', 'n/a', 'text-zinc-600', 'no briefs yet') }}
+  {% elif nz.brief_age_days >= 2 %}
+    {{ card('Notes AI', 'stale', 'text-amber-300',
+            'last brief ' ~ nz.brief_date ~ ' · ' ~ nz.brief_age_days ~ 'd behind') }}
+  {% else %}
+    {{ card('Notes AI', 'OK', 'text-emerald-300', 'last brief ' ~ nz.brief_date) }}
+  {% endif %}
 
 </div>
 <div class="text-[10px] text-zinc-600 mt-2 text-right">updated {{ h.now.strftime('%H:%M:%S') }} UTC · refreshes every 30s</div>

@@ -1139,6 +1139,14 @@ def _anomaly_tick(
 # ---------- worker loop: priority router ----------
 
 
+# app_settings keys for the worker's own liveness. last_ok is stamped after
+# every clean tick; last_error ("<iso>|<msg>") after any failing one. The admin
+# health panel reads both so a silent stall — e.g. exhausted API credits, which
+# once killed briefs unnoticed for ~10 days — surfaces immediately.
+NOTES_HEALTH_OK_KEY = "notes_worker_last_ok"
+NOTES_HEALTH_ERROR_KEY = "notes_worker_last_error"
+
+
 def _worker_loop(
     db: Database, cfg: AppConfig, sources: list[SourceConfig]
 ) -> None:
@@ -1198,8 +1206,17 @@ def _worker_loop(
                 # ticks the combined rate is well within budget.
                 _species_tick(db, cfg, sources, client)
                 _species_site_tick(db, cfg, sources, client)
+            # A tick that completed without raising means the worker is alive
+            # and (if it did any work) the API is reachable — clear any stale
+            # error so a recovery shows up on the health panel immediately.
+            db.set_setting(NOTES_HEALTH_OK_KEY, datetime.now(UTC).isoformat())
+            db.set_setting(NOTES_HEALTH_ERROR_KEY, None)
         except Exception as e:
             log.warning("notes.tick_failed", error=str(e)[:300])
+            db.set_setting(
+                NOTES_HEALTH_ERROR_KEY,
+                f"{datetime.now(UTC).isoformat()}|{str(e)[:300]}",
+            )
         time.sleep(cfg.notes_tick_seconds)
 
 

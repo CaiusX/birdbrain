@@ -3507,6 +3507,36 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         infer_pct = round(workers_running * inf_ms / (chunk_s * 1000) * 100)
         infer_max = int(chunk_s * 1000 / inf_ms)
 
+        # Notes / AI-commentary worker liveness. last_error is the authoritative
+        # failure signal (set by the worker on any failing tick, "<iso>|<msg>");
+        # brief freshness is the user-visible "reports flowing" signal. A stalled
+        # worker (e.g. exhausted API credits) once went unnoticed for ~10 days —
+        # this makes it a red card + banner on /admin.
+        def _iso(v: str | None) -> datetime | None:
+            if not v:
+                return None
+            try:
+                return datetime.fromisoformat(v)
+            except ValueError:
+                return None
+
+        notes_last_ok = _iso(db.get_setting("notes_worker_last_ok"))
+        err_raw = db.get_setting("notes_worker_last_error")
+        err_at = err_msg = None
+        if err_raw and "|" in err_raw:
+            ts, _, err_msg = err_raw.partition("|")
+            err_at = _iso(ts)
+        # A stale error older than the last clean tick means it already
+        # recovered — only flag when the error is the worker's latest word.
+        notes_failing = bool(
+            err_at and (notes_last_ok is None or err_at > notes_last_ok)
+        )
+        latest_brief = db.get_latest_daily_brief()
+        brief_date = latest_brief.date_utc if latest_brief else None
+        # A brief for UTC date D is generated just after D ends, so "yesterday"
+        # (age 1) is the freshest normal state; ≥2 days behind means a gap.
+        brief_age_days = (now.date() - brief_date).days if brief_date else None
+
         return {
             "health": {
                 "now": now,
@@ -3521,6 +3551,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "infer_pct": infer_pct,
                 "infer_max": infer_max,
                 "infer_ms": round(inf_ms),
+                "notes": {
+                    "failing": notes_failing,
+                    "error_msg": err_msg if notes_failing else None,
+                    "error_age_s": (
+                        max(0, int((now - err_at).total_seconds()))
+                        if notes_failing and err_at else None
+                    ),
+                    "brief_date": brief_date.isoformat() if brief_date else None,
+                    "brief_age_days": brief_age_days,
+                },
             }
         }
 

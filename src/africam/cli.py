@@ -82,6 +82,67 @@ def refresh_cookies(
         raise typer.Exit(code=1)
 
 
+@app.command(name="backfill-briefs")
+def backfill_briefs(
+    start: Annotated[
+        str, typer.Option("--from", help="First UTC date (YYYY-MM-DD), inclusive.")
+    ],
+    end: Annotated[
+        str | None,
+        typer.Option("--to", help="Last UTC date, inclusive. Default: yesterday (UTC)."),
+    ] = None,
+    overwrite: Annotated[
+        bool,
+        typer.Option("--overwrite", help="Regenerate dates that already have a brief."),
+    ] = False,
+) -> None:
+    """Generate daily briefs for a past UTC date range — fills gaps left by an
+    outage (e.g. the notes worker stalled on exhausted API credits). Skips dates
+    that already have a brief unless --overwrite, and skips dates with no data."""
+    from datetime import date as _date
+
+    from africam.notes import generate_brief_for_date
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    db = Database(cfg.db_url)
+    sources = load_sources(cfg.sources_file)
+
+    d0 = _date.fromisoformat(start)
+    d1 = _date.fromisoformat(end) if end else (datetime.now(UTC).date() - timedelta(days=1))
+    if d1 < d0:
+        console.print("[red]--to is before --from[/red]")
+        raise typer.Exit(code=1)
+
+    have = {b.date_utc for b in db.list_daily_briefs(limit=400)}
+    d = d0
+    made = skipped = empty = failed = 0
+    while d <= d1:
+        if d in have and not overwrite:
+            console.print(f"[dim]{d} — already have a brief, skipping[/dim]")
+            skipped += 1
+        else:
+            try:
+                text = generate_brief_for_date(db, cfg, d, sources)
+                if text:
+                    console.print(f"[green]{d} — generated ({len(text)} chars)[/green]")
+                    made += 1
+                else:
+                    console.print(f"[yellow]{d} — no detections that day, skipped[/yellow]")
+                    empty += 1
+            except Exception as e:  # noqa: BLE001 — report and continue the range
+                console.print(f"[red]{d} — failed: {str(e)[:200]}[/red]")
+                failed += 1
+        d += timedelta(days=1)
+
+    console.print(
+        f"\nDone: [green]{made} generated[/green], {skipped} skipped, "
+        f"{empty} no-data, [red]{failed} failed[/red]."
+    )
+    if failed:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def detections(
     limit: Annotated[int, typer.Option("--limit", "-n")] = 25,
