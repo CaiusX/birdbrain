@@ -4,12 +4,26 @@
 # process — that was the recovery gap on the 7-day silent stall: yt-dlp failed
 # DNS forever, and the app had no way to kick the kernel/networking layer.
 #
-# Escalation on consecutive failures:
-#   RESEED_AT  — if NM has no wifi profile at all, rewrite one from the
-#                cloud-init seed on the boot partition. Cycling a radio cannot
-#                help when there is nothing to connect *to*; see below.
+# Escalation, on failures within a rolling WINDOW of the last N probes:
+#   RESEED_AT     — if NM has no wifi profile at all, rewrite one from the
+#                   cloud-init seed on the boot partition. Cycling a radio cannot
+#                   help when there is nothing to connect *to*; see below.
 #   WIFI_CYCLE_AT — cycle the radio (wedged association)
-#   REBOOT_AT     — reboot (wedged kernel/driver)
+#   REBOOT_AT     — reboot (wedged kernel/driver), rate-limited; see below.
+#
+# WHY A WINDOW AND NOT A CONSECUTIVE COUNT (2026-07-29):
+# The original version counted *consecutive* failures and reset the counter on
+# any single success. On 2026-07-26 the main Pi lost DNS for 6h15m and the
+# watchdog never fired once: the resolver was flapping, so an occasional lucky
+# getent kept zeroing the counter while every yt-dlp call still failed. A
+# ratio over a rolling window cannot be defeated that way — intermittent
+# success no longer erases the history of failure.
+#
+# WHY THE REBOOT IS RATE-LIMITED:
+# Rebooting cannot fix an upstream outage (dead router, ISP down). Under the
+# old logic a genuine 6-hour outage would have produced ~17 pointless reboots,
+# each one costing a minute of capture and risking a bad shutdown. last_reboot
+# lives in /var/lib so it survives the reboot it is meant to throttle.
 #
 # The reseed step exists because of tbb-test, 2026-07-23: both NetworkManager
 # connection profiles were truncated to 0 bytes at 07:40 UTC and the unit then
@@ -18,27 +32,73 @@
 # cycle the radio and reboot, neither of which can recreate a deleted profile.
 set -u
 
-PROBE_HOST="${PROBE_HOST:-www.youtube.com}"
-RESEED_AT="${RESEED_AT:-3}"
-WIFI_CYCLE_AT="${WIFI_CYCLE_AT:-5}"
-REBOOT_AT="${REBOOT_AT:-20}"
-STATE_FILE="${STATE_FILE:-/var/lib/africam-net-watchdog/fail_count}"
+# Any one of these resolving counts as success, so a single host being pulled
+# from DNS can never be mistaken for the resolver being down.
+PROBE_HOSTS="${PROBE_HOSTS:-www.youtube.com cloudflare.com}"
+WINDOW="${WINDOW:-30}"                  # probes retained (= minutes at 1/min)
+RESEED_AT="${RESEED_AT:-3}"             # failures in window
+WIFI_CYCLE_AT="${WIFI_CYCLE_AT:-5}"     # failures in window
+REBOOT_AT="${REBOOT_AT:-20}"            # failures in window
+WIFI_CYCLE_COOLDOWN_S="${WIFI_CYCLE_COOLDOWN_S:-600}"     # 10 min
+REBOOT_MIN_INTERVAL_S="${REBOOT_MIN_INTERVAL_S:-21600}"   # 6 h
+
+STATE_DIR="${STATE_DIR:-/var/lib/africam-net-watchdog}"
+HISTORY_FILE="${HISTORY_FILE:-$STATE_DIR/history}"
+LAST_CYCLE_FILE="${LAST_CYCLE_FILE:-$STATE_DIR/last_cycle}"
+LAST_REBOOT_FILE="${LAST_REBOOT_FILE:-$STATE_DIR/last_reboot}"
+
 SEED_FILE="${SEED_FILE:-/boot/firmware/network-config}"
 KEYFILE="${KEYFILE:-/etc/NetworkManager/system-connections/preconfigured.nmconnection}"
 # Every nmcli call goes through this one absolute path, so a test harness can
 # point it at a stub and no code path can escape to the real radio.
 NMCLI="${NMCLI:-/usr/bin/nmcli}"
+SYSTEMCTL="${SYSTEMCTL:-/usr/bin/systemctl}"
+GETENT="${GETENT:-/usr/bin/getent}"
 
-mkdir -p "$(dirname "$STATE_FILE")"
+mkdir -p "$STATE_DIR"
 
-if getent hosts "$PROBE_HOST" >/dev/null 2>&1; then
-    [ -f "$STATE_FILE" ] && rm -f "$STATE_FILE"
+now=$(date +%s)
+
+# Read an epoch stamp, treating a missing/garbage file as "never".
+read_stamp() {
+    local v
+    v=$(cat "$1" 2>/dev/null) || return 1
+    case "$v" in (*[!0-9]*|'') return 1 ;; esac
+    printf '%s\n' "$v"
+}
+
+probe_ok() {
+    local h
+    for h in $PROBE_HOSTS; do
+        if "$GETENT" hosts "$h" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if probe_ok; then result=0; else result=1; fi
+
+# Append this probe and keep only the newest WINDOW samples.
+history=$(cat "$HISTORY_FILE" 2>/dev/null | tr -cd '01')
+history="${history}${result}"
+if [ "${#history}" -gt "$WINDOW" ]; then
+    history="${history: -$WINDOW}"
+fi
+printf '%s\n' "$history" > "$HISTORY_FILE"
+
+fails=$(printf '%s' "$history" | tr -cd '1' | wc -c)
+fails=$((fails))
+
+# Healthy and nothing pending — stay quiet so the journal is not spammed.
+if [ "$result" -eq 0 ] && [ "$fails" -eq 0 ]; then
     exit 0
 fi
 
-count=$(( $(cat "$STATE_FILE" 2>/dev/null || echo 0) + 1 ))
-echo "$count" > "$STATE_FILE"
-logger -t africam-net-watchdog "DNS probe '$PROBE_HOST' failed (consecutive=$count)"
+logger -t africam-net-watchdog \
+    "DNS probe result=$result ($fails/${#history} failed in window)"
+
+[ "$fails" -eq 0 ] && exit 0
 
 # Does NetworkManager know about any wifi connection at all?
 have_wifi_profile() {
@@ -114,27 +174,41 @@ EOF
     return 0
 }
 
-if [ "$count" -ge "$REBOOT_AT" ]; then
-    logger -t africam-net-watchdog "rebooting (reached $REBOOT_AT consecutive failures)"
-    rm -f "$STATE_FILE"
-    /usr/bin/systemctl reboot
-    exit 0
+if [ "$fails" -ge "$REBOOT_AT" ]; then
+    last_reboot=$(read_stamp "$LAST_REBOOT_FILE") || last_reboot=0
+    since=$(( now - last_reboot ))
+    if [ "$since" -ge "$REBOOT_MIN_INTERVAL_S" ]; then
+        logger -t africam-net-watchdog \
+            "rebooting ($fails/${#history} probes failed in window)"
+        printf '%s\n' "$now" > "$LAST_REBOOT_FILE"
+        : > "$HISTORY_FILE"     # do not re-trigger on the stale window after boot
+        sync
+        "$SYSTEMCTL" reboot
+        exit 0
+    fi
+    logger -t africam-net-watchdog \
+        "reboot threshold met ($fails/${#history}) but last reboot was ${since}s ago (<${REBOOT_MIN_INTERVAL_S}s) — probably upstream, not us; not rebooting"
 fi
 
 # Check for a missing profile before falling back to the blunter remedies — a
 # reseed fixes the one failure mode the others provably cannot.
-if [ "$count" -ge "$RESEED_AT" ] && ! have_wifi_profile; then
+if [ "$fails" -ge "$RESEED_AT" ] && ! have_wifi_profile; then
     logger -t africam-net-watchdog "no wifi profile known to NetworkManager — reseeding"
     if reseed_wifi; then
-        rm -f "$STATE_FILE"     # give the new profile a clean run at it
+        : > "$HISTORY_FILE"     # give the new profile a clean run at it
         exit 0
     fi
     logger -t africam-net-watchdog "reseed failed — falling through to radio cycle/reboot"
 fi
 
-if [ "$count" -eq "$WIFI_CYCLE_AT" ]; then
-    logger -t africam-net-watchdog "cycling wifi (reached $WIFI_CYCLE_AT consecutive failures)"
-    "$NMCLI" radio wifi off
-    sleep 2
-    "$NMCLI" radio wifi on
+if [ "$fails" -ge "$WIFI_CYCLE_AT" ]; then
+    last_cycle=$(read_stamp "$LAST_CYCLE_FILE") || last_cycle=0
+    if [ $(( now - last_cycle )) -ge "$WIFI_CYCLE_COOLDOWN_S" ]; then
+        logger -t africam-net-watchdog \
+            "cycling wifi ($fails/${#history} probes failed in window)"
+        printf '%s\n' "$now" > "$LAST_CYCLE_FILE"
+        "$NMCLI" radio wifi off
+        sleep 2
+        "$NMCLI" radio wifi on
+    fi
 fi
