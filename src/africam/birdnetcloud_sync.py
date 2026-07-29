@@ -35,6 +35,8 @@ Placement: a background thread in ``tbb-web``, alongside the central sync agent.
 from __future__ import annotations
 
 import json
+import shutil
+import socket
 import threading
 from datetime import UTC
 from pathlib import Path
@@ -47,6 +49,9 @@ from africam.logging import get_logger
 from africam.storage import Database, DetectionRow
 
 log = get_logger(__name__)
+
+# Reported to their dashboard as the station firmware.
+FIRMWARE_VERSION = "birdbrain-bridge/1.0"
 
 
 class CloudState:
@@ -202,20 +207,137 @@ def upload_clip(
     return resp.status_code == 200
 
 
-def post_heartbeat(endpoint: str, token: str, *, timeout: float = 15.0) -> bool:
+def _default_route() -> tuple[str | None, str | None]:
+    """(gateway, interface) from /proc/net/route, or (None, None)."""
+    try:
+        with open("/proc/net/route", encoding="utf-8") as fh:
+            next(fh, None)
+            for line in fh:
+                f = line.split()
+                if len(f) > 2 and f[1] == "00000000":
+                    gw = int(f[2], 16).to_bytes(4, "little")
+                    return ".".join(str(b) for b in gw), f[0]
+    except (OSError, ValueError):
+        pass
+    return None, None
+
+
+def _local_ip() -> str | None:
+    """Address of the interface that would reach the internet. The connect() is
+    on a UDP socket, so nothing is actually sent."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(1.0)
+            s.connect(("1.1.1.1", 53))
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
+def host_info(db: Database | None = None, state: CloudState | None = None) -> dict:
+    """Station facts for their dashboard's station card and Network tab.
+
+    Field names must match their edge agent exactly (``firmware_version``, not
+    ``version``): the API accepts anything with a 204, so a wrong key is not an
+    error, it is an empty panel on the dashboard and a station that looks like
+    it never registered.
+
+    Every lookup is best-effort — a heartbeat that reports a little is better
+    than one that raises.
+    """
+    info: dict = {"firmware_version": FIRMWARE_VERSION}
+
+    gw, iface = _default_route()
+    info["hostname"] = socket.gethostname() or None
+    info["local_ip"] = _local_ip()
+    info["gateway"] = gw
+    if iface:
+        try:
+            info["mac_address"] = (
+                Path(f"/sys/class/net/{iface}/address").read_text(encoding="utf-8").strip()
+            )
+        except OSError:
+            pass
+
+    try:
+        model = Path("/proc/device-tree/model").read_text(encoding="utf-8")
+        info["hardware_detected"] = model.replace("\x00", "").strip() or None
+    except OSError:
+        pass
+
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                gb = int(line.split()[1]) / 1024 / 1024
+                # Snap up to the nearest board size — a 512MB Pi Zero reports
+                # ~0.4GB usable once the GPU takes its share.
+                for size in (1, 2, 4, 8, 16, 32):
+                    if gb <= size * 1.06:
+                        info["ram_gb"] = size
+                        break
+                else:
+                    info["ram_gb"] = round(gb)
+                break
+    except (OSError, ValueError):
+        pass
+
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            if line.startswith("PRETTY_NAME="):
+                info["os_name"] = line.split("=", 1)[1].strip().strip('"')
+                break
+    except OSError:
+        pass
+
+    try:
+        info["free_disk_gb"] = round(shutil.disk_usage("/").free / 1024**3, 1)
+    except OSError:
+        pass
+
+    # Real backlog, so the dashboard can show the bridge falling behind.
+    if db is not None and state is not None:
+        try:
+            info["queue_depth"] = max(0, current_max_id(db) - state.last_pushed_id)
+        except Exception:
+            info["queue_depth"] = 0
+    else:
+        info["queue_depth"] = 0
+
+    return {k: v for k, v in info.items() if v is not None}
+
+
+def post_heartbeat(
+    endpoint: str,
+    token: str,
+    *,
+    db: Database | None = None,
+    state: CloudState | None = None,
+    timeout: float = 15.0,
+) -> bool:
     """Keep the station reading 'live' in their dashboard between detections.
-    A quiet night is not a dead station."""
+    A quiet night is not a dead station.
+
+    Their API answers 204 No Content on success.
+    """
     url = endpoint.rstrip("/") + "/api/v1/devices/heartbeat"
     try:
         resp = requests.post(
             url,
-            json={"version": "birdbrain-bridge", "queue_depth": 0},
+            json=host_info(db, state),
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
         )
-    except requests.RequestException:
+    except requests.RequestException as e:
+        log.warning("birdnetcloud.heartbeat_failed", error=str(e)[:200])
         return False
-    return resp.status_code // 100 == 2
+    if resp.status_code // 100 != 2:
+        log.warning(
+            "birdnetcloud.heartbeat_rejected",
+            status=resp.status_code,
+            body=resp.text[:200],
+        )
+        return False
+    return True
 
 
 def sync_once(db: Database, cfg: AppConfig, state: CloudState, token: str) -> tuple[int, int]:
@@ -267,7 +389,7 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
                     last_pushed_id=state.last_pushed_id,
                 )
             else:
-                post_heartbeat(cfg.birdnetcloud_endpoint, token)
+                post_heartbeat(cfg.birdnetcloud_endpoint, token, db=db, state=state)
         except AuthRejected as e:
             # Log once per outage rather than every tick — a rotated token would
             # otherwise fill the journal until someone notices.

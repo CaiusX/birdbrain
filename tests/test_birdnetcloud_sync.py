@@ -158,3 +158,23 @@ def test_token_can_come_from_a_file(tmp_path):
     f.write_text("  secret-token\n")
     cfg = _cfg(tmp_path, birdnetcloud_token=None, birdnetcloud_token_file=f)
     assert bnc.resolve_token(cfg) == "secret-token"
+
+
+def test_heartbeat_uses_their_field_names(tmp_path):
+    """Regression: we first sent {"version": ...}. Their agent sends
+    ``firmware_version``, and the API 204s on anything — so the wrong key was
+    not an error, it was a station that looked like it never registered."""
+    info = bnc.host_info()
+    assert info["firmware_version"] == bnc.FIRMWARE_VERSION
+    assert "version" not in info
+    # The station card / Network tab fields their dashboard reads.
+    for key in ("hostname", "os_name", "hardware_detected", "free_disk_gb"):
+        assert key in info, f"heartbeat missing {key}"
+    assert info["queue_depth"] == 0
+    assert all(v is not None for v in info.values())
+
+
+def test_heartbeat_reports_real_backlog(tmp_path):
+    db = _db_with(tmp_path, [0.9] * 7)
+    state = bnc.CloudState(tmp_path / "s.json", 2)
+    assert bnc.host_info(db, state)["queue_depth"] == 5
