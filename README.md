@@ -47,6 +47,14 @@ Public exposure is via Cloudflare Tunnel (`cloudflared` user service);
 `/admin` and all mutating endpoints return 404 over the tunnel, so the
 public side is effectively read-only without app-level auth.
 
+## How well does it work?
+
+[`docs/performance.md`](docs/performance.md) is a measured report over the first
+11 weeks — 944k detections across 21 sources and ~23,750 stream-hours — with
+what's trustworthy, what isn't, and the failure modes named and evidenced.
+[`docs/detection-examples.md`](docs/detection-examples.md) has the worked
+examples behind it.
+
 ## Acknowledgements
 
 This project would not exist without:
