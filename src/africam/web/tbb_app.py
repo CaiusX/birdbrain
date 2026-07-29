@@ -40,6 +40,7 @@ from sqlalchemy import func, select
 from africam.config import AppConfig
 from africam.logging import get_logger
 from africam.storage import Database, DetectionRow, WorkerHeartbeatRow
+from africam.birdnetcloud_sync import start_cloud_agent
 from africam.tbb_sync import start_sync_agent
 
 log = get_logger(__name__)
@@ -479,6 +480,9 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
     # configured, so tests/imports and offline units never touch the network.
     app.state.sync_stop = threading.Event()
     start_sync_agent(db, cfg, app.state.sync_stop)
+    # Optional second target: BirdNET-Cloud. Shares the stop event; no-op
+    # without a token, so units that don't opt in are untouched.
+    start_cloud_agent(db, cfg, app.state.sync_stop)
 
     return app
 
