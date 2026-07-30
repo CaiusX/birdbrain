@@ -55,7 +55,26 @@ echo
 echo "=== 2/4  wifi power-save off ==="
 install_verified scripts/wifi-powersave-off.conf \
     /etc/NetworkManager/conf.d/wifi-powersave-off.conf 0644
-echo "  installed (takes effect on reconnect, below)"
+# The conf.d file only supplies the DEFAULT for connections whose own
+# wifi.powersave is unset, and NM applies it at activation only. Set it
+# explicitly on the active profile too, so it does not depend on the global.
+PSCON="$(nmcli -t -f NAME,TYPE connection show --active | awk -F: '$2=="802-11-wireless"{print $1; exit}')"
+if [ -n "${PSCON:-}" ]; then
+    nmcli connection modify "$PSCON" 802-11-wireless.powersave 2 2>/dev/null \
+        && echo "  $PSCON: wifi.powersave=disable (persisted)"
+fi
+# Deliberately NOT activating it here. `nmcli connection up` on an ALREADY-ACTIVE
+# connection is a no-op, and `device reapply` refuses this setting outright
+# ("Can't reapply changes to '802-11-wireless.powersave'") — the only way to
+# apply it live is a full down/up, which drops all 18 ffmpeg streams at once and
+# makes every worker re-resolve through yt-dlp simultaneously. That is exactly
+# the pattern that trips YouTube's per-IP bot-block and takes every stream down
+# for hours. Not worth it for a setting that applies itself on the next reboot.
+if [ "$(iw dev "${PSCON:+wlan0}" get power_save 2>/dev/null | awk '{print $3}')" = "on" ]; then
+    echo "  NOTE: power-save still ON in the driver — applies on next reboot."
+    echo "        To force now (drops the link, risks a YouTube bot-block):"
+    echo "          nmcli connection down '$PSCON' && nmcli connection up '$PSCON'"
+fi
 
 echo
 echo "=== 3/4  fallback DNS ==="
