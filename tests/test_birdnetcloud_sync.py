@@ -178,3 +178,66 @@ def test_heartbeat_reports_real_backlog(tmp_path):
     db = _db_with(tmp_path, [0.9] * 7)
     state = bnc.CloudState(tmp_path / "s.json", 2)
     assert bnc.host_info(db, state)["queue_depth"] == 5
+
+
+def test_session_is_reused_and_carries_auth(tmp_path):
+    """Without keep-alive every POST pays a fresh TLS handshake — 1.4s of a 1.6s
+    request from a Pi Zero, ~9MB/day of handshake traffic on a field link."""
+    s = bnc.make_session("tok-123")
+    assert s.headers["Authorization"] == "Bearer tok-123"
+    # No urllib3 Retry: their API has no idempotency key, so a transparently
+    # retried POST that did reach the server would duplicate the detection.
+    for adapter in s.adapters.values():
+        assert adapter.max_retries.total in (0, None), "retries would risk duplicates"
+
+
+def test_sync_once_passes_the_session_through(tmp_path, monkeypatch):
+    db = _db_with(tmp_path, [0.9, 0.9])
+    cfg = _cfg(tmp_path)
+    state = bnc.CloudState(cfg.birdnetcloud_state_file, 0)
+    seen = []
+
+    def fake_post(endpoint, token, payload, *, session=None, **kw):
+        seen.append(session)
+        return "uuid"
+
+    monkeypatch.setattr(bnc, "post_detection", fake_post)
+    sentinel = object()
+    bnc.sync_once(db, cfg, state, "tok", sentinel)
+    assert seen == [sentinel, sentinel]
+
+
+def test_heartbeat_has_its_own_clock(tmp_path, monkeypatch):
+    """A field unit polls for detections often but must not spend a request a
+    minute saying nothing changed."""
+    cfg = _cfg(tmp_path, birdnetcloud_interval_seconds=1,
+               birdnetcloud_heartbeat_seconds=3600)
+    db = _db_with(tmp_path, [0.9])
+    bnc.seed_state(db, cfg.birdnetcloud_state_file)
+
+    beats = []
+    monkeypatch.setattr(bnc, "post_heartbeat", lambda *a, **kw: beats.append(1) or True)
+    class _DummySession:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    dummy = _DummySession()
+    monkeypatch.setattr(bnc, "make_session", lambda tok: dummy)
+
+    stop = threading.Event()
+    ticks = {"n": 0}
+    real_wait = stop.wait
+
+    def counting_wait(timeout):
+        ticks["n"] += 1
+        return ticks["n"] >= 4          # let 4 ticks run, then stop
+    stop.wait = counting_wait
+    bnc._loop(db, cfg, "tok", stop)
+    stop.wait = real_wait
+
+    # 4 polls, one hour between heartbeats -> exactly one beat.
+    assert ticks["n"] == 4
+    assert len(beats) == 1, f"expected 1 heartbeat across 4 polls, got {len(beats)}"
+    assert dummy.closed, "session must be closed when the loop exits"

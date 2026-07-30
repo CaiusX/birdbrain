@@ -38,6 +38,7 @@ import json
 import shutil
 import socket
 import threading
+import time
 from datetime import UTC
 from pathlib import Path
 
@@ -154,14 +155,37 @@ class AuthRejected(Exception):
     than burning through the backlog."""
 
 
+def make_session(token: str) -> requests.Session:
+    """One connection, reused for the unit's whole lifetime.
+
+    Without keep-alive every POST pays a fresh TLS handshake — measured at 1.4s
+    of a 1.6s request from a Pi Zero, and roughly 9MB/day of handshake traffic at
+    this detection rate. On a field unit that is both bandwidth and battery.
+
+    Deliberately NO urllib3 Retry. Their API has no idempotency key and no
+    dedupe, so a transparently-retried POST that actually reached the server
+    duplicates the detection. Failures are already handled safely one level up:
+    the high-water mark does not advance, and the next tick retries.
+    """
+    s = requests.Session()
+    s.headers.update({"Authorization": f"Bearer {token}"})
+    return s
+
+
 def post_detection(
-    endpoint: str, token: str, payload: dict, *, timeout: float = 20.0
+    endpoint: str,
+    token: str,
+    payload: dict,
+    *,
+    session: requests.Session | None = None,
+    timeout: float = 20.0,
 ) -> str | None:
     """POST one detection. Returns the cloud uuid on 201, None on a transient
     failure. Raises AuthRejected on 401/403."""
     url = endpoint.rstrip("/") + "/api/v1/detections"
+    http = session or requests
     try:
-        resp = requests.post(
+        resp = http.post(
             url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=timeout
         )
     except requests.RequestException as e:
@@ -181,7 +205,13 @@ def post_detection(
 
 
 def upload_clip(
-    endpoint: str, token: str, detection_id: str, clip_path: str, *, timeout: float = 60.0
+    endpoint: str,
+    token: str,
+    detection_id: str,
+    clip_path: str,
+    *,
+    session: requests.Session | None = None,
+    timeout: float = 60.0,
 ) -> bool:
     """Attach the clip. Failure is non-fatal — the detection is already in, and
     a missing clip is worth less than a stalled queue. Their endpoint accepts
@@ -193,9 +223,10 @@ def upload_clip(
         return False
     ctype = "audio/ogg" if p.suffix.lower() == ".ogg" else "audio/wav"
     url = f"{endpoint.rstrip('/')}/api/v1/detections/{detection_id}/media/audio"
+    http = session or requests
     try:
         with p.open("rb") as fh:
-            resp = requests.post(
+            resp = http.post(
                 url,
                 files={"file": (p.name, fh, ctype)},
                 headers={"Authorization": f"Bearer {token}"},
@@ -312,6 +343,7 @@ def post_heartbeat(
     *,
     db: Database | None = None,
     state: CloudState | None = None,
+    session: requests.Session | None = None,
     timeout: float = 15.0,
 ) -> bool:
     """Keep the station reading 'live' in their dashboard between detections.
@@ -320,8 +352,9 @@ def post_heartbeat(
     Their API answers 204 No Content on success.
     """
     url = endpoint.rstrip("/") + "/api/v1/devices/heartbeat"
+    http = session or requests
     try:
-        resp = requests.post(
+        resp = http.post(
             url,
             json=host_info(db, state),
             headers={"Authorization": f"Bearer {token}"},
@@ -340,7 +373,13 @@ def post_heartbeat(
     return True
 
 
-def sync_once(db: Database, cfg: AppConfig, state: CloudState, token: str) -> tuple[int, int]:
+def sync_once(
+    db: Database,
+    cfg: AppConfig,
+    state: CloudState,
+    token: str,
+    session: requests.Session | None = None,
+) -> tuple[int, int]:
     """One tick. Returns (sent, skipped).
 
     Stops at the first transient failure without advancing past the offending
@@ -355,11 +394,15 @@ def sync_once(db: Database, cfg: AppConfig, state: CloudState, token: str) -> tu
             state.last_pushed_id = row.id
             state.save()
             continue
-        det_id = post_detection(cfg.birdnetcloud_endpoint, token, detection_payload(row, cfg))
+        det_id = post_detection(
+            cfg.birdnetcloud_endpoint, token, detection_payload(row, cfg), session=session
+        )
         if det_id is None:
             break  # transient — leave the mark, retry next tick
         if cfg.birdnetcloud_upload_clips and row.clip_path:
-            upload_clip(cfg.birdnetcloud_endpoint, token, det_id, row.clip_path)
+            upload_clip(
+                cfg.birdnetcloud_endpoint, token, det_id, row.clip_path, session=session
+            )
         sent += 1
         state.last_pushed_id = row.id
         state.save()
@@ -370,16 +413,20 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
     state = CloudState.load(cfg.birdnetcloud_state_file) or seed_state(
         db, cfg.birdnetcloud_state_file
     )
+    session = make_session(token)
     log.info(
         "birdnetcloud.start",
         endpoint=cfg.birdnetcloud_endpoint,
         last_pushed_id=state.last_pushed_id,
         min_confidence=cfg.birdnetcloud_min_confidence,
+        upload_clips=cfg.birdnetcloud_upload_clips,
+        heartbeat_seconds=cfg.birdnetcloud_heartbeat_seconds,
     )
     auth_warned = False
+    last_heartbeat = 0.0
     while True:
         try:
-            sent, skipped = sync_once(db, cfg, state, token)
+            sent, skipped = sync_once(db, cfg, state, token, session)
             auth_warned = False
             if sent or skipped:
                 log.info(
@@ -388,8 +435,16 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
                     skipped=skipped,
                     last_pushed_id=state.last_pushed_id,
                 )
-            else:
-                post_heartbeat(cfg.birdnetcloud_endpoint, token, db=db, state=state)
+            # Heartbeat on its own clock, not once per poll. A field unit wants
+            # to notice new detections promptly but has no reason to spend a
+            # request every minute saying nothing changed — that was ~2MB/day
+            # plus a TLS handshake each on metered links.
+            now = time.monotonic()
+            if now - last_heartbeat >= cfg.birdnetcloud_heartbeat_seconds:
+                if post_heartbeat(
+                    cfg.birdnetcloud_endpoint, token, db=db, state=state, session=session
+                ):
+                    last_heartbeat = now
         except AuthRejected as e:
             # Log once per outage rather than every tick — a rotated token would
             # otherwise fill the journal until someone notices.
@@ -399,6 +454,7 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
         except Exception:
             log.exception("birdnetcloud.tick_failed")
         if stop_event.wait(cfg.birdnetcloud_interval_seconds):
+            session.close()
             return
 
 

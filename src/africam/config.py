@@ -185,6 +185,12 @@ class AppConfig(BaseSettings):
     # below this the dashboard fills with noise.
     birdnetcloud_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     birdnetcloud_interval_seconds: int = 60
+    # Heartbeat on its own clock so a metered/field unit can poll for detections
+    # often while rarely spending a request just to say "still alive".
+    birdnetcloud_heartbeat_seconds: int = 60
+    # Clips are ~60KB each and dominate a unit's uplink (~19MB/day at the
+    # observed detection rate). Turn off for field/metered deployments — you keep
+    # every detection, you lose playable audio in their dashboard.
     birdnetcloud_upload_clips: bool = True
     # Their API takes one detection per request, so a tick is capped rather
     # than draining an unbounded backlog in one go.
