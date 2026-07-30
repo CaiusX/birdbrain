@@ -32,12 +32,19 @@ install_verified() {
 
 echo
 echo "=== 1/4  persistent journal ==="
+# Must be 99-, not 00-. Raspberry Pi OS ships
+# /usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf with
+# Storage=volatile, and journald applies drop-ins in FILENAME order across all
+# directories — a 00- prefix loses to the vendor 40- and the journal silently
+# stays in /run. Clean up the losing name if an earlier run installed it.
+rm -f /etc/systemd/journald.conf.d/00-africam-persistent.conf
 install_verified scripts/journald-persistent.conf \
-    /etc/systemd/journald.conf.d/00-africam-persistent.conf 0644
+    /etc/systemd/journald.conf.d/99-africam-persistent.conf 0644
 mkdir -p /var/log/journal
 systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
 systemctl restart systemd-journald
-sleep 1
+journalctl --flush 2>/dev/null || true
+sleep 2
 if journalctl --header 2>/dev/null | grep -q "/var/log/journal"; then
     echo "  journal now persistent: $(journalctl --disk-usage 2>/dev/null)"
 else
