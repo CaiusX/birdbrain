@@ -63,7 +63,29 @@ systemctl --user enable --now tbb-pipeline tbb-web
 systemctl --user enable --now tbb-update.timer >/dev/null 2>&1 || true
 loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null || true
 
-echo "=== installing stability tooling (wifi power-save off + net-watchdog + health-log) ==="
+echo "=== installing stability tooling (persistent journal + wifi power-save off + net-watchdog + health-log) ==="
+# Persistent journal. Without this every reboot destroys the logs explaining why
+# the unit rebooted — and the net-watchdog reboots it on purpose after 20 failed
+# DNS probes, so the most interesting logs are exactly the ones that vanish.
+# Storage=persistent is NOT sufficient on its own: journald switches to
+# /var/log/journal only at boot or on an explicit flush, so flush here rather
+# than leaving the unit correct-on-paper but still writing to /run.
+if [ -f scripts/journald-persistent-tbb.conf ]; then
+  if install_verified scripts/journald-persistent-tbb.conf \
+       /etc/systemd/journald.conf.d/00-tbb-persistent.conf 0644; then
+    sudo mkdir -p /var/log/journal
+    sudo systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+    sudo systemctl restart systemd-journald 2>/dev/null || true
+    sudo journalctl --flush 2>/dev/null || true
+    if journalctl --header 2>/dev/null | grep -q "/var/log/journal"; then
+      echo "  journal: persistent ($(journalctl --disk-usage 2>/dev/null | sed 's/^.*take up //'))"
+    else
+      echo "  WARNING: journal still volatile — check journalctl --header"
+    fi
+  else
+    echo "  (could not install journald conf — need sudo)"
+  fi
+fi
 # Pi Zero 2 W wifi defaults to power-save ON → the unit silently drops off the
 # LAN. Disable it (system-wide, persists across reconnects). We only reload NM
 # here (not a radio cycle) so we don't kill the SSH session running this script;
