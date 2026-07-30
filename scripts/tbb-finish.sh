@@ -22,6 +22,8 @@ cd "$ROOT"
 # trust the exit status alone, and never hide the error that explains it.
 install_verified() {   # <src> <dst> <mode>
   local src="$1" dst="$2" mode="$3"
+  # install(1) does not create parent dirs; journald.conf.d may not exist yet.
+  sudo mkdir -p "$(dirname "$dst")"
   if ! sudo install -m "$mode" "$src" "$dst"; then
     echo "  FAILED: install $src -> $dst"; return 1
   fi
@@ -67,12 +69,15 @@ echo "=== installing stability tooling (persistent journal + wifi power-save off
 # Persistent journal. Without this every reboot destroys the logs explaining why
 # the unit rebooted — and the net-watchdog reboots it on purpose after 20 failed
 # DNS probes, so the most interesting logs are exactly the ones that vanish.
-# Storage=persistent is NOT sufficient on its own: journald switches to
-# /var/log/journal only at boot or on an explicit flush, so flush here rather
-# than leaving the unit correct-on-paper but still writing to /run.
+# Two traps here, both of which made a unit look configured but stay volatile:
+#   1. Raspberry Pi OS ships /usr/lib/systemd/journald.conf.d/
+#      40-rpi-volatile-storage.conf with Storage=volatile. Drop-ins apply in
+#      FILENAME order, so ours must sort after it -> 99-, not 00-.
+#   2. journald moves to /var/log/journal only at boot or on an explicit flush,
+#      so flush rather than leaving it correct-on-paper but still in /run.
 if [ -f scripts/journald-persistent-tbb.conf ]; then
   if install_verified scripts/journald-persistent-tbb.conf \
-       /etc/systemd/journald.conf.d/00-tbb-persistent.conf 0644; then
+       /etc/systemd/journald.conf.d/99-tbb-persistent.conf 0644; then
     sudo mkdir -p /var/log/journal
     sudo systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
     sudo systemctl restart systemd-journald 2>/dev/null || true
