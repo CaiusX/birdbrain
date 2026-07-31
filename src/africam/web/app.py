@@ -71,6 +71,7 @@ from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
+    PlainTextResponse,
     RedirectResponse,
     Response,
     StreamingResponse,
@@ -530,6 +531,62 @@ def _get_reanalyze_detector():
                 from africam.detector.birdnet import BirdNetDetector
                 _reanalyze_state["detector"] = BirdNetDetector()
     return _reanalyze_state["detector"]
+
+
+# Crawl policy. Served from a route rather than a static file so it cannot
+# silently 404 the way it did before (116 crawler probes/day answered with a
+# 404, which leaves crawlers to make their own rules).
+#
+# Measured 2026-07-31 over 24h: 6007 requests, of which ~1900 were page renders
+# and only 17 were real browser visits (/api/track fires from JS, so it counts
+# humans). Roughly 99% of page traffic was automated, and it was pulling
+# spectrogram images too — 503 of those in a day.
+#
+# Deliberately NOT blocking /species/<name>. Those are the site's actual content
+# and the reason to be indexed at all; throttling real search engines to save CPU
+# would trade away the whole point of a public site. Instead: slow everyone down,
+# close off the paths that are expensive or private, and ban outright the SEO
+# scrapers that generate load with no upstream benefit — DotBot and an
+# Azure-hosted crawler were the two actually hammering us.
+ROBOTS_TXT = """\
+User-agent: *
+Crawl-delay: 10
+Disallow: /admin
+Disallow: /login
+Disallow: /api/
+Disallow: /ingest/
+Disallow: /partials/
+Disallow: /clips/
+Disallow: /spectrograms/
+
+# Commercial SEO/AI scrapers: all cost, no readers.
+User-agent: DotBot
+Disallow: /
+
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: MJ12bot
+Disallow: /
+
+User-agent: DataForSeoBot
+Disallow: /
+
+User-agent: PetalBot
+Disallow: /
+
+User-agent: Bytespider
+Disallow: /
+
+User-agent: GPTBot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+"""
 
 
 def create_app(cfg: AppConfig | None = None) -> FastAPI:
@@ -1059,6 +1116,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "default_palette": SPEC_PALETTE_FOR_TAG[None],
             "all_species": all_species,
         }
+
+    @app.get("/robots.txt", response_class=PlainTextResponse)
+    def robots_txt() -> PlainTextResponse:
+        """Crawl policy. Public and cheap — no DB, no auth, no templating."""
+        return PlainTextResponse(ROBOTS_TXT, media_type="text/plain")
 
     @app.get("/about", response_class=HTMLResponse)
     def about(request: Request) -> HTMLResponse:
