@@ -22,6 +22,8 @@ cd "$ROOT"
 # trust the exit status alone, and never hide the error that explains it.
 install_verified() {   # <src> <dst> <mode>
   local src="$1" dst="$2" mode="$3"
+  # install(1) does not create parent dirs; journald.conf.d may not exist yet.
+  sudo mkdir -p "$(dirname "$dst")"
   if ! sudo install -m "$mode" "$src" "$dst"; then
     echo "  FAILED: install $src -> $dst"; return 1
   fi
@@ -63,7 +65,32 @@ systemctl --user enable --now tbb-pipeline tbb-web
 systemctl --user enable --now tbb-update.timer >/dev/null 2>&1 || true
 loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER" 2>/dev/null || true
 
-echo "=== installing stability tooling (wifi power-save off + net-watchdog + health-log) ==="
+echo "=== installing stability tooling (persistent journal + wifi power-save off + net-watchdog + health-log) ==="
+# Persistent journal. Without this every reboot destroys the logs explaining why
+# the unit rebooted — and the net-watchdog reboots it on purpose after 20 failed
+# DNS probes, so the most interesting logs are exactly the ones that vanish.
+# Two traps here, both of which made a unit look configured but stay volatile:
+#   1. Raspberry Pi OS ships /usr/lib/systemd/journald.conf.d/
+#      40-rpi-volatile-storage.conf with Storage=volatile. Drop-ins apply in
+#      FILENAME order, so ours must sort after it -> 99-, not 00-.
+#   2. journald moves to /var/log/journal only at boot or on an explicit flush,
+#      so flush rather than leaving it correct-on-paper but still in /run.
+if [ -f scripts/journald-persistent-tbb.conf ]; then
+  if install_verified scripts/journald-persistent-tbb.conf \
+       /etc/systemd/journald.conf.d/99-tbb-persistent.conf 0644; then
+    sudo mkdir -p /var/log/journal
+    sudo systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+    sudo systemctl restart systemd-journald 2>/dev/null || true
+    sudo journalctl --flush 2>/dev/null || true
+    if journalctl --header 2>/dev/null | grep -q "/var/log/journal"; then
+      echo "  journal: persistent ($(journalctl --disk-usage 2>/dev/null | sed 's/^.*take up //'))"
+    else
+      echo "  WARNING: journal still volatile — check journalctl --header"
+    fi
+  else
+    echo "  (could not install journald conf — need sudo)"
+  fi
+fi
 # Pi Zero 2 W wifi defaults to power-save ON → the unit silently drops off the
 # LAN. Disable it (system-wide, persists across reconnects). We only reload NM
 # here (not a radio cycle) so we don't kill the SSH session running this script;

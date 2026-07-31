@@ -170,6 +170,33 @@ class AppConfig(BaseSettings):
     # unit's DB schema stays identical to central's.
     tbb_sync_state_file: Path = Path("data/tbb_sync_state.json")
 
+    # --- BirdNET-Cloud bridge (PixCams) ---
+    # Optional second sync target: push detections to birdnetcloud.com instead
+    # of running their edge agent, which would be a whole second BirdNET
+    # pipeline competing for the same mic. Off unless a token is present, so
+    # units that track origin/tbb without one are entirely unaffected.
+    birdnetcloud_enabled: bool = False
+    birdnetcloud_endpoint: str = "https://api.birdnetcloud.com"
+    birdnetcloud_token: str | None = None
+    # Alternative to the inline token: read it from a 0600 file, keeping the
+    # secret out of the unit's .env.
+    birdnetcloud_token_file: Path | None = None
+    # Their edge agent defaults to 0.7 and it matches our own trust floor —
+    # below this the dashboard fills with noise.
+    birdnetcloud_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    birdnetcloud_interval_seconds: int = 60
+    # Heartbeat on its own clock so a metered/field unit can poll for detections
+    # often while rarely spending a request just to say "still alive".
+    birdnetcloud_heartbeat_seconds: int = 60
+    # Clips are ~60KB each and dominate a unit's uplink (~19MB/day at the
+    # observed detection rate). Turn off for field/metered deployments — you keep
+    # every detection, you lose playable audio in their dashboard.
+    birdnetcloud_upload_clips: bool = True
+    # Their API takes one detection per request, so a tick is capped rather
+    # than draining an unbounded backlog in one go.
+    birdnetcloud_max_per_tick: int = 60
+    birdnetcloud_state_file: Path = Path("data/birdnetcloud_sync_state.json")
+
 
 def load_sources(path: Path) -> list[SourceConfig]:
     if not path.exists():
