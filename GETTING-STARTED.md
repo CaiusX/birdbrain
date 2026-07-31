@@ -131,7 +131,7 @@ windows**.
 **Window 1 — the listener.** In your current window, type:
 
 ```bash
-uv run africam run
+uv run birdbrain run
 ```
 
 Leave this window open and running. It's now listening for birds. (It may be quiet
@@ -141,7 +141,7 @@ for a bit — that's fine.)
 
 ```bash
 cd birdbrain
-uv run africam web --host 0.0.0.0 --port 8765
+uv run birdbrain web --host 0.0.0.0 --port 8765
 ```
 
 Leave this one open and running too.

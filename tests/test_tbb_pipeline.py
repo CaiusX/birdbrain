@@ -4,12 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from africam.audio import MicSource
-from africam.config import AppConfig
-from africam.detector.birdnet import NON_BIRD_CLASSES, Detection
-from africam.pipeline import build_source
-from africam.storage import Database, DetectionRow
-from africam.tbb import prune_clips, tbb_source_config
+from birdbrain.audio import MicSource
+from birdbrain.config import AppConfig
+from birdbrain.detector.birdnet import NON_BIRD_CLASSES, Detection
+from birdbrain.pipeline import build_source
+from birdbrain.storage import Database, DetectionRow
+from birdbrain.tbb import prune_clips, tbb_source_config
 
 
 def test_tbb_source_config_is_a_single_mic_source():

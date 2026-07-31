@@ -13,7 +13,7 @@ Type=simple
 WorkingDirectory=%h/birdbrain
 # Call the unit's venv directly (built from deploy/tbb/requirements-tbb.txt) —
 # NOT `uv run`, whose auto-sync would reinstall full TensorFlow from pyproject.
-ExecStart=%h/birdbrain/.venv/bin/africam tbb-web
+ExecStart=%h/birdbrain/.venv/bin/birdbrain tbb-web
 Restart=always
 RestartSec=5
 

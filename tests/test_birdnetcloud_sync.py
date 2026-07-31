@@ -5,10 +5,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from africam import birdnetcloud_sync as bnc
-from africam.config import AppConfig
-from africam.detector.birdnet import Detection
-from africam.storage import Database
+from birdbrain import birdnetcloud_sync as bnc
+from birdbrain.config import AppConfig
+from birdbrain.detector.birdnet import Detection
+from birdbrain.storage import Database
 
 
 def _db_with(tmp_path, confidences):

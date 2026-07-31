@@ -13,7 +13,7 @@ the **public-gate merge** and the **privacy model** fit your account system.
 ## 1. What TBB is (1 paragraph)
 
 TBB = cheap Raspberry Pi Zero 2 W "capture units" with a USB/Codec-Zero mic that
-run the **same `africam` package** on-device (BirdNET via **tflite-runtime**,
+run the **same `birdbrain` package** on-device (BirdNET via **tflite-runtime**,
 not full TF — 190 MB vs 474 MB, fits 512 MB), show a minimal LAN web UI, and
 **optionally sync detections up to central** where they appear as just another
 source/site. Built across Phases 0–3 and accepted on a real Zero 2 W (detect →
@@ -113,7 +113,7 @@ uv run pytest -q                                        # on a checkout of the b
 
 ```sh
 # on central (Pi 5), once deployed + restarted:
-africam tbb-claim-new --note "first unit"        # prints a claim code
+birdbrain tbb-claim-new --note "first unit"        # prints a claim code
 # then on the unit's /setup "Connect to central" form: central URL =
 # https://birdbrain.co.za, paste the code, name it, drop a lat/lon → Enroll.
 # The unit appears as a normal source; mark devices.public=true to show it on

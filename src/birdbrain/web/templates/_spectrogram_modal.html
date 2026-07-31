@@ -1,0 +1,1371 @@
+{# Shared spectrogram modal — opened by any element with
+   [data-spectrogram-trigger]. Requires the trigger button to carry
+   data-detection-id, data-species, data-scientific, data-meta,
+   data-label, data-suggested, data-palette.
+   Caller template should pass ``all_species`` for the suggestion datalist. #}
+<dialog id="spec-modal"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 max-w-3xl w-full max-h-[92vh] overflow-y-auto backdrop:bg-black/70">
+  <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <div class="flex items-start gap-3 min-w-0">
+      <a id="spec-modal-thumb-link"
+         href="#" target="_blank" rel="noopener"
+         class="shrink-0 hidden"
+         title="open Wikipedia article">
+        <img id="spec-modal-thumb" src="" alt=""
+             class="w-16 h-16 rounded object-cover bg-zinc-800 ring-1 ring-zinc-700">
+      </a>
+      <a id="spec-modal-range-link"
+         href="#" target="_blank" rel="noopener"
+         class="shrink-0 hidden"
+         title="open range map on Wikimedia Commons">
+        <img id="spec-modal-range" src="" alt="range map"
+             class="w-16 h-16 rounded object-contain bg-zinc-800 ring-1 ring-zinc-700 p-0.5">
+      </a>
+      <a id="spec-modal-xcdist-link"
+         href="#" target="_blank" rel="noopener"
+         class="shrink-0 hidden"
+         title="">
+        <div class="w-16 h-16 rounded bg-zinc-800 ring-1 ring-zinc-700 overflow-hidden relative">
+          <svg id="spec-modal-xcdist-svg"
+               viewBox="0 0 170 160" preserveAspectRatio="none"
+               class="w-full h-full"></svg>
+          <span id="spec-modal-xcdist-count"
+                class="absolute bottom-0 left-0 right-0 text-[9px] text-center text-zinc-300 bg-black/40 px-0.5"></span>
+        </div>
+      </a>
+      {# Recording location — where this clip was captured, so a reviewer
+         can orient at a glance (which reserve / country). A tiny locked
+         Leaflet map with a marker; Leaflet is lazy-loaded on first open. #}
+      <div id="spec-modal-loc" class="shrink-0 hidden" title="recording location">
+        <div id="spec-modal-map"
+             class="w-16 h-16 rounded bg-zinc-800 ring-1 ring-zinc-700 overflow-hidden"></div>
+      </div>
+      <div class="min-w-0">
+        <div class="flex items-center gap-1.5 flex-wrap">
+          <a id="spec-modal-species" href="#"
+             class="text-base font-medium truncate hover:text-emerald-300"
+             title="open species page"></a>
+          <span id="spec-modal-status"
+                class="hidden px-1 py-0 rounded text-[10px] font-medium tabular-nums border"
+                title=""></span>
+        </div>
+        <div id="spec-modal-scientific" class="text-xs italic text-zinc-500 truncate"></div>
+        <div id="spec-modal-site" class="hidden text-xs font-medium text-emerald-300/90 mt-0.5 truncate"></div>
+        <div id="spec-modal-meta" class="text-xs text-zinc-500 mt-0.5 truncate"></div>
+      </div>
+    </div>
+    <button type="button" id="spec-modal-close" data-spec-close
+            class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none">×</button>
+  </div>
+  <div class="p-5">
+    <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none">
+      <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-cover">
+      <div id="spec-modal-locators"
+           class="absolute inset-0 pointer-events-none transition-opacity duration-150"
+           style="opacity: 0.85;"></div>
+      <div id="spec-modal-playhead"
+           class="absolute top-0 bottom-0 w-px bg-emerald-300 shadow-[0_0_6px_2px_rgba(110,231,183,0.7)] pointer-events-none"
+           style="left: 0%; display: none;"></div>
+      {# Frequency axis: the image is rendered 80 Hz–12 kHz on a log scale
+         (ffmpeg start=80:stop=12000, legend off), so label the bottom/top
+         edges. pointer-events-none keeps click-to-seek working. #}
+      <span class="absolute left-1 top-0.5 text-[10px] font-medium text-white/85 tabular-nums
+                   drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none select-none">12&nbsp;kHz</span>
+      <span class="absolute left-1 bottom-0.5 text-[10px] font-medium text-white/85 tabular-nums
+                   drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none select-none">80&nbsp;Hz</span>
+    </div>
+    <div id="spec-modal-locator-legend"
+         class="hidden mt-2 flex items-center gap-3 flex-wrap text-[11px] text-zinc-400">
+      <span class="uppercase tracking-wider text-zinc-500">where each species likely called:</span>
+      <span id="spec-modal-locator-chips" class="flex items-center gap-2 flex-wrap"></span>
+      <label class="ml-auto flex items-center gap-1 cursor-pointer">
+        <input type="checkbox" id="spec-modal-locator-toggle" checked
+               class="accent-emerald-500">
+        <span>show overlay</span>
+      </label>
+    </div>
+    <audio id="spec-modal-audio" src="" controls preload="metadata" class="w-full mt-3"></audio>
+
+    {# Verdict bar sits directly under the clip so it's reachable on mobile
+       without scrolling past the (sometimes long) species note below. A Close
+       button rides alongside it so the popup can be dismissed from here too. #}
+    <div class="mt-3 flex items-center justify-between gap-2 flex-wrap">
+      <div id="spec-modal-verdict" class="{% if not request.state.user %}hidden {% endif %}flex items-center gap-1.5 flex-wrap">
+        <button type="button" data-label-btn="bad"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
+                title="False positive">✗ bad</button>
+        <button type="button" data-label-btn="unsure"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
+                title="Can't tell">? unsure</button>
+        <button type="button" data-label-btn="good"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
+                title="Correct ID">✓ good</button>
+        <button type="button" data-label-btn=""
+                class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                title="Clear label">↺</button>
+      </div>
+      {# Shown instead of the verdict buttons when the visitor isn't logged in. #}
+      <a id="spec-modal-login" href="/login"
+         class="{% if request.state.user %}hidden {% endif %}text-sm text-emerald-300 hover:text-emerald-200">log in to score →</a>
+      <button type="button" data-spec-close
+              class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800">Close</button>
+    </div>
+    {# Multi-rater tally: how everyone has scored this clip (+ your own vote). #}
+    <div id="spec-modal-tally" class="mt-1.5 hidden text-[11px] text-zinc-500"></div>
+
+    {# Species note: context that follows the clip + verdict. Clamped on open
+       (it can be several paragraphs); tap "more" to expand. #}
+    <div id="spec-modal-note"
+         class="hidden mt-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40">
+      <div class="flex items-center justify-between gap-2">
+        <span id="spec-modal-note-tag"
+              class="uppercase tracking-wider text-[10px] font-medium px-1.5 py-0.5 rounded border"></span>
+        <button type="button" id="spec-modal-note-edit"
+                class="text-[11px] text-zinc-400 hover:text-zinc-100 underline-offset-2 hover:underline">
+          edit
+        </button>
+      </div>
+      <p id="spec-modal-note-text" class="mt-1 whitespace-pre-wrap text-zinc-200 max-h-32 overflow-y-auto pr-1"></p>
+    </div>
+
+    <div id="spec-modal-note-edit-form"
+         class="hidden mt-3 rounded border border-zinc-800 px-3 py-2 bg-zinc-950/40">
+      <div class="flex items-center justify-between mb-2">
+        <span class="uppercase tracking-wider text-[10px] font-medium text-zinc-400">
+          Species note · <span id="spec-modal-note-edit-species" class="normal-case text-zinc-200"></span>
+        </span>
+        <button type="button" id="spec-modal-note-cancel"
+                class="text-[11px] text-zinc-500 hover:text-zinc-200">cancel</button>
+      </div>
+      <textarea id="spec-modal-note-input"
+                rows="3"
+                placeholder="Plausibility, ID confusions, biome fit, calls it resembles…"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs text-zinc-100"
+                spellcheck="false"></textarea>
+      <div class="flex items-center justify-between mt-2 gap-2 flex-wrap">
+        <div class="flex gap-1 text-[11px]">
+          {% for v, lbl in [("", "neutral"), ("reliable", "reliable"), ("suspect", "suspect"), ("rare", "rare")] %}
+            <label class="cursor-pointer">
+              <input type="radio" name="spec-modal-note-tag-input" value="{{ v }}" class="peer sr-only">
+              <span class="px-2 py-0.5 rounded border border-zinc-700 text-zinc-400
+                           peer-checked:border-emerald-400 peer-checked:text-emerald-300
+                           hover:text-zinc-200">{{ lbl }}</span>
+            </label>
+          {% endfor %}
+        </div>
+        <button type="button" id="spec-modal-note-save"
+                class="px-3 py-1 rounded bg-zinc-100 text-zinc-900 text-xs font-medium hover:bg-white">
+          save
+        </button>
+      </div>
+    </div>
+
+    <details id="spec-modal-reanalyze" class="group mt-4 border-t border-zinc-800 pt-3">
+      <summary class="flex items-center justify-between gap-3 flex-wrap cursor-pointer list-none">
+        <h4 class="text-xs uppercase tracking-wider text-zinc-400 flex items-center gap-1">
+          <span class="inline-block w-3 text-zinc-500 transition-transform group-open:rotate-90">▸</span>
+          Re-analyze clip with BirdNET
+        </h4>
+        <span class="text-[11px] text-zinc-500">first run loads the model (~5 s)</span>
+      </summary>
+      <div class="mt-2">
+        <p id="spec-modal-reanalyze-status" class="text-xs text-zinc-500"></p>
+        <table id="spec-modal-reanalyze-table"
+               class="hidden w-full mt-2 text-xs border border-zinc-800 rounded overflow-hidden">
+          <thead class="bg-zinc-950/60 text-zinc-400">
+            <tr>
+              <th class="px-2 py-1 text-left w-6">#</th>
+              <th class="px-2 py-1 text-left">species</th>
+              <th class="px-2 py-1 text-right w-32">confidence</th>
+            </tr>
+          </thead>
+          <tbody id="spec-modal-reanalyze-tbody" class="text-zinc-200"></tbody>
+        </table>
+      </div>
+    </details>
+
+    <details id="spec-modal-xc" class="group mt-4 border-t border-zinc-800 pt-3">
+      <summary class="flex items-center justify-between gap-3 flex-wrap cursor-pointer list-none">
+        <h4 class="text-xs uppercase tracking-wider text-zinc-400 flex items-center gap-1">
+          <span class="inline-block w-3 text-zinc-500 transition-transform group-open:rotate-90">▸</span>
+          Compare with Xeno-Canto
+          <span id="spec-modal-xc-species" class="text-zinc-200 normal-case ml-1"></span>
+        </h4>
+        <div id="spec-modal-xc-controls" class="flex items-center gap-2">
+          <label class="flex items-center gap-1.5 text-[11px] text-zinc-500"
+                 title="XC recordings are professionally mastered; lower this to match ambient livestream level.">
+            xc volume
+            <input id="spec-modal-xc-volume" type="range" min="0" max="1" step="0.05"
+                   value="0.3"
+                   class="w-20 accent-emerald-500">
+            <span id="spec-modal-xc-volume-pct" class="tabular-nums text-zinc-400 w-8 text-right">30%</span>
+          </label>
+          <a id="spec-modal-xc-search" href="#" target="_blank" rel="noopener"
+             class="text-xs text-emerald-300 hover:text-emerald-200">search ↗</a>
+        </div>
+      </summary>
+      <div class="mt-2">
+        <p id="spec-modal-xc-status" class="text-xs text-zinc-500"></p>
+        <ul id="spec-modal-xc-list" class="space-y-2 mt-2"></ul>
+      </div>
+    </details>
+  </div>
+</dialog>
+
+<datalist id="known-species">
+  {% for sp in (all_species or []) %}<option value="{{ sp }}">{% endfor %}
+</datalist>
+
+{# Two-step verification popup. Tapping a verdict opens this; nothing is
+   persisted until Confirm — so a stray tap on a tablet can't silently set a
+   label. Carries the optional 1–5 sound-quality rating and (for bad/unsure)
+   the species suggestion, committed together in one POST. Sibling of the
+   main dialog so its top-layer backdrop clicks don't reach the parent. #}
+<dialog id="spec-confirm"
+        style="touch-action: manipulation;"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 w-[24rem] max-w-[94vw] backdrop:bg-black/80">
+  <div class="px-5 py-5">
+    <div class="text-xs uppercase tracking-wider text-zinc-500">Confirm verification</div>
+    <div id="spec-confirm-verdict" class="mt-1 text-xl font-semibold"></div>
+
+    <div id="spec-confirm-suggest-wrap" class="mt-4 hidden">
+      <label for="spec-confirm-suggest" class="text-xs uppercase tracking-wider text-zinc-500">Looked more like…</label>
+      {# Custom autocomplete, not a native <datalist>: Firefox paints datalist
+         popups under a modal <dialog>'s top layer, so they never surface.
+         This list lives inside the dialog, so it renders correctly. #}
+      <div class="relative mt-1">
+        <input id="spec-confirm-suggest" type="text"
+               placeholder="optional — type any species"
+               class="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2.5 text-sm text-zinc-100"
+               autocomplete="off" spellcheck="false"
+               role="combobox" aria-autocomplete="list" aria-expanded="false"
+               aria-controls="spec-confirm-suggest-list">
+        <ul id="spec-confirm-suggest-list"
+            role="listbox"
+            class="hidden absolute left-0 right-0 top-full mt-1 z-10 max-h-56 overflow-y-auto
+                   rounded border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/50"></ul>
+      </div>
+    </div>
+
+    <div class="mt-4">
+      <div class="flex items-baseline justify-between">
+        <div class="text-xs uppercase tracking-wider text-zinc-500">Sound quality
+          <span class="normal-case text-zinc-600">· optional</span></div>
+        <span id="spec-confirm-stars-readout" class="text-xs text-zinc-500 tabular-nums">not rated</span>
+      </div>
+      {# Large, contiguous (flex-1, no gap) tap targets — on a tablet small/
+         spaced stars get missed and the rating reads null. touch-action:
+         manipulation also drops the ~300ms tap delay so a quick star→Confirm
+         can't fire Confirm before the star's click registers. #}
+      <div id="spec-confirm-stars"
+           class="mt-1.5 flex items-stretch select-none" role="radiogroup"
+           aria-label="sound quality" style="touch-action: manipulation;">
+        <button type="button" data-star="1" aria-label="1 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border border-zinc-800 rounded-l hover:text-amber-300">★</button>
+        <button type="button" data-star="2" aria-label="2 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 hover:text-amber-300">★</button>
+        <button type="button" data-star="3" aria-label="3 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 hover:text-amber-300">★</button>
+        <button type="button" data-star="4" aria-label="4 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 hover:text-amber-300">★</button>
+        <button type="button" data-star="5" aria-label="5 of 5"
+                class="flex-1 py-3 text-3xl leading-none text-zinc-600 border-y border-r border-zinc-800 rounded-r hover:text-amber-300">★</button>
+      </div>
+      <button type="button" id="spec-confirm-stars-clear"
+              class="mt-1.5 text-xs text-zinc-500 hover:text-zinc-300">clear rating</button>
+    </div>
+
+    <div class="mt-6 flex items-center justify-end gap-2">
+      <button type="button" id="spec-confirm-cancel"
+              class="px-4 py-2.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-zinc-800">Cancel</button>
+      <button type="button" id="spec-confirm-ok"
+              class="px-5 py-2.5 rounded text-sm font-semibold bg-emerald-500 text-zinc-900 hover:bg-emerald-400">Confirm</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+(function () {
+  // Guard against double-init when the partial is included on multiple pages
+  // or after an HTMX swap.
+  if (window.__birdbrainSpecModalReady) return;
+  window.__birdbrainSpecModalReady = true;
+
+  const dialog   = document.getElementById('spec-modal');
+  const img      = document.getElementById('spec-modal-img');
+  const audio    = document.getElementById('spec-modal-audio');
+  const playhead = document.getElementById('spec-modal-playhead');
+  const specEl   = document.getElementById('spec-modal-spec');
+  const speciesEl = document.getElementById('spec-modal-species');
+  const sciEl     = document.getElementById('spec-modal-scientific');
+  const metaEl   = document.getElementById('spec-modal-meta');
+  const closeBtn = document.getElementById('spec-modal-close');
+  const labelBtns = dialog.querySelectorAll('[data-label-btn]');
+  const verdictEl = document.getElementById('spec-modal-verdict');
+  const loginEl   = document.getElementById('spec-modal-login');
+  const tallyEl   = document.getElementById('spec-modal-tally');
+
+  function renderTally(t) {
+    if (!t || !t.raters) { tallyEl.classList.add('hidden'); tallyEl.textContent = ''; return; }
+    const parts = [t.raters + (t.raters === 1 ? ' rater' : ' raters')];
+    const seg = [];
+    if (t.good) seg.push(t.good + ' good');
+    if (t.unsure) seg.push(t.unsure + ' unsure');
+    if (t.bad) seg.push(t.bad + ' bad');
+    if (seg.length) parts.push(seg.join(' · '));
+    if (t.your) parts.push('you: ' + t.your);
+    tallyEl.textContent = parts.join('  ·  ');
+    tallyEl.classList.remove('hidden');
+  }
+
+  // Fetch the authoritative per-user score + rater tally when the modal opens.
+  // Anonymous visitors get the verdict buttons swapped for a "log in" link.
+  function loadScore(id) {
+    fetch(`/api/detections/${id}/score`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || id !== currentId) return;
+        if (d.authed) {
+          verdictEl.classList.remove('hidden');
+          loginEl.classList.add('hidden');
+          currentSuggested = d.suggested || '';
+          currentSoundRating = parseInt(d.sound_rating, 10) || null;
+          paintActiveLabel(d.label || null);
+        } else {
+          verdictEl.classList.add('hidden');
+          loginEl.classList.remove('hidden');
+          paintActiveLabel(null);
+        }
+        renderTally(d.tally);
+      })
+      .catch(() => {});
+  }
+  // Two-step confirm popup.
+  const confirmDlg     = document.getElementById('spec-confirm');
+  const confirmVerdict = document.getElementById('spec-confirm-verdict');
+  const confirmSuggestWrap = document.getElementById('spec-confirm-suggest-wrap');
+  const confirmSuggest = document.getElementById('spec-confirm-suggest');
+  const confirmStars   = document.getElementById('spec-confirm-stars');
+  const confirmStarsReadout = document.getElementById('spec-confirm-stars-readout');
+  const confirmStarsClear = document.getElementById('spec-confirm-stars-clear');
+  const confirmCancel  = document.getElementById('spec-confirm-cancel');
+  const confirmOk      = document.getElementById('spec-confirm-ok');
+  const reanalyzeEl    = document.getElementById('spec-modal-reanalyze');
+  const reanalyzeStatus= document.getElementById('spec-modal-reanalyze-status');
+  const reanalyzeTable = document.getElementById('spec-modal-reanalyze-table');
+  const reanalyzeTbody = document.getElementById('spec-modal-reanalyze-tbody');
+  const locatorLayer   = document.getElementById('spec-modal-locators');
+  const locatorLegend  = document.getElementById('spec-modal-locator-legend');
+  const locatorChips   = document.getElementById('spec-modal-locator-chips');
+  const locatorToggle  = document.getElementById('spec-modal-locator-toggle');
+  const xcDetailsEl  = document.getElementById('spec-modal-xc');
+  const xcControlsEl = document.getElementById('spec-modal-xc-controls');
+  const xcSpeciesEl  = document.getElementById('spec-modal-xc-species');
+  const xcSearchEl   = document.getElementById('spec-modal-xc-search');
+  const xcStatusEl   = document.getElementById('spec-modal-xc-status');
+  const xcListEl     = document.getElementById('spec-modal-xc-list');
+  const xcVolEl      = document.getElementById('spec-modal-xc-volume');
+  const xcVolPctEl   = document.getElementById('spec-modal-xc-volume-pct');
+
+  // The volume slider and "search ↗" link live inside <summary>, so clicks
+  // would otherwise toggle the rolldown. Stop the click before <details>
+  // sees it.
+  xcControlsEl.addEventListener('click', (e) => e.stopPropagation());
+
+  // Lazy-load XC recordings the first time the rolldown is opened for the
+  // current species — saves a network round-trip when the user just wants to
+  // listen + label without comparing.
+  xcDetailsEl.addEventListener('toggle', () => {
+    if (xcDetailsEl.open && currentSci && xcLoadedFor !== currentSci) {
+      xcLoadedFor = currentSci;
+      loadXenoCanto(currentSci);
+    }
+  });
+
+  // Lazy-load BirdNET re-analysis the first time the rolldown is opened for
+  // the current detection. The model load is ~5 s; do it only on demand.
+  reanalyzeEl.addEventListener('toggle', () => {
+    if (reanalyzeEl.open && currentId != null && reanalyzeLoadedFor !== currentId) {
+      reanalyzeLoadedFor = currentId;
+      loadReanalyze(currentId);
+    }
+  });
+
+  // XC recordings are mastered louder than our ambient livestream clips —
+  // give the user a single slider that applies to every XC <audio> in the
+  // modal, persisted in localStorage so the choice sticks across sessions.
+  const XC_VOL_KEY = 'birdbrain.xcVolume';
+  const savedVol = parseFloat(localStorage.getItem(XC_VOL_KEY) || '');
+  if (!Number.isNaN(savedVol) && savedVol >= 0 && savedVol <= 1) {
+    xcVolEl.value = String(savedVol);
+  }
+  function xcVolume() { return Number(xcVolEl.value); }
+  function applyXcVolume() {
+    const v = xcVolume();
+    xcVolPctEl.textContent = Math.round(v * 100) + '%';
+    xcListEl.querySelectorAll('audio').forEach((a) => { a.volume = v; });
+  }
+  xcVolEl.addEventListener('input', () => {
+    localStorage.setItem(XC_VOL_KEY, xcVolEl.value);
+    applyXcVolume();
+  });
+  // Initial paint so the percentage label reflects savedVol.
+  xcVolPctEl.textContent = Math.round(xcVolume() * 100) + '%';
+  const thumbLink    = document.getElementById('spec-modal-thumb-link');
+  const thumbImg     = document.getElementById('spec-modal-thumb');
+  const rangeLink    = document.getElementById('spec-modal-range-link');
+  const rangeImg     = document.getElementById('spec-modal-range');
+  const xcDistLink   = document.getElementById('spec-modal-xcdist-link');
+  const xcDistSvg    = document.getElementById('spec-modal-xcdist-svg');
+  const xcDistCount  = document.getElementById('spec-modal-xcdist-count');
+  const statusEl     = document.getElementById('spec-modal-status');
+  const locTileEl    = document.getElementById('spec-modal-loc');
+  const locMapEl     = document.getElementById('spec-modal-map');
+  const siteEl       = document.getElementById('spec-modal-site');
+
+  const IUCN_STYLE = {
+    LC: ['bg-zinc-700/40 text-zinc-300 border-zinc-600',           'Least Concern'],
+    NT: ['bg-emerald-700/30 text-emerald-300 border-emerald-600/40', 'Near Threatened'],
+    VU: ['bg-amber-700/30 text-amber-300 border-amber-600/40',       'Vulnerable'],
+    EN: ['bg-orange-700/30 text-orange-300 border-orange-600/40',    'Endangered'],
+    CR: ['bg-rose-700/30 text-rose-300 border-rose-600/40',          'Critically Endangered'],
+    EW: ['bg-rose-900/40 text-rose-400 border-rose-700/50',          'Extinct in the Wild'],
+    EX: ['bg-zinc-900 text-zinc-500 border-zinc-700',                'Extinct'],
+    DD: ['bg-zinc-700/30 text-zinc-400 border-zinc-600/40',          'Data Deficient'],
+    NE: ['bg-zinc-800 text-zinc-500 border-zinc-700',                'Not Evaluated'],
+  };
+  function setStatusBadge(code) {
+    if (!code || !IUCN_STYLE[code]) {
+      statusEl.classList.add('hidden');
+      return;
+    }
+    const [cls, label] = IUCN_STYLE[code];
+    statusEl.className = 'px-1 py-0 rounded text-[10px] font-medium tabular-nums border ' + cls;
+    statusEl.textContent = code;
+    statusEl.title = 'IUCN · ' + label;
+    statusEl.classList.remove('hidden');
+  }
+  const noteBox      = document.getElementById('spec-modal-note');
+  const noteTagEl    = document.getElementById('spec-modal-note-tag');
+  const noteTextEl   = document.getElementById('spec-modal-note-text');
+  const noteEditBtn  = document.getElementById('spec-modal-note-edit');
+  const noteForm     = document.getElementById('spec-modal-note-edit-form');
+  const noteFormSp   = document.getElementById('spec-modal-note-edit-species');
+  const noteInput    = document.getElementById('spec-modal-note-input');
+  const noteCancel   = document.getElementById('spec-modal-note-cancel');
+  const noteSave     = document.getElementById('spec-modal-note-save');
+
+  const noteTagStyle = {
+    reliable: ['border-emerald-500/50 bg-emerald-500/5',  'border-emerald-500/60 text-emerald-300', 'reliable'],
+    suspect:  ['border-amber-500/50 bg-amber-500/5',      'border-amber-500/60 text-amber-300',     'suspect'],
+    rare:     ['border-sky-500/50 bg-sky-500/5',          'border-sky-500/60 text-sky-300',         'rare'],
+    null:     ['border-zinc-800',                          'border-zinc-700 text-zinc-400',          'note'],
+  };
+  let currentSci = null;
+  let currentId = null;
+  let currentLabel = null;
+  let currentSuggested = '';
+  let currentSoundRating = null;
+  // Scientific name we've already fetched XC data for in this modal session.
+  // Reset on every openFor so a new detection re-fetches when expanded.
+  let xcLoadedFor = null;
+  // Detection id we've already re-analyzed. Reset on every openFor.
+  let reanalyzeLoadedFor = null;
+
+  const labelStyles = {
+    good:   'bg-emerald-500/20 border-emerald-500 text-emerald-300',
+    bad:    'bg-rose-500/20 border-rose-500 text-rose-300',
+    unsure: 'bg-amber-500/20 border-amber-500 text-amber-300',
+  };
+
+  function paintActiveLabel(label) {
+    currentLabel = label;
+    labelBtns.forEach((btn) => {
+      const v = btn.dataset.labelBtn;
+      btn.classList.remove(...'bg-emerald-500/20 border-emerald-500 text-emerald-300 bg-rose-500/20 border-rose-500 text-rose-300 bg-amber-500/20 border-amber-500 text-amber-300'.split(' '));
+      if (v && v === label && labelStyles[v]) {
+        btn.classList.add(...labelStyles[v].split(' '));
+      }
+    });
+  }
+
+  let raf = 0;
+  function tick() {
+    if (audio.duration > 0) {
+      playhead.style.left = (audio.currentTime / audio.duration * 100) + '%';
+    }
+    if (!audio.paused && !audio.ended) {
+      raf = requestAnimationFrame(tick);
+    }
+  }
+  function startTick() { cancelAnimationFrame(raf); raf = requestAnimationFrame(tick); }
+  function stopTick()  { cancelAnimationFrame(raf); }
+
+  function openFor(btn) {
+    currentId = btn.dataset.detectionId;
+    currentSuggested = btn.dataset.suggested || '';
+    currentSoundRating = parseInt(btn.dataset.soundRating, 10) || null;
+    currentSci = btn.dataset.scientific || '';
+    speciesEl.textContent = btn.dataset.species || '';
+    // Common name links through to the species page (same scientific-name
+    // route the row links use). No sci name → leave it inert.
+    speciesEl.href = currentSci ? `/species/${encodeURIComponent(currentSci)}` : '#';
+    sciEl.textContent     = currentSci;
+    metaEl.textContent    = btn.dataset.meta || '';
+    img.src = `/spectrograms/${currentId}.png?size=large&p=${encodeURIComponent(btn.dataset.palette || 'fire')}`;
+    audio.src = `/clips/${currentId}`;
+    playhead.style.left = '0%';
+    playhead.style.display = 'block';
+    paintActiveLabel(btn.dataset.label || null);
+    tallyEl.classList.add('hidden');     // until the fetch resolves
+    loadScore(currentId);                // authoritative per-user score + tally
+    // Reset XC rolldown to collapsed; recordings load lazily on first expand.
+    xcDetailsEl.open = false;
+    xcLoadedFor = null;
+    xcListEl.innerHTML = '';
+    xcStatusEl.textContent = '';
+    // Reset re-analyze rolldown to collapsed; loads lazily on first expand.
+    reanalyzeEl.open = false;
+    reanalyzeLoadedFor = null;
+    reanalyzeTable.classList.add('hidden');
+    reanalyzeTbody.innerHTML = '';
+    reanalyzeStatus.textContent = '';
+    // Reset spectrogram locator overlay (re-fetched per clip).
+    locatorLayer.innerHTML = '';
+    locatorChips.innerHTML = '';
+    locatorLegend.classList.add('hidden');
+    loopRange = null;
+    loadLocators(currentId);
+    loadSiteLocation(currentId);   // recording location: site label + mini-map
+    // Pre-fill the species hint + search-↗ link so they're useful even when
+    // the rolldown is collapsed.
+    primeXcHeader(currentSci || btn.dataset.species || '');
+    loadSpeciesNote(currentSci, btn.dataset.species || '');
+    loadSpeciesImage(currentSci, btn.dataset.species || '');
+    loadXcDistribution(currentSci);
+    if (typeof dialog.showModal === 'function') {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute('open', '');
+    }
+  }
+
+  function applyNoteView(data) {
+    const tag = data && data.tag ? data.tag : null;
+    const [boxCls, tagCls, tagLabel] = noteTagStyle[tag] || noteTagStyle.null;
+    if (data && data.note) {
+      noteBox.className = 'mb-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40 ' + boxCls;
+      noteTagEl.className = 'uppercase tracking-wider text-[10px] font-medium px-1.5 py-0.5 rounded border ' + tagCls;
+      noteTagEl.textContent = tagLabel;
+      noteTextEl.textContent = data.note;
+      noteBox.classList.remove('hidden');
+      noteTextEl.scrollTop = 0;   // a long note scrolls within its box; start at top
+    } else {
+      noteBox.classList.add('hidden');
+    }
+    noteForm.classList.add('hidden');
+  }
+
+  const XCD_LAT_LO = -40, XCD_LAT_HI = 40;
+  const XCD_LON_LO = -25, XCD_LON_HI = 60;
+  const XCD_W = 170, XCD_H = 160;
+
+  async function loadXcDistribution(sci) {
+    xcDistLink.classList.add('hidden');
+    xcDistSvg.innerHTML = '';
+    xcDistCount.textContent = '';
+    if (!sci) return;
+    try {
+      const resp = await fetch('/api/xeno_canto/distribution?species=' + encodeURIComponent(sci));
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const pts = data.points || [];
+      if (!pts.length) return;
+
+      const ns = 'http://www.w3.org/2000/svg';
+      const bg = document.createElementNS(ns, 'rect');
+      bg.setAttribute('x', '0');
+      bg.setAttribute('y', '0');
+      bg.setAttribute('width', String(XCD_W));
+      bg.setAttribute('height', String(XCD_H));
+      bg.setAttribute('fill', '#27272a');
+      xcDistSvg.appendChild(bg);
+
+      for (const [lat, lon] of pts) {
+        const xRaw = ((lon - XCD_LON_LO) / (XCD_LON_HI - XCD_LON_LO)) * XCD_W;
+        const yRaw = ((XCD_LAT_HI - lat) / (XCD_LAT_HI - XCD_LAT_LO)) * XCD_H;
+        const x = Math.max(1, Math.min(XCD_W - 1, xRaw));
+        const y = Math.max(1, Math.min(XCD_H - 1, yRaw));
+        const clamped = (x !== xRaw) || (y !== yRaw);
+        const dot = document.createElementNS(ns, 'circle');
+        dot.setAttribute('cx', x.toFixed(1));
+        dot.setAttribute('cy', y.toFixed(1));
+        dot.setAttribute('r', '1.4');
+        dot.setAttribute('fill', clamped ? '#facc15' : '#34d399');
+        dot.setAttribute('fill-opacity', '0.85');
+        xcDistSvg.appendChild(dot);
+      }
+      xcDistCount.textContent = `XC · ${data.total}`;
+      const tokens = sci.trim().split(/\s+/);
+      const slug = tokens.length === 2
+        ? `${tokens[0]}-${tokens[1]}`
+        : tokens.join('-');
+      xcDistLink.href = `https://xeno-canto.org/species/${encodeURIComponent(slug)}`;
+      const top = (data.top_countries || []).slice(0, 3)
+        .map((c) => `${c.name} (${c.count})`).join(', ');
+      xcDistLink.title = `XC recordings: ${data.plotted} plotted of ${data.total}` +
+        (top ? ` — top: ${top}` : '');
+      xcDistLink.classList.remove('hidden');
+    } catch (_) { /* silent */ }
+  }
+
+  // GBIF whole-world basemap (EPSG:3857, z0, @2x) composited behind the
+  // transparent occurrence-density tile so the thumbnail shows land + coast,
+  // not dots in a void. gbif-classic draws filled continents over light
+  // water, so the land reads clearly at thumbnail size (gbif-dark blended
+  // into the modal so well the coastlines vanished). Same projection/extent
+  // as the density @2x tile, so it overlays pixel-for-pixel.
+  const RANGE_BASEMAP_TILE =
+    'https://tile.gbif.org/3857/omt/0/0/0@2x.png?style=gbif-classic';
+
+  // Leaflet is only loaded on map pages (dashboard, site/species detail), not
+  // on the review queue where this modal also lives. Lazy-load it on first
+  // need so the location map works everywhere without forcing the library
+  // onto pages that never open the modal. Resolves to window.L.
+  let _leafletPromise = null;
+  function ensureLeaflet() {
+    if (window.L) return Promise.resolve(window.L);
+    if (_leafletPromise) return _leafletPromise;
+    _leafletPromise = new Promise((resolve, reject) => {
+      const css = document.createElement('link');
+      css.rel = 'stylesheet';
+      css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(css);
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      s.onload = () => resolve(window.L);
+      s.onerror = () => { _leafletPromise = null; reject(new Error('leaflet failed')); };
+      document.head.appendChild(s);
+    });
+    return _leafletPromise;
+  }
+
+  // One reused map instance — re-centred per detection. Created lazily inside
+  // the (initially display:none) dialog, so invalidateSize() after each open
+  // fixes the tile layout once the container actually has a size.
+  let locMap = null, locMarker = null;
+  async function loadSiteLocation(detectionId) {
+    siteEl.classList.add('hidden');
+    siteEl.textContent = '';
+    locTileEl.classList.add('hidden');
+    if (detectionId == null) return;
+    try {
+      const resp = await fetch(`/api/detections/${encodeURIComponent(detectionId)}/site`);
+      if (!resp.ok) return;
+      const d = await resp.json();
+      if (String(detectionId) !== String(currentId)) return;  // modal moved on
+      if (d.site) {
+        siteEl.textContent = '📍 ' + d.site;
+        siteEl.classList.remove('hidden');
+      }
+      if (typeof d.lat !== 'number' || typeof d.lon !== 'number') return;
+      locTileEl.classList.remove('hidden');
+      const L = await ensureLeaflet();
+      if (String(detectionId) !== String(currentId)) return;
+      if (!locMap) {
+        locMap = L.map(locMapEl, {
+          zoomControl: false, attributionControl: false,
+          dragging: false, scrollWheelZoom: false, doubleClickZoom: false,
+          boxZoom: false, keyboard: false, touchZoom: false, tap: false,
+        });
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 12,
+        }).addTo(locMap);
+        locMarker = L.circleMarker([0, 0], {
+          radius: 5, color: '#ffffff', weight: 2,
+          fillColor: '#34d399', fillOpacity: 1,
+        }).addTo(locMap);
+      }
+      locMarker.setLatLng([d.lat, d.lon]);
+      locMap.setView([d.lat, d.lon], 4);
+      // Dialog had zero layout size when the map was built → recompute now
+      // that it's on screen, else only the top-left tile paints.
+      setTimeout(() => { try { locMap.invalidateSize(); } catch (_) {} }, 30);
+    } catch (_) { /* silent */ }
+  }
+
+  async function loadSpeciesImage(sci, common) {
+    thumbLink.classList.add('hidden');
+    rangeLink.classList.add('hidden');
+    thumbImg.removeAttribute('src');
+    rangeImg.removeAttribute('src');
+    rangeImg.style.backgroundImage = '';
+    setStatusBadge(null);
+    if (!sci) return;
+    try {
+      const qs = new URLSearchParams({ scientific: sci });
+      if (common) qs.set('common', common);
+      const resp = await fetch('/api/species_image?' + qs.toString());
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.thumbnail) {
+        thumbImg.src = data.thumbnail;
+        thumbImg.alt = data.wp_title || sci;
+        thumbLink.href = data.page_url || '#';
+        thumbLink.classList.remove('hidden');
+      }
+      // Prefer the static natural-range image (clean IUCN/BirdLife polygon);
+      // fall back to the GBIF/iNat occurrence tile, whose zoom-0 URL is itself
+      // a valid whole-world PNG that renders fine as a plain <img>.
+      const rangeSrc = data.range_map || data.range_tile;
+      if (rangeSrc) {
+        rangeImg.src = rangeSrc;
+        // Only the GBIF/iNat tile is transparent and needs a basemap behind
+        // it; the static polygon (range_map) carries its own background.
+        if (!data.range_map && data.range_tile) {
+          rangeImg.style.backgroundImage = `url("${RANGE_BASEMAP_TILE}")`;
+          rangeImg.style.backgroundSize = '100% 100%';
+          rangeImg.style.backgroundOrigin = 'content-box';
+          rangeImg.style.backgroundClip = 'content-box';
+        } else {
+          rangeImg.style.backgroundImage = '';
+        }
+        rangeLink.href = data.range_map
+          ? (data.range_map_page || data.page_url || '#')
+          : (data.range_tile_page || '#');
+        rangeLink.classList.remove('hidden');
+      }
+      if (data.conservation_status) {
+        setStatusBadge(data.conservation_status);
+      }
+    } catch (_) { /* silent */ }
+  }
+
+  async function loadSpeciesNote(sci, common) {
+    noteBox.classList.add('hidden');
+    noteForm.classList.add('hidden');
+    if (!sci) return;
+    try {
+      const resp = await fetch(`/api/species_notes/${encodeURIComponent(sci)}`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      noteBox.dataset.common = common || '';
+      applyNoteView(data);
+    } catch (e) {
+      noteBox.classList.add('hidden');
+    }
+  }
+
+  function openNoteEditor(currentNote, currentTag) {
+    noteFormSp.textContent = currentSci;
+    noteInput.value = currentNote || '';
+    noteForm.querySelectorAll('input[name="spec-modal-note-tag-input"]').forEach((r) => {
+      r.checked = (r.value === (currentTag || ''));
+    });
+    noteForm.classList.remove('hidden');
+    noteBox.classList.add('hidden');
+    noteInput.focus();
+  }
+
+  noteEditBtn.addEventListener('click', () => {
+    openNoteEditor(noteTextEl.textContent, _currentNoteTag());
+  });
+
+  sciEl.style.cursor = 'pointer';
+  sciEl.title = 'click to add/edit a species note';
+  sciEl.addEventListener('click', () => {
+    if (!currentSci) return;
+    openNoteEditor(noteTextEl.textContent, _currentNoteTag());
+  });
+
+  noteCancel.addEventListener('click', () => {
+    noteForm.classList.add('hidden');
+    if (noteTextEl.textContent) noteBox.classList.remove('hidden');
+  });
+
+  noteSave.addEventListener('click', async () => {
+    if (!currentSci) return;
+    const params = new URLSearchParams();
+    params.set('note', noteInput.value);
+    params.set('common_name', noteBox.dataset.common || '');
+    const tagInput = noteForm.querySelector('input[name="spec-modal-note-tag-input"]:checked');
+    if (tagInput) params.set('tag', tagInput.value);
+    const resp = await fetch(`/api/species_notes/${encodeURIComponent(currentSci)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString(),
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    applyNoteView(data.deleted ? {note: '', tag: null} : data);
+  });
+
+  function _currentNoteTag() {
+    for (const t of ['reliable', 'suspect', 'rare']) {
+      if (noteBox.className.includes(noteTagStyle[t][0].split(' ')[0])) return t;
+    }
+    return null;
+  }
+
+  function primeXcHeader(species) {
+    xcSpeciesEl.textContent = species ? `· ${species}` : '';
+    xcSearchEl.href = species
+      ? `https://xeno-canto.org/explore?query=${encodeURIComponent(species)}`
+      : 'https://xeno-canto.org/';
+  }
+
+  // Eight visually distinct hues for marker overlays. Cycled per species,
+  // so the same species gets a consistent colour within one clip.
+  const LOCATOR_PALETTE = [
+    '#fbbf24', '#34d399', '#60a5fa', '#f472b6',
+    '#a78bfa', '#fb7185', '#facc15', '#22d3ee',
+  ];
+  // Marker box width as a fraction of clip duration. Also the loop window
+  // when a chip is clicked — ~0.5 s on a 3 s clip, enough to hear a call
+  // plus a little context on either side without bleeding into other calls.
+  const LOCATOR_WIDTH_FRAC = 0.16;
+
+  // Active loop range and the species/chip it's attached to. Null when free
+  // play. Only one section loops at a time — clicking another chip switches.
+  let loopRange = null;
+
+  function _freqToYPct(f, loHz, hiHz) {
+    // Spectrogram uses log frequency axis; bottom = loHz, top = hiHz.
+    // Return % from the top edge.
+    const t = (Math.log(f) - Math.log(loHz)) / (Math.log(hiHz) - Math.log(loHz));
+    return (1 - Math.max(0, Math.min(1, t))) * 100;
+  }
+
+  async function loadLocators(detectionId) {
+    if (detectionId == null) return;
+    locatorLayer.innerHTML = '';
+    locatorChips.innerHTML = '';
+    locatorLegend.classList.add('hidden');
+    try {
+      const resp = await fetch(`/api/detections/${encodeURIComponent(detectionId)}/locate`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const markers = data.markers || [];
+      if (!markers.length) return;
+      const fLo = data.spec_freq_lo_hz || 80;
+      const fHi = data.spec_freq_hi_hz || 12000;
+      markers.forEach((m, i) => {
+        const color = LOCATOR_PALETTE[i % LOCATOR_PALETTE.length];
+        const dur = m.duration_s || 3;
+        const xCenter = (m.peak_time_s / dur) * 100;
+        const halfW = (LOCATOR_WIDTH_FRAC * 100) / 2;
+        const xLeft = Math.max(0, xCenter - halfW);
+        const xWidth = Math.min(100 - xLeft, halfW * 2);
+        const yTop = _freqToYPct(m.freq_hi_hz, fLo, fHi);
+        const yBot = _freqToYPct(m.freq_lo_hz, fLo, fHi);
+        const height = Math.max(8, yBot - yTop);
+
+        const box = document.createElement('div');
+        box.className = 'absolute rounded-sm';
+        box.style.left = xLeft + '%';
+        box.style.top = yTop + '%';
+        box.style.width = xWidth + '%';
+        box.style.height = height + '%';
+        box.style.border = `1.5px solid ${color}`;
+        box.style.background = `${color}22`;
+        box.style.boxShadow = `0 0 8px ${color}66`;
+        box.dataset.sci = m.scientific_name;
+        const fallbackNote = m.is_fallback ? ' · band: default fallback' : '';
+        box.title =
+          `${m.common_name} (${m.scientific_name}) — peak @ ${m.peak_time_s.toFixed(2)}s ` +
+          `· band ${Math.round(m.freq_lo_hz)}-${Math.round(m.freq_hi_hz)} Hz ` +
+          `· SNR ${m.snr_vs_median.toFixed(1)}× · conf ${m.confidence.toFixed(2)}${fallbackNote}`;
+        locatorLayer.appendChild(box);
+
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className =
+          'inline-flex items-center gap-1 px-1.5 py-0.5 rounded border cursor-pointer transition';
+        chip.style.borderColor = color;
+        chip.style.color = color;
+        chip.dataset.sci = m.scientific_name;
+        chip.dataset.color = color;
+        const dot = document.createElement('span');
+        dot.className = 'w-1.5 h-1.5 rounded-full';
+        dot.style.background = color;
+        chip.appendChild(dot);
+        const name = document.createElement('span');
+        name.textContent = m.common_name + (m.is_fallback ? ' *' : '');
+        chip.appendChild(name);
+        const loopIcon = document.createElement('span');
+        loopIcon.className = 'ml-0.5 text-[10px] opacity-60';
+        loopIcon.textContent = '↻';
+        chip.appendChild(loopIcon);
+        chip.title = 'click to loop this section';
+        chip.addEventListener('mouseenter', () => _highlightLocator(m.scientific_name));
+        chip.addEventListener('mouseleave', () => _highlightLocator(null));
+        chip.addEventListener('click', () => _toggleLoopFor(m, chip));
+        locatorChips.appendChild(chip);
+      });
+      locatorLegend.classList.remove('hidden');
+      _applyLocatorVisibility();
+    } catch (_) { /* silent */ }
+  }
+
+  function _highlightLocator(sci) {
+    const boxes = locatorLayer.querySelectorAll('[data-sci]');
+    boxes.forEach((b) => {
+      if (sci == null) {
+        b.style.opacity = '1';
+        b.style.filter = '';
+      } else if (b.dataset.sci === sci) {
+        b.style.opacity = '1';
+        b.style.filter = 'brightness(1.4)';
+      } else {
+        b.style.opacity = '0.18';
+        b.style.filter = '';
+      }
+    });
+  }
+
+  function _applyLocatorVisibility() {
+    locatorLayer.style.display = locatorToggle.checked ? '' : 'none';
+  }
+  locatorToggle.addEventListener('change', _applyLocatorVisibility);
+
+  function _toggleLoopFor(marker, chipEl) {
+    if (loopRange && loopRange.sci === marker.scientific_name) {
+      _clearLoop();
+      audio.pause();
+      return;
+    }
+    const dur = marker.duration_s || audio.duration || 3;
+    const half = (LOCATOR_WIDTH_FRAC / 2) * dur;
+    const start = Math.max(0, marker.peak_time_s - half);
+    const end = Math.min(dur, marker.peak_time_s + half);
+    loopRange = { sci: marker.scientific_name, start, end };
+    _paintLoopChips();
+    try {
+      audio.currentTime = start;
+    } catch (_) { /* readyState may not be loaded yet */ }
+    audio.play().catch(() => {});
+  }
+
+  function _clearLoop() {
+    loopRange = null;
+    _paintLoopChips();
+  }
+
+  function _paintLoopChips() {
+    locatorChips.querySelectorAll('button[data-sci]').forEach((c) => {
+      const active = loopRange && loopRange.sci === c.dataset.sci;
+      const color = c.dataset.color || '#a3a3a3';
+      if (active) {
+        c.style.background = color + '33';
+        c.style.boxShadow = `inset 0 0 0 1px ${color}`;
+      } else {
+        c.style.background = '';
+        c.style.boxShadow = '';
+      }
+    });
+  }
+
+  async function loadReanalyze(detectionId) {
+    reanalyzeTable.classList.add('hidden');
+    reanalyzeTbody.innerHTML = '';
+    reanalyzeStatus.textContent = 'loading model + re-running BirdNET…';
+    try {
+      const resp = await fetch(`/api/detections/${encodeURIComponent(detectionId)}/reanalyze`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      const dets = data.detections || [];
+      if (!dets.length) {
+        reanalyzeStatus.textContent = 'BirdNET returned no candidates above 0.05 confidence.';
+        return;
+      }
+      reanalyzeStatus.textContent =
+        `Top ${dets.length} candidate${dets.length === 1 ? '' : 's'} ` +
+        `(min_conf 0.05, location filter applied) — original row was ` +
+        `${data.original.common_name} @ ${Number(data.original.confidence).toFixed(2)}.`;
+      dets.forEach((d, i) => {
+        const tr = document.createElement('tr');
+        tr.className = (i % 2 === 0 ? 'bg-zinc-900/40' : '') +
+          (d.is_original ? ' ring-1 ring-emerald-500/40' : '');
+        const tdRank = document.createElement('td');
+        tdRank.className = 'px-2 py-1 text-zinc-500 tabular-nums';
+        tdRank.textContent = String(i + 1);
+        tr.appendChild(tdRank);
+        const tdSp = document.createElement('td');
+        tdSp.className = 'px-2 py-1';
+        const cn = document.createElement('span');
+        cn.className = 'text-zinc-100';
+        cn.textContent = d.common_name;
+        const sn = document.createElement('span');
+        sn.className = 'italic text-zinc-500 ml-1.5';
+        sn.textContent = d.scientific_name;
+        tdSp.appendChild(cn);
+        tdSp.appendChild(sn);
+        if (d.is_original) {
+          const tag = document.createElement('span');
+          tag.className = 'ml-1.5 px-1 py-0 rounded text-[10px] border border-emerald-500/40 text-emerald-300';
+          tag.textContent = 'original';
+          tdSp.appendChild(tag);
+        }
+        tr.appendChild(tdSp);
+        const tdConf = document.createElement('td');
+        tdConf.className = 'px-2 py-1 align-middle';
+        const wrap = document.createElement('div');
+        wrap.className = 'flex items-center justify-end gap-2';
+        const bar = document.createElement('div');
+        bar.className = 'relative h-2 w-20 bg-zinc-800 rounded overflow-hidden';
+        const fill = document.createElement('div');
+        fill.className = (d.is_original ? 'bg-emerald-400' : 'bg-zinc-400') + ' h-full';
+        fill.style.width = (Math.max(0, Math.min(1, d.confidence)) * 100).toFixed(1) + '%';
+        bar.appendChild(fill);
+        const num = document.createElement('span');
+        num.className = 'tabular-nums text-zinc-200 w-10 text-right';
+        num.textContent = Number(d.confidence).toFixed(2);
+        wrap.appendChild(bar);
+        wrap.appendChild(num);
+        tdConf.appendChild(wrap);
+        tr.appendChild(tdConf);
+        reanalyzeTbody.appendChild(tr);
+      });
+      reanalyzeTable.classList.remove('hidden');
+    } catch (e) {
+      reanalyzeStatus.textContent = 'fetch failed: ' + e.message;
+    }
+  }
+
+  async function loadXenoCanto(species) {
+    xcListEl.innerHTML = '';
+    primeXcHeader(species);
+    if (!species) { xcStatusEl.textContent = ''; return; }
+    xcStatusEl.textContent = 'loading…';
+    try {
+      const resp = await fetch(`/api/xeno_canto?species=${encodeURIComponent(species)}&limit=3`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const body = await resp.json();
+      xcSearchEl.href = body.search_url || xcSearchEl.href;
+      const recs = body.recordings || [];
+      if (body.needs_key) {
+        xcStatusEl.innerHTML =
+          'Set <code class="text-zinc-300">BIRDBRAIN_XENO_CANTO_KEY</code> ' +
+          '(free at <a href="https://xeno-canto.org/account" target="_blank" rel="noopener" class="underline">xeno-canto.org/account</a>) ' +
+          'to load reference recordings inline.';
+        return;
+      }
+      if (!recs.length) {
+        xcStatusEl.textContent = 'no recordings found';
+        return;
+      }
+      xcStatusEl.textContent = '';
+      for (const r of recs) {
+        xcListEl.appendChild(renderXcRecording(r));
+      }
+    } catch (e) {
+      xcStatusEl.textContent = 'fetch failed: ' + e.message;
+    }
+  }
+
+  function renderXcRecording(r) {
+    const li = document.createElement('li');
+    li.className = 'flex gap-3 items-start bg-zinc-950/40 border border-zinc-800 rounded p-2';
+    const link = document.createElement('a');
+    link.href = r.url || '#';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.className = 'shrink-0';
+    if (r.sono_small) {
+      const im = document.createElement('img');
+      im.src = r.sono_small;
+      im.alt = '';
+      im.className = 'w-32 h-12 object-cover rounded bg-zinc-900';
+      link.appendChild(im);
+    } else {
+      link.textContent = `XC${r.id}`;
+      link.className += ' text-xs text-zinc-400 underline';
+    }
+    li.appendChild(link);
+    const main = document.createElement('div');
+    main.className = 'flex-1 min-w-0';
+    const meta = document.createElement('div');
+    meta.className = 'text-xs text-zinc-400 truncate';
+    meta.textContent = [r.en, r.cnt, r.q ? `q:${r.q}` : ''].filter(Boolean).join(' · ');
+    main.appendChild(meta);
+    const sub = document.createElement('div');
+    sub.className = 'text-xs text-zinc-500 truncate';
+    sub.textContent = [r.rec, r.type, r.length].filter(Boolean).join(' · ');
+    main.appendChild(sub);
+    if (r.file) {
+      const a = document.createElement('audio');
+      a.src = r.file;
+      a.controls = true;
+      a.preload = 'none';
+      a.volume = xcVolume();
+      a.className = 'w-full h-7 mt-1';
+      main.appendChild(a);
+    }
+    li.appendChild(main);
+    return li;
+  }
+
+  async function postLabel(value, suggested, soundRating) {
+    if (currentId == null) return;
+    const params = new URLSearchParams();
+    params.set('value', value);
+    if (suggested !== undefined) params.set('suggested', suggested);
+    // undefined → omit (leave rating untouched); null → clear; 1-5 → set.
+    if (soundRating !== undefined) {
+      params.set('sound_rating', soundRating == null ? '' : String(soundRating));
+    }
+    const resp = await fetch(`/api/detections/${currentId}/label`, {
+      method: 'POST',
+      headers: {
+        'HX-Request': 'true',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: params.toString(),
+    });
+    if (!resp.ok) return;
+    const html = (await resp.text()).trim();
+    const tmp = document.createElement('template');
+    tmp.innerHTML = html;
+    const newRow = tmp.content.firstElementChild;
+    // Only the audition page has #audit-{id} rows; on the live page the
+    // 5-second HTMX refresh will pick up the change, so just no-op there.
+    const oldRow = document.getElementById(`audit-${currentId}`);
+    if (oldRow && newRow) {
+      oldRow.replaceWith(newRow);
+      const fresh = newRow.querySelector('[data-spectrogram-trigger]');
+      if (fresh) {
+        currentSuggested = fresh.dataset.suggested || '';
+        currentSoundRating = parseInt(fresh.dataset.soundRating, 10) || null;
+      }
+    }
+    if (suggested !== undefined) currentSuggested = suggested || '';
+    if (soundRating !== undefined) currentSoundRating = soundRating;
+    paintActiveLabel(value || null);
+  }
+
+  // --- Two-step verification confirm popup ---------------------------------
+  let pendingLabel = null;     // verdict awaiting confirmation
+  let confirmRating = null;    // star rating chosen inside the popup
+
+  // The "looked more like…" box autocompletes against every species BirdNET
+  // knows (the full global label set), not just the ones detected here. The
+  // catalog is ~6.5k entries, fetched once on first need. We render our own
+  // dropdown (see the combobox markup) rather than a native <datalist>, which
+  // Firefox won't surface inside a modal <dialog>.
+  const confirmSuggestList = document.getElementById('spec-confirm-suggest-list');
+  let speciesCatalog = [];
+  let catalogLoaded = false;
+  let suggestMatches = [];
+  let suggestActiveIdx = -1;
+  let suppressConfirmCancel = false;  // ESC closes the dropdown, not the popup
+
+  function escHtml(s) {
+    return String(s || '').replace(/[&<>"]/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
+  async function ensureSpeciesCatalog() {
+    if (catalogLoaded) return;
+    catalogLoaded = true;
+    try {
+      const resp = await fetch('/api/species/catalog');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      speciesCatalog = data.species || [];
+    } catch (_) {
+      catalogLoaded = false;  // allow a retry next time the popup opens
+      // Fall back to whatever detected species the page server-rendered.
+      const dl = document.getElementById('known-species');
+      if (dl && !speciesCatalog.length) {
+        speciesCatalog = [...dl.options].map((o) => ({ common: o.value, scientific: '' }));
+      }
+    }
+  }
+
+  function hideSuggest() {
+    confirmSuggestList.classList.add('hidden');
+    confirmSuggestList.innerHTML = '';
+    confirmSuggest.setAttribute('aria-expanded', 'false');
+    suggestMatches = [];
+    suggestActiveIdx = -1;
+  }
+
+  function renderSuggest(query) {
+    const q = (query || '').trim().toLowerCase();
+    if (!q) { hideSuggest(); return; }
+    const starts = [], contains = [];
+    for (const s of speciesCatalog) {
+      const c = (s.common || '').toLowerCase();
+      if (c.startsWith(q)) starts.push(s);
+      else if (c.includes(q) || (s.scientific || '').toLowerCase().includes(q)) contains.push(s);
+      if (starts.length >= 12) break;
+    }
+    suggestMatches = starts.concat(contains).slice(0, 12);
+    suggestActiveIdx = -1;
+    if (!suggestMatches.length) { hideSuggest(); return; }
+    confirmSuggestList.innerHTML = suggestMatches.map((s, i) =>
+      `<li data-idx="${i}" role="option"
+           class="px-3 py-1.5 cursor-pointer flex items-baseline justify-between gap-2 hover:bg-zinc-800">
+         <span class="text-zinc-100 text-sm">${escHtml(s.common)}</span>
+         <span class="text-xs italic text-zinc-500 truncate">${escHtml(s.scientific)}</span>
+       </li>`).join('');
+    confirmSuggestList.classList.remove('hidden');
+    confirmSuggest.setAttribute('aria-expanded', 'true');
+  }
+
+  function paintActiveSuggest() {
+    [...confirmSuggestList.children].forEach((li, i) => {
+      li.classList.toggle('bg-zinc-800', i === suggestActiveIdx);
+      if (i === suggestActiveIdx) li.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function pickSuggest(i) {
+    const s = suggestMatches[i];
+    if (!s) return;
+    confirmSuggest.value = s.common;
+    hideSuggest();
+    confirmSuggest.focus();
+  }
+
+  confirmSuggest.addEventListener('input', () => renderSuggest(confirmSuggest.value));
+  confirmSuggest.addEventListener('focus', () => {
+    if (confirmSuggest.value.trim()) renderSuggest(confirmSuggest.value);
+  });
+  // Hide on blur, but after a tick so a click on the list still registers.
+  confirmSuggest.addEventListener('blur', () => setTimeout(hideSuggest, 120));
+  // mousedown (not click) so it fires before the input's blur.
+  confirmSuggestList.addEventListener('mousedown', (e) => {
+    const li = e.target.closest('[data-idx]');
+    if (!li) return;
+    e.preventDefault();
+    pickSuggest(parseInt(li.dataset.idx, 10));
+  });
+  const verdictText  = { good: '✓ good', bad: '✗ bad', unsure: '? unsure' };
+  const verdictColor = { good: 'text-emerald-300', bad: 'text-rose-300', unsure: 'text-amber-300' };
+
+  function paintStars(n) {
+    confirmStars.querySelectorAll('[data-star]').forEach((b) => {
+      const lit = n != null && parseInt(b.dataset.star, 10) <= n;
+      b.classList.toggle('text-amber-300', lit);
+      b.classList.toggle('text-zinc-600', !lit);
+    });
+    confirmStarsReadout.textContent = n != null ? `${n}/5` : 'not rated';
+  }
+
+  function openConfirm(value) {
+    if (currentId == null || !value) return;
+    pendingLabel = value;
+    confirmRating = currentSoundRating;
+    confirmVerdict.textContent = verdictText[value] || value;
+    confirmVerdict.className = 'mt-1 text-xl font-semibold ' + (verdictColor[value] || 'text-zinc-100');
+    const needSuggest = (value === 'bad' || value === 'unsure');
+    confirmSuggestWrap.classList.toggle('hidden', !needSuggest);
+    confirmSuggest.value = needSuggest ? currentSuggested : '';
+    hideSuggest();
+    if (needSuggest) ensureSpeciesCatalog();
+    paintStars(confirmRating);
+    if (typeof confirmDlg.showModal === 'function') confirmDlg.showModal();
+    else confirmDlg.setAttribute('open', '');
+  }
+  function closeConfirm() {
+    if (typeof confirmDlg.close === 'function') confirmDlg.close();
+    else confirmDlg.removeAttribute('open');
+  }
+
+  // Verdict tap opens the confirm popup; the ↺ clear stays a direct,
+  // single action (it's the undo, and undo shouldn't need confirming).
+  const setLabel = (value) => {
+    if (value) openConfirm(value);
+    else postLabel('', undefined, undefined);
+  };
+  function closeIt() {
+    audio.pause();
+    stopTick();
+    xcListEl.querySelectorAll('audio').forEach((a) => a.pause());
+    if (typeof dialog.close === 'function') dialog.close();
+    else dialog.removeAttribute('open');
+  }
+
+  document.body.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-spectrogram-trigger]');
+    if (btn) { e.preventDefault(); openFor(btn); }
+  });
+
+  audio.addEventListener('play',     startTick);
+  audio.addEventListener('seeking',  () => { tick(); });
+  audio.addEventListener('pause',    () => { tick(); stopTick(); });
+  audio.addEventListener('ended',    () => { playhead.style.left = '100%'; stopTick(); });
+  audio.addEventListener('timeupdate', () => {
+    if (loopRange && audio.currentTime >= loopRange.end) {
+      audio.currentTime = loopRange.start;
+    }
+    tick();
+  });
+
+  specEl.addEventListener('click', (e) => {
+    if (!audio.duration) return;
+    const rect = specEl.getBoundingClientRect();
+    const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    // Manual scrub takes the user out of any active loop.
+    _clearLoop();
+    audio.currentTime = frac * audio.duration;
+  });
+
+  labelBtns.forEach((btn) => {
+    btn.addEventListener('click', () => setLabel(btn.dataset.labelBtn));
+  });
+
+  // Confirm popup wiring.
+  // Delegated so a tap anywhere on a star button (incl. the ★ glyph node)
+  // resolves to its data-star — more forgiving of imprecise touch.
+  confirmStars.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-star]');
+    if (!b) return;
+    confirmRating = parseInt(b.dataset.star, 10);
+    paintStars(confirmRating);
+  });
+  confirmStarsClear.addEventListener('click', () => { confirmRating = null; paintStars(null); });
+  confirmCancel.addEventListener('click', closeConfirm);
+  confirmOk.addEventListener('click', () => {
+    const needSuggest = (pendingLabel === 'bad' || pendingLabel === 'unsure');
+    postLabel(pendingLabel, needSuggest ? confirmSuggest.value : undefined, confirmRating);
+    closeConfirm();
+  });
+  confirmSuggest.addEventListener('keydown', (e) => {
+    const open = !confirmSuggestList.classList.contains('hidden');
+    if (e.key === 'ArrowDown' && open) {
+      e.preventDefault();
+      suggestActiveIdx = Math.min(suggestMatches.length - 1, suggestActiveIdx + 1);
+      paintActiveSuggest();
+    } else if (e.key === 'ArrowUp' && open) {
+      e.preventDefault();
+      suggestActiveIdx = Math.max(0, suggestActiveIdx - 1);
+      paintActiveSuggest();
+    } else if (e.key === 'Escape' && open) {
+      // Close the dropdown, not the whole popup; swallow the dialog's ESC.
+      e.preventDefault();
+      suppressConfirmCancel = true;
+      hideSuggest();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && suggestActiveIdx >= 0) pickSuggest(suggestActiveIdx);
+      else confirmOk.click();
+    }
+  });
+  // Backdrop click / ESC just dismiss — no label is written. (But if ESC was
+  // used to close the suggestion dropdown, leave the popup open.)
+  confirmDlg.addEventListener('cancel', (e) => {
+    e.preventDefault();
+    if (suppressConfirmCancel) { suppressConfirmCancel = false; return; }
+    closeConfirm();
+  });
+  confirmDlg.addEventListener('click', (e) => { if (e.target === confirmDlg) closeConfirm(); });
+
+  // Header × and the Close button in the verdict bar both dismiss the modal.
+  dialog.querySelectorAll('[data-spec-close]').forEach((b) => b.addEventListener('click', closeIt));
+  dialog.addEventListener('close',  () => { audio.pause(); stopTick(); });
+  dialog.addEventListener('cancel', closeIt);
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) closeIt(); });
+})();
+</script>

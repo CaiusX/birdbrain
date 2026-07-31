@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
-from africam.config import AppConfig
-from africam.storage import Database
-from africam.web.app import create_app
+from birdbrain.config import AppConfig
+from birdbrain.storage import Database
+from birdbrain.web.app import create_app
 
 
 def _app(tmp_path):

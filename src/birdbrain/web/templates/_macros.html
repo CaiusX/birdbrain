@@ -1,0 +1,152 @@
+{# Shared Jinja macros. Imported with: {% from "_macros.html" import iucn_badge %} #}
+
+{# --- Brand lockup -------------------------------------------------------- #}
+{# The two-tone wordmark: emerald base B → gold tip B, echoing the logo's
+   trunk→canopy colours. Use everywhere "BirdBrain" appears as the title. #}
+{% macro brand_word() -%}<span style="color:#059669;">B</span>ird<span style="color:#f59e0b;">B</span>rain{%- endmacro %}
+
+{# The tightly-cropped tree mark, inline-sized so its canopy sits at the cap
+   line and its trunk on the baseline (viewBox aspect w/h = 1.233). #}
+{% macro brand_mark(logo_em='0.72em', gap='0.06em') -%}
+<span aria-hidden="true" style="display:inline-block;height:{{ logo_em }};width:calc({{ logo_em }} * 1.233);vertical-align:0;margin-right:{{ gap }};background:url('/static/birdbrain-logo-tight.svg') left bottom/contain no-repeat;"></span>
+{%- endmacro %}
+
+{# Full lockup: tree mark + two-tone wordmark on one baseline. The canonical
+   logo/title for the whole site — use this for every visible "BirdBrain".
+   modal=True makes the mark open the brand modal + the word link home (header);
+   home=True links the whole lockup to / (e.g. the dashboard panel); neither =
+   a static title (about/help). text_cls sets the scale; the mark follows it. #}
+{% macro brand_lockup(logo_em='0.72em', text_cls='text-xl', gap='0.06em', modal=False, home=False) -%}
+{%- set base = text_cls ~ ' font-semibold tracking-tight text-zinc-100 leading-none whitespace-nowrap' -%}
+{%- if modal -%}
+<span class="{{ base }}"><button type="button" onclick="document.getElementById('brand-modal').showModal()" aria-label="About BirdBrain" class="p-0 align-baseline rounded hover:opacity-80 transition-opacity">{{ brand_mark(logo_em, gap) }}</button><a href="/" class="hover:opacity-80 transition-opacity">{{ brand_word() }}</a></span>
+{%- elif home -%}
+<a href="/" class="{{ base }} hover:opacity-80 transition-opacity">{{ brand_mark(logo_em, gap) }}{{ brand_word() }}</a>
+{%- else -%}
+<span class="{{ base }}">{{ brand_mark(logo_em, gap) }}{{ brand_word() }}</span>
+{%- endif -%}
+{%- endmacro %}
+
+{# Render a parsed daily brief: one overall highlights paragraph + per-site
+   bullet lists. Pass the result of the `parse_brief` filter. Site names link
+   to their site page (the generator uses exact source names). #}
+{% macro brief_body(parsed) -%}
+  <div class="max-h-72 overflow-y-auto pr-1">
+  {% if parsed.overall %}
+    <p class="text-sm text-zinc-300 leading-relaxed max-w-3xl">{{ parsed.overall | linkify_species }}</p>
+  {% endif %}
+  {% if parsed.sites %}
+    <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3">
+      {% for s in parsed.sites %}
+        <div class="min-w-0">
+          {{ site_link(s.site, cls="text-[11px] font-semibold uppercase tracking-wider") }}
+          <ul class="mt-1 space-y-0.5">
+            {% for b in s.bullets %}
+              <li class="text-sm text-zinc-300 flex gap-2"><span class="text-zinc-600 select-none">•</span><span>{{ b | linkify_species }}</span></li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+  </div>
+{%- endmacro %}
+
+{# Link a species name to its detail page. `source` (optional) carries the
+   origin page's active site filter through to the detail page so it opens
+   pre-scoped to that site; omit it to land on the all-sites view. #}
+{% macro species_link(common, scientific, source=None, cls="", title="") -%}
+<a href="/species/{{ scientific | urlencode }}{% if source %}?source={{ source | urlencode }}{% endif %}"{% if cls %} class="{{ cls }}"{% endif %}{% if title %} title="{{ title }}"{% endif %}>{{ common }}</a>
+{%- endmacro %}
+
+{# Link a site name to its site-detail page. Use this anywhere a site name
+   is shown so the user can always click through to /site/<name>. Pass cls
+   to override the default emerald hover when the surrounding context has
+   its own colour scheme. #}
+{# Site name → its site page, coloured in the site's own (legibility-lifted)
+   palette colour so site names read consistently across the UI and echo the
+   map dots. `cls` adds non-colour styling (size/weight/case); the inline
+   colour wins over any text-colour class. #}
+{% macro site_link(name, cls="") -%}
+<a href="/site/{{ name | urlencode }}" class="hover:opacity-80 transition-opacity{% if cls %} {{ cls }}{% endif %}" style="color: {{ site_color(name) }};">{{ name }}</a>
+{%- endmacro %}
+
+{% set _IUCN_CLASS = {
+  "LC": ("bg-zinc-700/40 text-zinc-300 border-zinc-600", "Least Concern"),
+  "NT": ("bg-emerald-700/30 text-emerald-300 border-emerald-600/40", "Near Threatened"),
+  "VU": ("bg-amber-700/30 text-amber-300 border-amber-600/40", "Vulnerable"),
+  "EN": ("bg-orange-700/30 text-orange-300 border-orange-600/40", "Endangered"),
+  "CR": ("bg-rose-700/30 text-rose-300 border-rose-600/40", "Critically Endangered"),
+  "EW": ("bg-rose-900/40 text-rose-400 border-rose-700/50", "Extinct in the Wild"),
+  "EX": ("bg-zinc-900 text-zinc-500 border-zinc-700", "Extinct"),
+  "DD": ("bg-zinc-700/30 text-zinc-400 border-zinc-600/40", "Data Deficient"),
+  "NE": ("bg-zinc-800 text-zinc-500 border-zinc-700", "Not Evaluated"),
+} %}
+
+{# Inline weather icon matching the keys returned by ``wmo_summary`` in
+   birdbrain.weather. Keep in sync with the bigger inline copies in the
+   diurnal popup. Returns nothing for unknown keys so the surrounding
+   layout collapses cleanly. #}
+{% macro weather_icon(key, size=20) -%}
+{%- if key == 'clear' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+{%- elif key == 'partly' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="9" r="3"/><path d="M8 2v2M2 9h2M13.5 4.5L12 6M3.5 14.5L2 16"/><path d="M17.5 21a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 13.5 4.5 4.5 0 0 0 6.5 21h11Z"/></svg>
+{%- elif key == 'overcast' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M17.5 19a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 11.5 4.5 4.5 0 0 0 6.5 19h11Z"/></svg>
+{%- elif key == 'fog' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 8h18M3 13h12M3 18h18"/></svg>
+{%- elif key == 'rain' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M17.5 14a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 6.5 4.5 4.5 0 0 0 6.5 14h11Z"/><path d="M9 17v3M13 17v3M11 19v3"/></svg>
+{%- elif key == 'thunder' -%}
+<svg viewBox="0 0 24 24" width="{{ size }}" height="{{ size }}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 14a4.5 4.5 0 1 0 0-9c-.34 0-.66.04-.97.12A6 6 0 0 0 5 6.5 4.5 4.5 0 0 0 6.5 14h11Z"/><path d="M13 15l-3 5h4l-3 5"/></svg>
+{%- endif -%}
+{%- endmacro %}
+
+{# IUCN Red List badge. size="sm" (10px, for inline row use) or "md" (11px,
+   for species-detail headers). Renders nothing when status is empty/unknown.
+   hide_common=True suppresses the low-signal statuses (LC/DD/NE) so a feed
+   only flags NT-and-above — ~95% of rows are LC, which otherwise drowns out
+   the few that matter. Detail pages pass hide_common=False to show the real
+   status either way. #}
+{% macro iucn_badge(status, size="sm", hide_common=False) -%}
+{%- if hide_common and status in ('LC', 'DD', 'NE') -%}
+{%- elif status and status in _IUCN_CLASS -%}
+{%- set _cls, _label = _IUCN_CLASS[status] -%}
+{%- if size == "md" -%}
+<span class="px-1.5 py-0 rounded text-[11px] font-medium tabular-nums border {{ _cls }}" title="IUCN · {{ _label }}">{{ status }}</span>
+{%- else -%}
+<span class="px-1 py-0 rounded text-[10px] font-medium tabular-nums border {{ _cls }}" title="IUCN · {{ _label }}">{{ status }}</span>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{# Clickable spectrogram thumbnail for a saved clip. Replaces bare <audio>
+   players: the spectrogram IS the affordance — clicking it opens the
+   review modal (_spectrogram_modal.html, which must be included on the
+   page) where the clip plays and can be labelled. The modal reads each
+   data-* with an empty-string fallback and fetches the rest by detection
+   id, so callers pass whatever metadata they have. `cls` controls
+   display/width (e.g. "block w-full" or "inline-block w-44 align-middle"). #}
+{% macro spectrogram_clip(id, confidence=None, common='', scientific='', meta='', label='', suggested='', sound_rating='', palette='fire', cls='block w-full') -%}
+  <button type="button" data-spectrogram-trigger
+          data-detection-id="{{ id }}"
+          data-species="{{ common }}"
+          data-scientific="{{ scientific }}"
+          data-meta="{{ meta }}"
+          data-label="{{ label }}"
+          data-suggested="{{ suggested }}"
+          data-sound-rating="{{ sound_rating }}"
+          data-palette="{{ palette }}"
+          class="relative h-7 rounded overflow-hidden conf-bar cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-400/60 transition {{ cls }}"
+          {% if confidence is not none %}style="--w: {{ (confidence * 100)|round(0)|int }}%;"{% endif %}
+          title="click to review">
+    <img src="/spectrograms/{{ id }}.png?p={{ palette }}" alt=""
+         class="absolute inset-0 w-full h-full object-cover pointer-events-none" loading="lazy">
+    {% if confidence is not none %}
+    <span class="absolute inset-0 flex items-center justify-center text-xs tabular-nums text-white font-medium drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none">
+      {{ "%.2f"|format(confidence) }}
+    </span>
+    {% endif %}
+  </button>
+{%- endmacro %}

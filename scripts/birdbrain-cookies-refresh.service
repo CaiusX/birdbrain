@@ -1,0 +1,8 @@
+[Unit]
+Description=BirdBrain YouTube cookies auto-refresh (re-export from Firefox when cams are bot-gated)
+After=birdbrain-pipeline.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dennis/Projects/birdbrain
+ExecStart=/home/dennis/.local/bin/uv run birdbrain refresh-cookies

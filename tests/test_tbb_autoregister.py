@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from africam.ingest import IngestBody, hash_token, ingest_batch
-from africam.pipeline import _desired_sources
-from africam.storage import Database, RuntimeSourceRow, WorkerHeartbeatRow
+from birdbrain.ingest import IngestBody, hash_token, ingest_batch
+from birdbrain.pipeline import _desired_sources
+from birdbrain.storage import Database, RuntimeSourceRow, WorkerHeartbeatRow
 
 
 def _ingest_one(db, unit="tbb-a1b2"):

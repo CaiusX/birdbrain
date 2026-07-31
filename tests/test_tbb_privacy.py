@@ -4,11 +4,11 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from africam.config import AppConfig
-from africam.detector.birdnet import Detection
-from africam.ingest import hash_token
-from africam.storage import Database
-from africam.web.app import create_app
+from birdbrain.config import AppConfig
+from birdbrain.detector.birdnet import Detection
+from birdbrain.ingest import hash_token
+from birdbrain.storage import Database
+from birdbrain.web.app import create_app
 
 PUBLIC = {"CF-Connecting-IP": "203.0.113.7"}  # simulate a Cloudflare-tunnel visitor
 

@@ -37,9 +37,9 @@ echo "=== 1/4  persistent journal ==="
 # Storage=volatile, and journald applies drop-ins in FILENAME order across all
 # directories — a 00- prefix loses to the vendor 40- and the journal silently
 # stays in /run. Clean up the losing name if an earlier run installed it.
-rm -f /etc/systemd/journald.conf.d/00-africam-persistent.conf
+rm -f /etc/systemd/journald.conf.d/00-birdbrain-persistent.conf
 install_verified scripts/journald-persistent.conf \
-    /etc/systemd/journald.conf.d/99-africam-persistent.conf 0644
+    /etc/systemd/journald.conf.d/99-birdbrain-persistent.conf 0644
 mkdir -p /var/log/journal
 systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
 systemctl restart systemd-journald
@@ -105,19 +105,19 @@ fi
 
 echo
 echo "=== 4/4  ratio-based net-watchdog ==="
-install_verified scripts/africam-net-watchdog.sh /usr/local/bin/africam-net-watchdog 0755
-install_verified scripts/africam-net-watchdog.service \
-    /etc/systemd/system/africam-net-watchdog.service 0644
-install_verified scripts/africam-net-watchdog.timer \
-    /etc/systemd/system/africam-net-watchdog.timer 0644
+install_verified scripts/birdbrain-net-watchdog.sh /usr/local/bin/birdbrain-net-watchdog 0755
+install_verified scripts/birdbrain-net-watchdog.service \
+    /etc/systemd/system/birdbrain-net-watchdog.service 0644
+install_verified scripts/birdbrain-net-watchdog.timer \
+    /etc/systemd/system/birdbrain-net-watchdog.timer 0644
 # Old consecutive-counter state; the new script keeps a rolling history instead.
-rm -f /var/lib/africam-net-watchdog/fail_count
+rm -f /var/lib/birdbrain-net-watchdog/fail_count
 systemctl daemon-reload
-systemctl enable --now africam-net-watchdog.timer >/dev/null 2>&1 || true
+systemctl enable --now birdbrain-net-watchdog.timer >/dev/null 2>&1 || true
 echo "  smoke test..."
-if /usr/local/bin/africam-net-watchdog; then
-    echo "  watchdog ran clean; timer=$(systemctl is-active africam-net-watchdog.timer)"
-    echo "  history=$(cat /var/lib/africam-net-watchdog/history 2>/dev/null || echo '(none)')"
+if /usr/local/bin/birdbrain-net-watchdog; then
+    echo "  watchdog ran clean; timer=$(systemctl is-active birdbrain-net-watchdog.timer)"
+    echo "  history=$(cat /var/lib/birdbrain-net-watchdog/history 2>/dev/null || echo '(none)')"
 else
     echo "  WARNING: watchdog exited non-zero"
 fi
@@ -127,6 +127,6 @@ echo "=== verification ==="
 echo "  power-save : $(iw dev "${DEV:-wlan0}" get power_save 2>/dev/null || echo '?')"
 echo "  resolvers  : $(grep -c '^nameserver' /etc/resolv.conf)"
 echo "  journal    : $(journalctl --header 2>/dev/null | grep -m1 'File path' || echo '?')"
-echo "  timer      : $(systemctl is-active africam-net-watchdog.timer)"
+echo "  timer      : $(systemctl is-active birdbrain-net-watchdog.timer)"
 echo
 echo "done."

@@ -47,7 +47,7 @@ def one(c, sql, *p):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default=MIC_SWAP, help="UTC anchor (default: mic swap)")
-    ap.add_argument("--db", default="data/africam.sqlite")
+    ap.add_argument("--db", default="data/birdbrain.sqlite")
     args = ap.parse_args()
     since = args.since.replace("T", " ")
 

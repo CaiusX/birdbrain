@@ -1,7 +1,7 @@
-# Africam Bird deployment for a single host (e.g. Raspberry Pi 5 + SSD).
+# BirdBrain deployment for a single host (e.g. Raspberry Pi 5 + SSD).
 #
 # Three services share one internal network:
-#   - pipeline: reads streams, runs BirdNET, writes to ./data/africam.sqlite
+#   - pipeline: reads streams, runs BirdNET, writes to ./data/birdbrain.sqlite
 #   - web:      serves the dashboard on http://web:8765 (inside the network)
 #   - caddy:    public TLS + basic-auth, reverse-proxies to web
 #
@@ -16,20 +16,20 @@
 services:
   pipeline:
     build: .
-    image: africam:latest
-    command: uv run africam run
+    image: birdbrain:latest
+    command: uv run birdbrain run
     volumes:
       - ./data:/app/data
       - ./sources.toml:/app/sources.toml:ro
       # sites.toml is optional; comment out if you don't run multisite cams
       - ./sites.toml:/app/sites.toml:ro
     environment:
-      AFRICAM_LOG_LEVEL: INFO
+      BIRDBRAIN_LOG_LEVEL: INFO
     restart: unless-stopped
 
   web:
-    image: africam:latest        # reuses the build above
-    command: uv run africam web --host 0.0.0.0 --port 8765
+    image: birdbrain:latest        # reuses the build above
+    command: uv run birdbrain web --host 0.0.0.0 --port 8765
     depends_on:
       - pipeline
     volumes:
@@ -37,8 +37,8 @@ services:
       - ./sources.toml:/app/sources.toml:ro
       - ./sites.toml:/app/sites.toml:ro
     environment:
-      AFRICAM_LOG_LEVEL: INFO
-      AFRICAM_XENO_CANTO_KEY: ${AFRICAM_XENO_CANTO_KEY:-}
+      BIRDBRAIN_LOG_LEVEL: INFO
+      BIRDBRAIN_XENO_CANTO_KEY: ${BIRDBRAIN_XENO_CANTO_KEY:-}
     expose:
       - "8765"
     restart: unless-stopped

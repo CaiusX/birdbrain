@@ -1,6 +1,6 @@
 # TinyBirdBrain (TBB) unit dependency profile.
 #
-# The unit runs the SAME africam package as central but with tflite-runtime
+# The unit runs the SAME birdbrain package as central but with tflite-runtime
 # instead of full TensorFlow (Phase 0: ~190 MB vs ~474 MB — fits 512 MB), on
 # Python 3.11 (tflite-runtime has no cp312 wheel). birdnetlib auto-prefers
 # tflite_runtime when it's present.

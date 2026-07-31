@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Africam Bird image. Single image runs both the pipeline supervisor and
+# BirdBrain image. Single image runs both the pipeline supervisor and
 # the web app — docker-compose picks the entrypoint per service.
 #
 # Tested on linux/arm64 (Raspberry Pi 5) and linux/amd64. TensorFlow is
@@ -34,5 +34,5 @@ COPY scripts ./scripts
 RUN uv sync --frozen --no-dev
 
 # Compose overrides this per service. Default to the pipeline so a bare
-# `docker run africam` does the right thing.
-CMD ["uv", "run", "africam", "run"]
+# `docker run birdbrain` does the right thing.
+CMD ["uv", "run", "birdbrain", "run"]

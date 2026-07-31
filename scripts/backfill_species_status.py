@@ -11,8 +11,8 @@ import time
 import urllib.parse
 import urllib.request
 
-from africam.config import AppConfig
-from africam.storage import Database, SpeciesNoteRow
+from birdbrain.config import AppConfig
+from birdbrain.storage import Database, SpeciesNoteRow
 
 BASE = "http://127.0.0.1:8765"
 DELAY = 1.5  # seconds between calls — image-list endpoint rate-limits hard

@@ -18,7 +18,7 @@ PORT="${TBB_WEB_PORT:-8080}"
 UV="${UV:-$HOME/.local/bin/uv}"
 cd "$REPO" || { echo "tbb-update: no repo at $REPO"; exit 1; }
 
-REF="${AFRICAM_TBB_UPDATE_REF:-origin/$(git rev-parse --abbrev-ref HEAD)}"
+REF="${BIRDBRAIN_TBB_UPDATE_REF:-origin/$(git rev-parse --abbrev-ref HEAD)}"
 
 reinstall() {
   "$UV" pip install -q -r deploy/tbb/requirements-tbb.txt && "$UV" pip install -q --no-deps -e .

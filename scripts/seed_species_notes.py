@@ -12,8 +12,8 @@ high-conf hits.
 Run with: uv run python scripts/seed_species_notes.py
 """
 
-from africam.config import AppConfig
-from africam.storage import Database
+from birdbrain.config import AppConfig
+from birdbrain.storage import Database
 
 NOTES: list[tuple[str, str, str, str | None]] = [
     # --- High count, common-sense species --------------------------------------

@@ -46,7 +46,7 @@ ENDPOINT = os.environ.get("BIRDNET_CLOUD_ENDPOINT", "https://api.birdnetcloud.co
 TOKEN_FILE = Path(
     os.environ.get("BIRDNET_TOKEN_FILE", "~/.config/birdnetcloud/token")
 ).expanduser()
-DB = os.environ.get("AFRICAM_DB", "data/africam.sqlite")
+DB = os.environ.get("BIRDBRAIN_DB", "data/birdbrain.sqlite")
 STATE = Path(os.environ.get("BACKFILL_STATE", "data/birdnetcloud_backfill_state.json"))
 
 # Local ids already in the cloud by another route: the two probe detections sent

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from africam.audio import MicSource
-from africam.audio.source import AudioSource
+from birdbrain.audio import MicSource
+from birdbrain.audio.source import AudioSource
 
 
 def test_mic_source_is_an_audio_source():

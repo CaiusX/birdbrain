@@ -1,4 +1,4 @@
-# Africam Bird public ingress.
+# BirdBrain public ingress.
 #
 # Steps before docker compose up:
 #   1. Point your domain's A record at this Pi's public IP (and forward

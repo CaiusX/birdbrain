@@ -3,11 +3,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from africam.config import AppConfig
-from africam.enroll import EnrollBody, enroll
-from africam.ingest import hash_token
-from africam.storage import Database
-from africam.web.app import create_app
+from birdbrain.config import AppConfig
+from birdbrain.enroll import EnrollBody, enroll
+from birdbrain.ingest import hash_token
+from birdbrain.storage import Database
+from birdbrain.web.app import create_app
 
 
 def _central(tmp_path):

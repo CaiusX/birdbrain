@@ -5,11 +5,11 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from africam.config import AppConfig
-from africam.detector.birdnet import Detection
-from africam.storage import Database
-from africam.web import tbb_app
-from africam.web.tbb_app import create_tbb_app, list_alsa_devices, update_env_file
+from birdbrain.config import AppConfig
+from birdbrain.detector.birdnet import Detection
+from birdbrain.storage import Database
+from birdbrain.web import tbb_app
+from birdbrain.web.tbb_app import create_tbb_app, list_alsa_devices, update_env_file
 
 
 def _make_app(tmp_path):
@@ -111,11 +111,11 @@ def test_setup_enroll_saves_issued_credentials(tmp_path, monkeypatch):
     )
     assert r.status_code == 303
     assert "enrolled=patio" in r.headers["location"]
-    assert captured["AFRICAM_TBB_DEVICE_TOKEN"] == "TKN123"
-    assert captured["AFRICAM_TBB_UNIT_ID"] == "patio"
-    assert captured["AFRICAM_TBB_SYNC_ENABLED"] == "true"
-    assert captured["AFRICAM_TBB_CENTRAL_URL"] == "http://c:8000"  # trailing slash trimmed
-    assert captured["AFRICAM_TBB_LAT"] == "-25.7"
+    assert captured["BIRDBRAIN_TBB_DEVICE_TOKEN"] == "TKN123"
+    assert captured["BIRDBRAIN_TBB_UNIT_ID"] == "patio"
+    assert captured["BIRDBRAIN_TBB_SYNC_ENABLED"] == "true"
+    assert captured["BIRDBRAIN_TBB_CENTRAL_URL"] == "http://c:8000"  # trailing slash trimmed
+    assert captured["BIRDBRAIN_TBB_LAT"] == "-25.7"
 
 
 def test_setup_enroll_surfaces_central_error(tmp_path, monkeypatch):
@@ -210,16 +210,16 @@ def test_list_alsa_devices_empty_when_no_arecord(monkeypatch):
 def test_update_env_file_replaces_and_appends(tmp_path):
     env = tmp_path / ".env"
     env.write_text(
-        "# unit config\nAFRICAM_TBB_UNIT_ID=old\nAFRICAM_LOG_LEVEL=INFO\n",
+        "# unit config\nBIRDBRAIN_TBB_UNIT_ID=old\nBIRDBRAIN_LOG_LEVEL=INFO\n",
         encoding="utf-8",
     )
     update_env_file(env, {
-        "AFRICAM_TBB_UNIT_ID": "tbb-a1b2",
-        "AFRICAM_TBB_MIC_DEVICE": "plughw:0,0",
+        "BIRDBRAIN_TBB_UNIT_ID": "tbb-a1b2",
+        "BIRDBRAIN_TBB_MIC_DEVICE": "plughw:0,0",
     })
     text = env.read_text(encoding="utf-8")
-    assert "AFRICAM_TBB_UNIT_ID=tbb-a1b2" in text
-    assert "AFRICAM_TBB_UNIT_ID=old" not in text
-    assert "AFRICAM_TBB_MIC_DEVICE=plughw:0,0" in text  # appended
-    assert "AFRICAM_LOG_LEVEL=INFO" in text  # untouched
+    assert "BIRDBRAIN_TBB_UNIT_ID=tbb-a1b2" in text
+    assert "BIRDBRAIN_TBB_UNIT_ID=old" not in text
+    assert "BIRDBRAIN_TBB_MIC_DEVICE=plughw:0,0" in text  # appended
+    assert "BIRDBRAIN_LOG_LEVEL=INFO" in text  # untouched
     assert "# unit config" in text  # comment preserved

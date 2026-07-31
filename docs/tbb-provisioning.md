@@ -44,12 +44,12 @@ cd ~/birdbrain
 
 uv venv --python 3.11 .venv                          # 3.11 (tflite has no cp312 wheel)
 uv pip install -r deploy/tbb/requirements-tbb.txt    # ~10-20 min on a Zero 2 W
-uv pip install --no-deps -e .                        # the africam package itself
+uv pip install --no-deps -e .                        # the birdbrain package itself
 .venv/bin/python -c "import tflite_runtime; print('tflite', tflite_runtime.__version__)"
 .venv/bin/python -c "import tensorflow" 2>&1 | head -1   # expect ModuleNotFoundError
 ```
 
-The services and the updater call `~/birdbrain/.venv/bin/africam` directly (not
+The services and the updater call `~/birdbrain/.venv/bin/birdbrain` directly (not
 `uv run`, whose auto-sync would reinstall full TensorFlow from `pyproject`).
 
 > **Migrating a unit that used the old sed-edit install:** discard the local
@@ -59,7 +59,7 @@ The services and the updater call `~/birdbrain/.venv/bin/africam` directly (not
 
 ### 2b. Audio input options
 
-The unit reads any ALSA device (`AFRICAM_TBB_MIC_DEVICE`), so the mic is a
+The unit reads any ALSA device (`BIRDBRAIN_TBB_MIC_DEVICE`), so the mic is a
 hardware choice, not a code change:
 
 - **USB mic** (e.g. a lavalier or USB headset): plug in, `arecord -l`, use its
@@ -74,7 +74,7 @@ hardware choice, not a code change:
   # load the mixer routing for the onboard mic (states from Raspberry Pi)
   git clone https://github.com/raspberrypi/Pi-Codec.git ~/Pi-Codec
   sudo alsactl restore -f ~/Pi-Codec/Codec_Zero_OnboardMIC_record_and_SPK_playback.state
-  arecord -l   # shows card "Zero"  →  AFRICAM_TBB_MIC_DEVICE=plughw:CARD=Zero,DEV=0
+  arecord -l   # shows card "Zero"  →  BIRDBRAIN_TBB_MIC_DEVICE=plughw:CARD=Zero,DEV=0
   ```
   Other presets in that repo: `Codec_Zero_StereoMIC_record_and_HP_playback.state`
   (external MIC1/MIC2), `Codec_Zero_AUXIN_record_and_HP_playback.state` (line in).
@@ -99,28 +99,28 @@ hardware choice, not a code change:
 
 ## 3. Unit configuration (`.env`)
 
-The unit runs the same `africam` package under the `tbb` profile, driven by
-`AFRICAM_TBB_*` env. Put a `.env` in `~/birdbrain` (read automatically; also what
+The unit runs the same `birdbrain` package under the `tbb` profile, driven by
+`BIRDBRAIN_TBB_*` env. Put a `.env` in `~/birdbrain` (read automatically; also what
 the `/setup` page writes):
 
 ```ini
 # ~/birdbrain/.env
-AFRICAM_TBB_UNIT_ID=tbb-a1b2
-AFRICAM_TBB_MIC_DEVICE=plughw:0,0      # from `arecord -l`
-AFRICAM_TBB_LAT=-25.75                 # optional; enables BirdNET locality filter
-AFRICAM_TBB_LON=28.23
-AFRICAM_TBB_TIMEZONE=Africa/Johannesburg
-AFRICAM_TBB_CLIP_RETENTION_DAYS=14
-AFRICAM_TBB_SYNC_ENABLED=false         # Phase 2
-AFRICAM_DB_URL=sqlite:////home/pi/birdbrain/data/africam.sqlite
-AFRICAM_CLIPS_DIR=/home/pi/birdbrain/data/clips
+BIRDBRAIN_TBB_UNIT_ID=tbb-a1b2
+BIRDBRAIN_TBB_MIC_DEVICE=plughw:0,0      # from `arecord -l`
+BIRDBRAIN_TBB_LAT=-25.75                 # optional; enables BirdNET locality filter
+BIRDBRAIN_TBB_LON=28.23
+BIRDBRAIN_TBB_TIMEZONE=Africa/Johannesburg
+BIRDBRAIN_TBB_CLIP_RETENTION_DAYS=14
+BIRDBRAIN_TBB_SYNC_ENABLED=false         # Phase 2
+BIRDBRAIN_DB_URL=sqlite:////home/pi/birdbrain/data/birdbrain.sqlite
+BIRDBRAIN_CLIPS_DIR=/home/pi/birdbrain/data/clips
 ```
 
 Smoke-test before installing services:
 
 ```sh
-.venv/bin/africam tbb-listen --device plughw:0,0 --seconds 30   # detections + timing
-.venv/bin/africam tbb-pipeline    # Ctrl-C after you see a heartbeat/detection
+.venv/bin/birdbrain tbb-listen --device plughw:0,0 --seconds 30   # detections + timing
+.venv/bin/birdbrain tbb-pipeline    # Ctrl-C after you see a heartbeat/detection
 ```
 
 ## 4. Services (systemd **user** units)
@@ -162,7 +162,7 @@ systemctl --user enable --now tbb-update.timer      # nightly, random ≤1h jitt
 systemctl --user start tbb-update && journalctl --user -u tbb-update -n 20 --no-pager
 ```
 
-(Override the tracked branch with `AFRICAM_TBB_UPDATE_REF`, e.g. a release tag.)
+(Override the tracked branch with `BIRDBRAIN_TBB_UPDATE_REF`, e.g. a release tag.)
 
 ## 4c. Stability tooling (network resilience — REQUIRED on a Zero 2 W)
 
@@ -175,7 +175,7 @@ unit missing these will look healthy on the bench and then vanish in the field.
 - **Wifi power-save off** — [`scripts/wifi-powersave-off.conf`](../scripts/wifi-powersave-off.conf)
   → `/etc/NetworkManager/conf.d/` (`wifi.powersave = 2`). The fix that keeps the
   radio up. Verify with `iw dev wlan0 get power_save` → `off`.
-- **Network watchdog** — [`scripts/africam-net-watchdog.sh`](../scripts/africam-net-watchdog.sh)
+- **Network watchdog** — [`scripts/birdbrain-net-watchdog.sh`](../scripts/birdbrain-net-watchdog.sh)
   → `/usr/local/bin/`, with its `.service`/`.timer` as a **root** systemd timer.
   Probes DNS each minute; cycles wifi after 5 consecutive failures, reboots
   after 20. The safety net (no shared fate with the python process).
@@ -197,7 +197,7 @@ curl -s localhost:8080/healthz                # {"ok": true, "listening": true, 
 From a phone on the same wifi: open **http://tbb-XXXX.local:8080** → the **Now**
 page should show live detections, **Today** the species list. Reboot the Pi and
 confirm both services come back and detections persist (SQLite + clips on the
-SD card). Clips older than `AFRICAM_TBB_CLIP_RETENTION_DAYS` are pruned by the
+SD card). Clips older than `BIRDBRAIN_TBB_CLIP_RETENTION_DAYS` are pruned by the
 pipeline automatically.
 
 ---

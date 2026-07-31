@@ -1,0 +1,112 @@
+{% extends "tbb_base.html" %}
+{% block content %}
+<h2>Setup</h2>
+{% if saved %}<p class="saved">✓ Saved. Restart the unit's services to apply.</p>{% endif %}
+{% if enrolled %}<p class="saved">✓ Enrolled as <b>{{ enrolled }}</b>. Power-cycle the unit (or restart its services) to start syncing.</p>{% endif %}
+{% if enroll_error %}<p class="enroll-error">Enrollment failed: {{ enroll_error }}</p>{% endif %}
+
+<h3>Connect to central</h3>
+{% if cfg.enrolled %}
+  <p class="hint">This unit is enrolled (<code>{{ cfg.unit_id }}</code>) and syncing to
+    <code>{{ cfg.central_url }}</code>. To re-enroll, get a fresh claim code and submit below.</p>
+{% else %}
+  <p class="hint">Enter the claim code printed on the box to register this unit with central.</p>
+{% endif %}
+<form method="post" action="/setup/enroll">
+  <label>Central URL
+    <input type="text" name="central_url" value="{{ cfg.central_url }}">
+  </label>
+  <label>Claim code
+    <input type="text" name="code" placeholder="XXXXX-XXXXX" required>
+  </label>
+  <label>Name this unit
+    <input type="text" name="display_name" value="{{ cfg.unit_id }}" placeholder="e.g. Front Garden">
+  </label>
+  <div class="latlon">
+    <label>Latitude <input type="text" name="lat" value="{{ cfg.lat if cfg.lat is not none else '' }}" placeholder="-25.75"></label>
+    <label>Longitude <input type="text" name="lon" value="{{ cfg.lon if cfg.lon is not none else '' }}" placeholder="28.19"></label>
+  </div>
+  <button type="submit">Enroll</button>
+</form>
+
+<h3>Local settings</h3>
+<form method="post" action="/setup">
+  <label>Unit name
+    <input type="text" name="unit_id" value="{{ cfg.unit_id }}">
+  </label>
+  <label>Microphone
+    <select name="mic_device">
+      {% for d in devices %}
+        <option value="{{ d.device }}" {{ 'selected' if d.device == cfg.mic_device else '' }}>
+          {{ d.device }} — {{ d.label }}
+        </option>
+      {% endfor %}
+      {% if not devices %}
+        <option value="{{ cfg.mic_device }}" selected>{{ cfg.mic_device }} (no ALSA devices detected)</option>
+      {% endif %}
+    </select>
+  </label>
+  <label class="check">
+    <input type="checkbox" name="sync_enabled" value="true" {{ 'checked' if cfg.sync_enabled else '' }}>
+    Sync detections to central
+  </label>
+  <button type="submit">Save</button>
+</form>
+
+<div class="mic-test">
+  <div class="mic-controls">
+    <label>Gain <input type="range" id="mic-gain" min="-20" max="20" step="2" value="0">
+      <span id="mic-gain-val">0 dB</span></label>
+    <label class="check"><input type="checkbox" id="mic-denoise"> Reduce noise</label>
+    <label class="check"><input type="checkbox" id="mic-highpass"> Cut low rumble</label>
+  </div>
+  <button type="button" id="mic-test-btn">🎤 Test microphone (record 4s &amp; play)</button>
+  <span id="mic-test-status" class="hint"></span>
+  <audio id="mic-test-audio" controls style="display:none; margin-top:.6rem; width:100%"></audio>
+  <p class="hint">Filters clean up this preview only. For a permanent fix lower the
+    mic's capture gain on the unit: <code>amixer -c 0 sset Mic cap 50%</code>.</p>
+</div>
+<script>
+  // Records a few seconds from the configured mic and plays it here — no deps.
+  // Works when the pipeline isn't holding the mic; otherwise shows why not.
+  (function () {
+    const btn = document.getElementById('mic-test-btn');
+    const status = document.getElementById('mic-test-status');
+    const audio = document.getElementById('mic-test-audio');
+    const gain = document.getElementById('mic-gain');
+    const gainVal = document.getElementById('mic-gain-val');
+    gain.addEventListener('input', () => { gainVal.textContent = gain.value + ' dB'; });
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; audio.style.display = 'none'; status.textContent = ' recording 4s…';
+      const q = new URLSearchParams({
+        seconds: '4',
+        gain_db: gain.value,
+        denoise: document.getElementById('mic-denoise').checked ? '1' : '0',
+        highpass: document.getElementById('mic-highpass').checked ? '1' : '0',
+      });
+      try {
+        const r = await fetch('/setup/mic-sample?' + q, { cache: 'no-store' });
+        if (!r.ok) {
+          let msg = r.status + '';
+          try { msg = (await r.json()).detail || msg; } catch (e) {}
+          status.textContent = ' ' + msg;
+          return;
+        }
+        audio.src = URL.createObjectURL(await r.blob());
+        audio.style.display = ''; status.textContent = ' playing back';
+        audio.play();
+      } catch (e) {
+        status.textContent = ' error: ' + e;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  })();
+</script>
+<p class="hint">
+  Microphones detected via <code>arecord -l</code>. Location
+  ({{ cfg.lat if cfg.lat is not none else '—' }}, {{ cfg.lon if cfg.lon is not none else '—' }})
+  and clip retention ({{ cfg.retention_days }} days) are set via the unit's <code>.env</code>
+  (<code>BIRDBRAIN_TBB_*</code>). This page is reachable on the LAN only.
+</p>
+{% endblock %}

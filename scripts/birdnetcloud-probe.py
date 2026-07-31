@@ -37,7 +37,7 @@ from datetime import UTC, datetime, timedelta
 import requests
 
 ENDPOINT = os.environ.get("BIRDNET_CLOUD_ENDPOINT", "https://api.birdnetcloud.com")
-DB = os.environ.get("AFRICAM_DB", "data/africam.sqlite")
+DB = os.environ.get("BIRDBRAIN_DB", "data/birdbrain.sqlite")
 SOURCE = os.environ.get("PROBE_SOURCE", "tbb-test")
 TOKEN_FILE = os.path.expanduser(
     os.environ.get("BIRDNET_TOKEN_FILE", "~/.config/birdnetcloud/token")

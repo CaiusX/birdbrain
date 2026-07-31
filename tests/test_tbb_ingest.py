@@ -6,10 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from africam.config import AppConfig
-from africam.ingest import IngestBody, hash_token, ingest_batch
-from africam.storage import Database, DetectionRow
-from africam.web.app import create_app
+from birdbrain.config import AppConfig
+from birdbrain.ingest import IngestBody, hash_token, ingest_batch
+from birdbrain.storage import Database, DetectionRow
+from birdbrain.web.app import create_app
 
 
 def _central(tmp_path):

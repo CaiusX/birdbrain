@@ -1,6 +1,6 @@
 # TBB Phase 0 — Pi Zero 2 W bench bring-up (co-work runbook)
 
-Goal: get one Raspberry Pi Zero 2 W running `africam tbb-listen` off a USB mic so
+Goal: get one Raspberry Pi Zero 2 W running `birdbrain tbb-listen` off a USB mic so
 we can record the **real** per-chunk inference ms and peak RAM that the Phase 0
 acceptance gate needs (the dev sandbox is x86 and can't produce these).
 
@@ -99,7 +99,7 @@ source "$HOME/.local/bin/env"      # put uv on PATH for this shell
 uv --version
 ```
 
-Get the `africam` source. The `tbb` branch (with `MicSource` + `tbb-listen`) is
+Get the `birdbrain` source. The `tbb` branch (with `MicSource` + `tbb-listen`) is
 **not on GitHub yet** — it's local on the dev machine.
 
 **⟶ ping Claude** — say "push tbb" and I'll push the branch to
@@ -175,7 +175,7 @@ RSS ~190 MB, zero swap** — comfortable on 512 MB. If `uv sync` ever can't find
 With deps installed, find the right `--device` from step 3, then:
 
 ```sh
-/usr/bin/time -v uv run africam tbb-listen --device plughw:1,0 --seconds 60
+/usr/bin/time -v uv run birdbrain tbb-listen --device plughw:1,0 --seconds 60
 ```
 
 - `tbb-listen` prints **per-chunk inference ms** + a headroom multiple, and a

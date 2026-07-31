@@ -2,7 +2,7 @@
 
 **Snapshot:** 2026-07-28 07:17 UTC. Window: 2026-05-12 → 2026-07-28 (77 days,
 72 of them with detections). All figures come from the live database
-(`data/africam.sqlite`) and are reproducible from the queries described in
+(`data/birdbrain.sqlite`) and are reproducible from the queries described in
 [Method](#method).
 
 This is a report on how well BirdNET-on-live-streams actually works — where it

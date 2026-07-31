@@ -1,4 +1,4 @@
-# africam-bird
+# birdbrain
 
 Real-time bird species recognition from live African wildlife cams. Pulls
 audio from public [Africam](https://africam.com/) YouTube streams, runs
@@ -31,15 +31,15 @@ reference (Raspberry Pi or desktop, from clone to always-on services).
 Deploy is bare systemd user services on a Raspberry Pi 5 (Debian Bookworm,
 Python 3.12, `uv`). Two services:
 
-- **`africam-pipeline`** — one worker per source; yt-dlp → ffmpeg → BirdNET.
-- **`africam-web`** — FastAPI + Jinja + HTMX dashboard on `:8765`.
+- **`birdbrain-pipeline`** — one worker per source; yt-dlp → ffmpeg → BirdNET.
+- **`birdbrain-web`** — FastAPI + Jinja + HTMX dashboard on `:8765`.
 
 Sources live in [`sources.toml`](sources.toml) (file-managed) or can be
 added at runtime via `/admin`. Either kind can be toggled on/off from
 `/admin` without a restart — the supervisor reconciles every 15 s.
 
 Background workers (in the web process) need an `ANTHROPIC_API_KEY`
-(loaded from `/etc/africam/secrets.env`) to write the per-species,
+(loaded from `/etc/birdbrain/secrets.env`) to write the per-species,
 per-site and daily AI commentary. The detection pipeline does not need
 it.
 

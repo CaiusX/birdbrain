@@ -9,11 +9,11 @@ always-on systemd deployment.
 
 What you're running:
 
-- **`africam run`** — the detection pipeline: one worker per source, pulling audio
+- **`birdbrain run`** — the detection pipeline: one worker per source, pulling audio
   (yt-dlp → ffmpeg) and classifying rolling 3-second chunks with BirdNET.
-- **`africam web`** — the FastAPI + Jinja + HTMX dashboard.
+- **`birdbrain web`** — the FastAPI + Jinja + HTMX dashboard.
 
-Both processes share one local **SQLite** database (`data/africam.sqlite`, created
+Both processes share one local **SQLite** database (`data/birdbrain.sqlite`, created
 automatically) and a clips directory (`data/clips`). No cloud service is required for
 the core loop — Anthropic / Xeno-Canto keys are optional extras (see below).
 
@@ -118,9 +118,9 @@ Each `[[source]]` is one continuously-monitored stream. Three kinds:
 ```toml
 # A YouTube live stream (needs ffmpeg + a JS runtime)
 [[source]]
-name = "africam-olifants"
+name = "birdbrain-olifants"
 kind = "youtube"
-url = "https://www.youtube.com/@africam/live"
+url = "https://www.youtube.com/@birdbrain/live"
 lat = -24.0            # biases BirdNET's species filter to the region
 lon = 31.5
 min_confidence = 0.6   # hide detections below this score
@@ -149,15 +149,15 @@ min_confidence = 0.5
   source. Otherwise ignore it.
 - **YouTube bot-gating:** if yt-dlp hits *"Sign in to confirm you're not a bot"*, supply
   cookies — either export a `cookies.txt` and point at it, or run
-  `uv run africam refresh-cookies` (re-exports from a local Firefox profile).
+  `uv run birdbrain refresh-cookies` (re-exports from a local Firefox profile).
 
 ### Optional `.env` (extra features)
 
-Create a `.env` in the repo root for optional keys (prefix `AFRICAM_`):
+Create a `.env` in the repo root for optional keys (prefix `BIRDBRAIN_`):
 
 ```ini
 # Inline Xeno-Canto reference recordings in the audition modal (free key):
-AFRICAM_XENO_CANTO_KEY=your-key-here
+BIRDBRAIN_XENO_CANTO_KEY=your-key-here
 # AI commentary (daily brief, per-species & per-site notes). The pipeline does
 # NOT need this; only the note-writer (runs in the web process) uses it:
 ANTHROPIC_API_KEY=sk-ant-...
@@ -173,7 +173,7 @@ note-writer simply stays dormant.
 Confirm ffmpeg + BirdNET work against your config before going live:
 
 ```bash
-uv run africam probe -s sources.toml
+uv run birdbrain probe -s sources.toml
 ```
 
 This pulls a few seconds from each source and runs one BirdNET pass. If you see
@@ -187,15 +187,15 @@ In two terminals (same directory):
 
 ```bash
 # Terminal 1 — detection pipeline
-uv run africam run
+uv run birdbrain run
 
 # Terminal 2 — dashboard
-uv run africam web --host 0.0.0.0 --port 8765
+uv run birdbrain web --host 0.0.0.0 --port 8765
 ```
 
 Open **`http://<host-ip>:8765/`**.
 
-> **Ports:** `africam web` defaults to `127.0.0.1:8000` (localhost only). Pass
+> **Ports:** `birdbrain web` defaults to `127.0.0.1:8000` (localhost only). Pass
 > `--host 0.0.0.0 --port 8765` to reach it from other machines on your LAN — `8765`
 > is just this project's convention; any free port works.
 >
@@ -206,9 +206,9 @@ Open **`http://<host-ip>:8765/`**.
 Useful commands:
 
 ```bash
-uv run africam detections -n 25      # recent detections
-uv run africam summary -H 24         # per-source rollup, last 24h
-uv run africam --help                # all subcommands
+uv run birdbrain detections -n 25      # recent detections
+uv run birdbrain summary -H 24         # per-source rollup, last 24h
+uv run birdbrain --help                # all subcommands
 ```
 
 ---
@@ -223,27 +223,27 @@ failure. Example unit templates live in [`scripts/`](scripts/).
 loginctl enable-linger "$USER"
 
 mkdir -p ~/.config/systemd/user
-cp scripts/africam-pipeline.service ~/.config/systemd/user/
-cp scripts/africam-web.service      ~/.config/systemd/user/
+cp scripts/birdbrain-pipeline.service ~/.config/systemd/user/
+cp scripts/birdbrain-web.service      ~/.config/systemd/user/
 # Edit both: set WorkingDirectory to your checkout and the full path to `uv`
 # (run `command -v uv` to find it, e.g. ~/.local/bin/uv):
-${EDITOR:-nano} ~/.config/systemd/user/africam-pipeline.service
-${EDITOR:-nano} ~/.config/systemd/user/africam-web.service
+${EDITOR:-nano} ~/.config/systemd/user/birdbrain-pipeline.service
+${EDITOR:-nano} ~/.config/systemd/user/birdbrain-web.service
 
 systemctl --user daemon-reload
-systemctl --user enable --now africam-pipeline africam-web
-systemctl --user status africam-web
+systemctl --user enable --now birdbrain-pipeline birdbrain-web
+systemctl --user status birdbrain-web
 ```
 
 Logs and control:
 
 ```bash
-journalctl --user -u africam-web -f
-journalctl --user -u africam-pipeline -f
-systemctl --user restart africam-web        # safe anytime
+journalctl --user -u birdbrain-web -f
+journalctl --user -u birdbrain-pipeline -f
+systemctl --user restart birdbrain-web        # safe anytime
 ```
 
-> Restarting **`africam-pipeline`** re-resolves *all* sources at once, which can trip
+> Restarting **`birdbrain-pipeline`** re-resolves *all* sources at once, which can trip
 > YouTube's IP bot-block. Prefer toggling a single source from `/admin`; only restart
 > the whole pipeline when you must.
 
@@ -252,14 +252,14 @@ systemctl --user restart africam-web        # safe anytime
 - **Cookies auto-refresh** — ship the included timer so bot-gated YouTube sources
   recover on their own:
   ```bash
-  cp scripts/africam-cookies-refresh.{service,timer} ~/.config/systemd/user/
-  systemctl --user daemon-reload && systemctl --user enable --now africam-cookies-refresh.timer
+  cp scripts/birdbrain-cookies-refresh.{service,timer} ~/.config/systemd/user/
+  systemctl --user daemon-reload && systemctl --user enable --now birdbrain-cookies-refresh.timer
   ```
 - **Disk hygiene** — clips accumulate; prune old ones (DB rows are kept, audio is
-  removed): `uv run africam prune --days 14`. Put it on a daily timer if you like.
+  removed): `uv run birdbrain prune --days 14`. Put it on a daily timer if you like.
 - **AI commentary** — set `ANTHROPIC_API_KEY` for the web service via an
-  `EnvironmentFile` (e.g. `/etc/africam/secrets.env`), referenced from
-  `africam-web.service`.
+  `EnvironmentFile` (e.g. `/etc/birdbrain/secrets.env`), referenced from
+  `birdbrain-web.service`.
 - **Public access** — front the dashboard with a **Cloudflare Tunnel** (`cloudflared`).
   Over the tunnel, `/admin` and all mutating requests return `404`, so the public side
   is read-only without app-level auth. LAN access stays full.
@@ -272,8 +272,8 @@ Windows has no systemd. To keep BirdBrain running:
   windows.
 - **On startup / unattended:** wrap each command as a background service with
   [NSSM](https://nssm.cc/), or create two **Task Scheduler** tasks set to *"Run whether
-  user is logged on or not"* triggered *At log on*. Point one at `uv run africam run`
-  and the other at `uv run africam web --host 0.0.0.0 --port 8765`, each with the repo
+  user is logged on or not"* triggered *At log on*. Point one at `uv run birdbrain run`
+  and the other at `uv run birdbrain web --host 0.0.0.0 --port 8765`, each with the repo
   folder as its working directory.
 
 ---
@@ -284,7 +284,7 @@ Windows has no systemd. To keep BirdBrain running:
   64-bit Python 3.12 and have free disk. A swap file helps on low-RAM Pis.
 - **`ffmpeg: not found`** — install it (step 1); it's mandatory for every source.
 - **YouTube: "Sign in to confirm you're not a bot"** — supply cookies / run
-  `africam refresh-cookies`; make sure `deno` or `node` is on `PATH`.
+  `birdbrain refresh-cookies`; make sure `deno` or `node` is on `PATH`.
 - **Port already in use** — pick another `--port`, or stop whatever owns it.
 - **Mic not captured** — find the device string with `arecord -L`; use
   `plughw:CARD=…,DEV=0` for exclusive ALSA, or `pulse:alsa_input.…` for shared

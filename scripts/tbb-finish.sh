@@ -37,22 +37,22 @@ install_verified() {   # <src> <dst> <mode>
 }
 
 echo "=== deps check ==="
-.venv/bin/python -c "import importlib.util as u;[print(m,bool(u.find_spec(m))) for m in ['numpy','scipy','birdnetlib','tflite_runtime','africam']]"
+.venv/bin/python -c "import importlib.util as u;[print(m,bool(u.find_spec(m))) for m in ['numpy','scipy','birdnetlib','tflite_runtime','birdbrain']]"
 
 echo "=== mic devices (want a 'Zero' card) ==="
 arecord -l 2>/dev/null | grep -iE "card [0-9]" || echo "  NO CAPTURE DEVICE — codec overlay not loaded (reboot needed)"
 
 echo "=== writing .env ==="
 {
-  echo "AFRICAM_TBB_UNIT_ID=${UNIT_ID}"
-  echo "AFRICAM_TBB_MIC_DEVICE=${MIC}"
-  [ -n "$LAT" ] && echo "AFRICAM_TBB_LAT=${LAT}"
-  [ -n "$LON" ] && echo "AFRICAM_TBB_LON=${LON}"
-  echo "AFRICAM_TBB_TIMEZONE=Africa/Johannesburg"
-  echo "AFRICAM_TBB_CLIP_RETENTION_DAYS=14"
-  echo "AFRICAM_TBB_SYNC_ENABLED=false"
-  echo "AFRICAM_DB_URL=sqlite:///${ROOT}/data/africam.sqlite"
-  echo "AFRICAM_CLIPS_DIR=${ROOT}/data/clips"
+  echo "BIRDBRAIN_TBB_UNIT_ID=${UNIT_ID}"
+  echo "BIRDBRAIN_TBB_MIC_DEVICE=${MIC}"
+  [ -n "$LAT" ] && echo "BIRDBRAIN_TBB_LAT=${LAT}"
+  [ -n "$LON" ] && echo "BIRDBRAIN_TBB_LON=${LON}"
+  echo "BIRDBRAIN_TBB_TIMEZONE=Africa/Johannesburg"
+  echo "BIRDBRAIN_TBB_CLIP_RETENTION_DAYS=14"
+  echo "BIRDBRAIN_TBB_SYNC_ENABLED=false"
+  echo "BIRDBRAIN_DB_URL=sqlite:///${ROOT}/data/birdbrain.sqlite"
+  echo "BIRDBRAIN_CLIPS_DIR=${ROOT}/data/clips"
 } > "${ROOT}/.env"
 echo "wrote ${ROOT}/.env:"; sed 's/^/  /' "${ROOT}/.env"
 
@@ -107,16 +107,16 @@ fi
 # Network watchdog (root timer): probes DNS each minute, reseeds a missing wifi
 # profile after 3 consecutive failures, cycles wifi after 5, reboots after 20 —
 # recovers a wedged radio with no shared fate with the python process.
-if [ -f scripts/africam-net-watchdog.sh ]; then
-  if install_verified scripts/africam-net-watchdog.sh /usr/local/bin/africam-net-watchdog 0755 \
-     && install_verified scripts/africam-net-watchdog.service /etc/systemd/system/africam-net-watchdog.service 0644 \
-     && install_verified scripts/africam-net-watchdog.timer /etc/systemd/system/africam-net-watchdog.timer 0644; then
+if [ -f scripts/birdbrain-net-watchdog.sh ]; then
+  if install_verified scripts/birdbrain-net-watchdog.sh /usr/local/bin/birdbrain-net-watchdog 0755 \
+     && install_verified scripts/birdbrain-net-watchdog.service /etc/systemd/system/birdbrain-net-watchdog.service 0644 \
+     && install_verified scripts/birdbrain-net-watchdog.timer /etc/systemd/system/birdbrain-net-watchdog.timer 0644; then
     sudo systemctl daemon-reload 2>/dev/null || true
-    sudo systemctl enable --now africam-net-watchdog.timer 2>/dev/null || true
-    echo "  net-watchdog: $(systemctl is-active africam-net-watchdog.timer 2>/dev/null)"
+    sudo systemctl enable --now birdbrain-net-watchdog.timer 2>/dev/null || true
+    echo "  net-watchdog: $(systemctl is-active birdbrain-net-watchdog.timer 2>/dev/null)"
     # A timer that is active but whose script is empty looks healthy and does
     # nothing. Run it once now and confirm it is a real, working binary.
-    if sudo /usr/local/bin/africam-net-watchdog && sudo systemctl start africam-net-watchdog.service; then
+    if sudo /usr/local/bin/birdbrain-net-watchdog && sudo systemctl start birdbrain-net-watchdog.service; then
       echo "  net-watchdog: smoke test passed"
     else
       echo "  WARNING: net-watchdog installed but failed its smoke test"

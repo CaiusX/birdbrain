@@ -2,10 +2,10 @@
 # Each [[source]] entry is one continuously-monitored audio stream.
 
 [[source]]
-name = "africam-olifants"
+name = "birdbrain-olifants"
 kind = "youtube"
 # Any youtube URL that yt-dlp can resolve, including live streams and channel /live URLs.
-url = "https://www.youtube.com/@africam/live"
+url = "https://www.youtube.com/@birdbrain/live"
 # Lat/lon biases the BirdNET species filter when this source is single-site.
 # For multisite sources this is only used as a fallback before the resolver
 # has determined the active site.

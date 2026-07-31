@@ -45,7 +45,7 @@ reboots, so `hw:2,0` is not stable; `hw:CARD=Device` is. The previous HAT path
 is kept as `dsnoopmic_hat` → `hw:CARD=Zero` for fallback, and the pre-change
 file is backed up on the unit at `~/.asoundrc.bak-20260730`.
 
-**`.env` was not touched.** `AFRICAM_TBB_MIC_DEVICE=micshared` is the
+**`.env` was not touched.** `BIRDBRAIN_TBB_MIC_DEVICE=micshared` is the
 indirection point; which physical mic that resolves to is decided in
 `~/.asoundrc` alone, so a swap is a one-line change and needs no service config
 edit.

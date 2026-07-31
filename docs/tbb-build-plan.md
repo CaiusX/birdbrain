@@ -3,7 +3,7 @@
 This is the working brief for building the TinyBirdBrain (TBB) capture unit.
 Read it alongside the architecture: [`tbb-architecture.md`](tbb-architecture.md).
 
-You are working **in the `africam` repo**. The TBB is the *same package* with a
+You are working **in the `birdbrain` repo**. The TBB is the *same package* with a
 new audio source, a lean config profile, a minimal web UI, and a sync agent —
 plus a small ingest path on the central server. Do not fork the detector,
 schema, or clip writer.
@@ -19,7 +19,7 @@ schema, or clip writer.
    `git add <specific paths>`, never `git add -A`/`git add .`. If you see 60+
    "modified" files in `git status`, that is the line-ending noise; ignore it.
 3. **Reuse, don't duplicate.** `MicSource` subclasses the existing
-   `africam.audio.source.AudioSource`. The unit reuses `BirdNetDetector`,
+   `birdbrain.audio.source.AudioSource`. The unit reuses `BirdNetDetector`,
    `clips.save_chunk`, and the `DetectionRow` schema verbatim.
 4. **Never break central.** The existing YouTube/RTSP pipeline and web app must
    keep working unchanged. TBB behaviour is gated behind a config profile, not
@@ -42,12 +42,12 @@ schema, or clip writer.
 RAM and real-time budget. Smallest possible change.
 
 **Do:**
-1. Add `MicSource(AudioSource)` in `src/africam/audio/source.py` (or a new
-   `src/africam/audio/mic.py`). It only overrides `_ffmpeg_command()` to read
+1. Add `MicSource(AudioSource)` in `src/birdbrain/audio/source.py` (or a new
+   `src/birdbrain/audio/mic.py`). It only overrides `_ffmpeg_command()` to read
    ALSA: `ffmpeg -f alsa -i <device> -ac 1 -ar <rate> -f s16le -`. See the
    snippet in `tbb-architecture.md` §2.1.
 2. Add a CLI smoke command, mirroring the existing one in `cli.py` (~line 249):
-   `africam tbb-listen --device plughw:1,0 --seconds 60` that builds a
+   `birdbrain tbb-listen --device plughw:1,0 --seconds 60` that builds a
    `MicSource`, runs `BirdNetDetector.analyze` on each chunk, and prints
    detections + measured per-chunk inference ms.
 3. On a real Zero 2 W: install, run the smoke command with a USB mic, and
@@ -71,9 +71,9 @@ deps. Record the outcome in this doc.
 
 ### Phase 0 — decision record (2026-06-21)
 
-**What was built:** `MicSource(AudioSource)` in `src/africam/audio/mic.py` (overrides
-only `_ffmpeg_command()` to read ALSA), exported from `africam.audio`; the
-`africam tbb-listen` smoke command in `cli.py`; unit tests in
+**What was built:** `MicSource(AudioSource)` in `src/birdbrain/audio/mic.py` (overrides
+only `_ffmpeg_command()` to read ALSA), exported from `birdbrain.audio`; the
+`birdbrain tbb-listen` smoke command in `cli.py`; unit tests in
 `tests/test_mic_source.py`. `ruff` clean on the new files; the only new `cli.py`
 lint hits are the same deferred-import (`PLC0415`) idiom the existing `probe`
 command already uses to keep TensorFlow out of CLI startup. `pytest`: 3 passed.
@@ -81,7 +81,7 @@ command already uses to keep TensorFlow out of CLI startup. `pytest`: 3 passed.
 **⚠️ Metal numbers still owed.** This was developed on the x86 Windows dev
 sandbox, which has no ALSA and is explicitly *not* representative (ground rule
 5). The acceptance numbers below are an **x86 reference only** — the real
-Zero 2 W run (`africam tbb-listen --device plughw:1,0 --seconds 60` under
+Zero 2 W run (`birdbrain tbb-listen --device plughw:1,0 --seconds 60` under
 `/usr/bin/time -v`) is still required to close the gate.
 
 | Metric (x86 ref, full TensorFlow) | Value |
@@ -140,21 +140,21 @@ profile, not an edit to the shared deps.
 minimal LAN UI — with no internet.
 
 **Do:**
-1. **Config profile.** Add a `tbb` profile to `africam.config` (env/`tbb.toml`)
+1. **Config profile.** Add a `tbb` profile to `birdbrain.config` (env/`tbb.toml`)
    that: selects `MicSource`, sets the single source name to the unit id,
    disables central-only workers (notes, weather, media sweeper, anomalies,
    OCR site-resolver, yt-dlp/cookies), sets local clip retention (prune after N
    days), and carries sync settings (default: sync **off** in Phase 1).
 2. **Pipeline service.** A `tbb-pipeline` path that runs the mic → detector →
    SQLite + clips loop using the existing pipeline, single source.
-3. **Minimal web app.** A cut-down FastAPI app (reuse `africam.web` building
+3. **Minimal web app.** A cut-down FastAPI app (reuse `birdbrain.web` building
    blocks) serving exactly two LAN-only pages — **Now** (live feed + spectrogram
    thumbnails, header with unit name / today's species count / mic-level / sync
    dot) and **Today** (species list with counts). Plus a LAN-only `/setup`
    (mic device picker from detected ALSA devices, unit name, sync toggle). Bind
    to LAN; no inbound exposure. See `tbb-architecture.md` §5.
 4. **Services + image.** systemd **user** units `tbb-pipeline` and `tbb-web`
-   under `scripts/` (mirror the existing `africam-*` unit files). Document the
+   under `scripts/` (mirror the existing `birdbrain-*` unit files). Document the
    Pi Zero 2 W golden-image build (64-bit Lite, ffmpeg, uv, the package) in
    `docs/tbb-provisioning.md`.
 
@@ -244,7 +244,7 @@ unit at the prod URL.
   in `tbb-web` (§10.1, "for now"); clip policy = **metadata-only** (`has_clip`
   flag, no audio body — §10.2 lazy/clip-sync deferred to Phase 4). Tenancy
   (§10.3) untouched: `devices.public` defaults false; no per-owner gating yet.
-- **Token lifecycle:** stored as SHA-256 hash; `africam tbb-device-add` mints a
+- **Token lifecycle:** stored as SHA-256 hash; `birdbrain tbb-device-add` mints a
   token on central (shown once) until the Phase 3 `/enroll` flow exists.
 - **Public gate:** the ingest route opts out of the `CF-Connecting-IP` block via
   a narrow `/ingest/` allowlist but enforces bearer auth + rate limit + body
@@ -301,7 +301,7 @@ deploy decision below). Not yet exercised on production.
 - **Dependency-profile cleanup (done).** The unit no longer edits `pyproject`:
   its deps live in `deploy/tbb/requirements-tbb.txt` (central deps − tensorflow +
   tflite-runtime), installed into a self-managed 3.11 venv; services + updater
-  call `.venv/bin/africam` directly (not `uv run`, which would re-pull TF).
+  call `.venv/bin/birdbrain` directly (not `uv run`, which would re-pull TF).
   `pyproject`/`uv.lock` stay TF-based for the dev box/central; only change is
   `requires-python>=3.11`. The unmodified checkout is what makes the updater's
   rollback safe. A drift test (`test_tbb_deps.py`) keeps the two dep lists aligned.

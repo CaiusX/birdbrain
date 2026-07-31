@@ -3,11 +3,11 @@ from __future__ import annotations
 import threading
 from datetime import UTC, datetime, timedelta
 
-from africam import tbb_sync
-from africam.config import AppConfig
-from africam.detector.birdnet import Detection
-from africam.storage import Database
-from africam.tbb_sync import (
+from birdbrain import tbb_sync
+from birdbrain.config import AppConfig
+from birdbrain.detector.birdnet import Detection
+from birdbrain.storage import Database
+from birdbrain.tbb_sync import (
     SyncState,
     detections_payload,
     fetch_batch,

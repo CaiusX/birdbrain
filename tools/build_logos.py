@@ -10,7 +10,7 @@ Run from the repo root:
 
     python tools/build_logos.py
 
-Writes ten SVG files into src/africam/web/static/logo-test/.
+Writes ten SVG files into src/birdbrain/web/static/logo-test/.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 # ---- Palette ---------------------------------------------------------------
 
-# Mirror of SOURCE_COLORS in src/africam/web/app.py (11 entries, same order).
+# Mirror of SOURCE_COLORS in src/birdbrain/web/app.py (11 entries, same order).
 # Kept in sync by hand — the generator is a build-time tool, importing the
 # web module would drag in FastAPI + SQLAlchemy for no good reason.
 SITE_COLORS = [
@@ -513,7 +513,7 @@ def crop_to_content(svg_text: str, pad: float = 1.0) -> tuple[str, float]:
 
 
 def main() -> None:
-    static_dir = Path(__file__).resolve().parent.parent / "src/africam/web/static"
+    static_dir = Path(__file__).resolve().parent.parent / "src/birdbrain/web/static"
     out_dir = static_dir / "logo-test"
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Writing {len(VARIANTS)} variants to {out_dir}")
