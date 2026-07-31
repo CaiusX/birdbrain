@@ -26,11 +26,30 @@ reinstall() {
 restart() {
   systemctl --user restart tbb-pipeline tbb-web
 }
+# Wait for the unit to be genuinely working, not merely answering.
+#
+# The old version returned success as soon as /healthz gave any 200. But that
+# endpoint answers from the WEB process, while the thing that actually records
+# birds is the capture worker in tbb-pipeline — and /healthz reports its state
+# separately. A unit whose pipeline failed to start therefore sailed through the
+# gate, was declared "healthy", and was never rolled back. Require the worker.
+#
+# The window was also 30s, which is shorter than a Pi Zero 2 W takes to load
+# BirdNET (observed 20-60s, longer under swap). That is the more dangerous of
+# the two bugs: timing out here does not just mis-report, it ROLLS BACK a
+# perfectly good update. Default generously and let it exit early on success.
+HEALTH_TIMEOUT="${TBB_HEALTH_TIMEOUT:-180}"
+
 healthy() {
-  for _ in $(seq 1 10); do
+  local deadline=$((SECONDS + HEALTH_TIMEOUT)) body=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
     sleep 3
-    curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1 && return 0
+    body="$(curl -fsS -m 5 "http://127.0.0.1:${PORT}/healthz" 2>/dev/null)" || continue
+    # Checked independently so JSON key order can never matter.
+    case "$body" in *'"listening":true'*) ;; *) continue ;; esac
+    case "$body" in *'"worker_state":"running"'*) return 0 ;; esac
   done
+  echo "tbb-update: unhealthy after ${HEALTH_TIMEOUT}s; last /healthz: ${body:-<no response>}"
   return 1
 }
 
