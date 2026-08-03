@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import functools
 import json
 import math
@@ -9,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -19,6 +19,36 @@ from datetime import UTC, date, datetime, timedelta
 from markupsafe import Markup, escape
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# Non-blocking advisory file lock for single-leader election among uvicorn
+# workers (only one runs the media-sweeper). fcntl is Unix-only and msvcrt is
+# Windows-only, so import both defensively; if neither is present we assume a
+# sole process and let it lead.
+try:
+    import fcntl  # Unix
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:
+    import msvcrt  # Windows
+except ImportError:  # pragma: no cover - Unix
+    msvcrt = None
+
+
+def _acquire_singleton_lock(fh) -> bool:
+    """Take a process-exclusive, non-blocking advisory lock on open file ``fh``.
+
+    Returns True if acquired, False if another process already holds it. On a
+    platform exposing no lock primitive, assume a single process and return True.
+    """
+    try:
+        if fcntl is not None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif msvcrt is not None:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        return False
+    return True
 
 
 @functools.lru_cache(maxsize=64)
@@ -106,6 +136,16 @@ WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 
+def _portable_strftime(dt: datetime, fmt: str) -> str:
+    """strftime that honours glibc's ``%-`` (strip-leading-zero) codes on every
+    platform. The Windows C runtime rejects ``%-d`` with "Invalid format string"
+    and spells the same thing ``%#d``, so translate there. Templates and code are
+    written for the Linux/Pi deploy target; this keeps them rendering on Windows."""
+    if sys.platform == "win32":
+        fmt = fmt.replace("%-", "%#")
+    return dt.strftime(fmt)
+
+
 def _localtime(dt: datetime, tz_name: str | None = None, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
     """Render a UTC datetime in the given IANA timezone. SQLite hands us back
     naive datetimes (it strips tz on read), so re-attach UTC first."""
@@ -117,7 +157,7 @@ def _localtime(dt: datetime, tz_name: str | None = None, fmt: str = "%Y-%m-%d %H
         tz = ZoneInfo(tz_name) if tz_name else UTC
     except ZoneInfoNotFoundError:
         tz = UTC
-    return dt.astimezone(tz).strftime(fmt)
+    return _portable_strftime(dt.astimezone(tz), fmt)
 
 
 def _tz_abbr(tz_name: str | None) -> str:
@@ -237,6 +277,7 @@ def _parse_brief(text: str | None) -> dict:
 
 
 TEMPLATES.env.filters["localtime"] = _localtime
+TEMPLATES.env.filters["strftime"] = _portable_strftime
 TEMPLATES.env.filters["tz_abbr"] = _tz_abbr
 TEMPLATES.env.filters["parse_brief"] = _parse_brief
 
@@ -927,7 +968,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if first_seen is not None:
                 if first_seen.tzinfo is None:
                     first_seen = first_seen.replace(tzinfo=UTC)
-                online_since = first_seen.astimezone(tz).strftime("%-d %b %Y")
+                online_since = _portable_strftime(first_seen.astimezone(tz), "%-d %b %Y")
             else:
                 online_since = None
             bands = (
@@ -6699,13 +6740,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # so multiple uvicorn workers don't all hammer Wikimedia or double the
         # DB writes / load spikes.
         _sweep_lock = open(clips_root.parent / ".media-sweeper.lock", "w")
-        try:
-            fcntl.flock(_sweep_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _acquire_singleton_lock(_sweep_lock):
             _SINGLETON_LOCKS.append(_sweep_lock)  # hold the lock for process lifetime
             threading.Thread(
                 target=_media_sweep_loop, name="media-sweeper", daemon=True
             ).start()
-        except OSError:
+        else:
             _sweep_lock.close()  # another worker already runs the sweeper
             log.info("media_sweep.not_leader")
 

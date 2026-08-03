@@ -314,7 +314,7 @@
     {% if note and note.generated_at %}
       <span class="text-[10px] normal-case tracking-normal text-amber-300/70"
             title="This commentary is a snapshot — figures in it reflect the data as of this date, not the live counts above.">
-        snapshot · {{ note.generated_at.strftime('%-d %b %Y') }}
+        snapshot · {{ note.generated_at | strftime('%-d %b %Y') }}
       </span>
     {% endif %}
   </div>
