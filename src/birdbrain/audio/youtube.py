@@ -78,16 +78,18 @@ class YouTubeSource(AudioSource):
         runtime = _detect_js_runtime()
         if runtime:
             cmd += ["--js-runtimes", runtime]
-        # Force the mweb player client. As of 2026-07 YouTube gates live-stream
-        # formats such that yt-dlp's default clients return "No video formats
-        # found!" — resolution silently fails and the source goes dark on its
-        # next manifest expiry. The mweb client still publishes a working HLS
-        # manifest for these live streams. We pin mweb alone (rather than
-        # default,mweb) to keep each resolve to a single client query: on a
-        # pipeline restart every source re-resolves at once, and doubling the
-        # YouTube request burst raises the odds of tripping the IP bot-block.
-        # Revisit/drop this once yt-dlp is upgraded (the durable fix).
-        cmd += ["--extractor-args", "youtube:player_client=mweb"]
+        # Force a single player client for live-stream format resolution. As of
+        # 2026-08 (yt-dlp 2026.07.04) the mweb/tv/web/web_safari clients all
+        # return "No video formats found!" for these YouTube live streams, while
+        # android_vr still publishes a working HLS manifest (cookie-free). We pin
+        # one client (rather than the multi-client default) to keep each resolve
+        # to a single query: on a pipeline restart every source re-resolves at
+        # once, and multiplying the YouTube request burst raises the odds of
+        # tripping the IP bot-block. YouTube rotates which clients work — if this
+        # starts failing "No video formats found!" again, first `uv run yt-dlp -U`,
+        # then re-test clients (`--extractor-args youtube:player_client=<name>`)
+        # and update the one below.
+        cmd += ["--extractor-args", "youtube:player_client=android_vr"]
         cmd += [self.url]
 
         try:
