@@ -74,6 +74,18 @@ LEGACY_DB_PATH = Path("data/africam.sqlite")
 DEFAULT_DB_URL = "sqlite:///data/birdbrain.sqlite"
 
 
+def _sqlite_dir(db_url: str) -> Path | None:
+    """Directory holding an on-disk SQLite database, or None for anything else
+    (``:memory:``, postgres, …). Used to anchor sibling state files."""
+    prefix = "sqlite:///"
+    if not db_url.startswith(prefix):
+        return None
+    raw = db_url[len(prefix):]
+    if not raw or raw.startswith(":memory:"):
+        return None
+    return Path(raw).expanduser().resolve().parent
+
+
 def resolve_db_url(db_url: str) -> str:
     """Fall back to the pre-rename database if the new one is not there yet.
 
@@ -109,6 +121,27 @@ class AppConfig(BaseSettings):
     @model_validator(mode="after")
     def _apply_legacy_db_fallback(self) -> AppConfig:
         self.db_url = resolve_db_url(self.db_url)
+        return self
+
+    @model_validator(mode="after")
+    def _anchor_state_files(self) -> AppConfig:
+        """Resolve the sync high-water-mark files against the database's
+        directory rather than the current working directory.
+
+        These defaulted to relative paths ("data/…"), so a process started from
+        anywhere but the checkout root looked at a path that did not exist. On
+        the BirdNET-Cloud side that reads as first-run and seeds the mark to the
+        newest row, silently dropping the backlog; on the central side it
+        replays from zero. Both are silent. The db_url is already absolute on a
+        provisioned unit (tbb-finish.sh writes it that way), so anchoring to it
+        makes the state files land next to the database they describe.
+        """
+        root = _sqlite_dir(self.db_url)
+        if root is not None:
+            for field in ("tbb_sync_state_file", "birdnetcloud_state_file"):
+                value = getattr(self, field)
+                if not value.is_absolute():
+                    setattr(self, field, (root / value.name).resolve())
         return self
 
     @classmethod

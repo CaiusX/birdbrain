@@ -172,3 +172,35 @@ def test_sync_once_without_a_quality_row_still_syncs(tmp_path, monkeypatch):
 
     assert sync_once(db, cfg, state) == 2
     assert seen == [None]
+
+
+# --- state files must not depend on the working directory -------------------
+
+def test_state_files_are_anchored_to_the_database(tmp_path):
+    """They defaulted to relative "data/…" paths, so a process started from
+    anywhere but the checkout root looked at a file that was not there. On the
+    cloud side that reads as first-run and seeds past the backlog; on this side
+    it replays from zero. Both silent. Anchor them to the database they
+    describe, which is absolute on a provisioned unit."""
+    root = tmp_path / "unit" / "data"
+    root.mkdir(parents=True)
+    cfg = AppConfig(db_url=f"sqlite:///{root / 'birdbrain.sqlite'}")
+
+    assert cfg.tbb_sync_state_file == root / "tbb_sync_state.json"
+    assert cfg.birdnetcloud_state_file == root / "birdnetcloud_sync_state.json"
+    assert cfg.tbb_sync_state_file.is_absolute()
+
+
+def test_an_explicit_state_path_is_left_alone(tmp_path):
+    explicit = tmp_path / "somewhere-else.json"
+    cfg = AppConfig(
+        db_url=f"sqlite:///{tmp_path / 'x.sqlite'}",
+        tbb_sync_state_file=explicit,
+    )
+    assert cfg.tbb_sync_state_file == explicit
+
+
+def test_a_non_file_database_leaves_the_defaults_relative():
+    """No directory to anchor to — must not crash or invent one."""
+    cfg = AppConfig(db_url="sqlite:///:memory:")
+    assert not cfg.tbb_sync_state_file.is_absolute()
