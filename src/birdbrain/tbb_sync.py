@@ -14,7 +14,6 @@ Placement: a background thread in ``tbb-web`` (see tbb-architecture.md §10.1).
 """
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
 
@@ -23,6 +22,7 @@ from sqlalchemy import select
 
 from birdbrain.config import AppConfig
 from birdbrain.logging import get_logger
+from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
 
 log = get_logger(__name__)
@@ -37,17 +37,32 @@ class SyncState:
 
     @classmethod
     def load(cls, path: Path) -> SyncState:
+        """Falling back to 0 is safe *here*, unlike on the BirdNET-Cloud side.
+
+        Central upserts on the natural key and we send a stable ``client_id``,
+        so replaying from zero costs traffic and nothing else. The cloud bridge
+        has no such protection, which is why it refuses to guess instead — see
+        ``birdnetcloud_sync.resolve_state``.
+        """
+        data, outcome = read_json_state(path)
+        if data is None:
+            if outcome is StateRead.CORRUPT:
+                log.warning(
+                    "tbb_sync.state_unreadable",
+                    path=str(path),
+                    action="replaying from 0; central dedupes, so this costs "
+                           "bandwidth rather than duplicates",
+                )
+            return cls(path, 0)
+        if outcome is StateRead.RECOVERED:
+            log.warning("tbb_sync.state_recovered_from_backup", path=str(path))
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
             return cls(path, int(data.get("last_synced_id", 0)))
-        except (FileNotFoundError, ValueError, OSError):
+        except (TypeError, ValueError):
             return cls(path, 0)
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps({"last_synced_id": self.last_synced_id}), encoding="utf-8"
-        )
+        write_json_atomic(self.path, {"last_synced_id": self.last_synced_id})
 
 
 def fetch_batch(db: Database, since_id: int, limit: int) -> list[DetectionRow]:

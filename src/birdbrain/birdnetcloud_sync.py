@@ -34,7 +34,6 @@ Placement: a background thread in ``tbb-web``, alongside the central sync agent.
 """
 from __future__ import annotations
 
-import json
 import shutil
 import socket
 import threading
@@ -47,6 +46,7 @@ from sqlalchemy import func, select
 
 from birdbrain.config import AppConfig
 from birdbrain.logging import get_logger
+from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
 
 log = get_logger(__name__)
@@ -60,27 +60,64 @@ class CloudState:
 
     JSON on disk rather than a DB column so the unit's schema stays identical to
     central's (same reasoning as tbb_sync.SyncState).
+
+    Also carries ``pending_clips``: (local_detection_id, cloud_uuid) pairs whose
+    audio upload failed after the detection itself landed. The mark has already
+    moved past those rows, so without this list the clip is lost to the cloud
+    forever even though it sits on the card for the whole retention window.
+    Bounded — a unit that cannot upload for a week should drop old audio, not
+    grow its state file without limit.
     """
+
+    MAX_PENDING_CLIPS = 200
 
     def __init__(self, path: Path, last_pushed_id: int = 0) -> None:
         self.path = path
         self.last_pushed_id = last_pushed_id
+        self.pending_clips: list[tuple[int, str]] = []
+
+    def queue_clip(self, local_id: int, cloud_uuid: str) -> None:
+        """Remember a clip whose upload failed, dropping the oldest at the cap."""
+        self.pending_clips.append((local_id, cloud_uuid))
+        if len(self.pending_clips) > self.MAX_PENDING_CLIPS:
+            dropped = len(self.pending_clips) - self.MAX_PENDING_CLIPS
+            del self.pending_clips[:dropped]
+            log.warning("birdnetcloud.pending_clips_dropped", count=dropped)
 
     @classmethod
-    def load(cls, path: Path) -> CloudState | None:
-        """Return None when there is no state yet, so the caller can decide how
-        to seed it — the difference between 'start from here' and 'start from
-        zero' is 18k duplicate detections in someone else's database."""
+    def load(cls, path: Path) -> tuple[CloudState | None, StateRead]:
+        """Load the mark, reporting *why* if it could not be loaded.
+
+        The outcome matters more than the value. "No file" means first run and
+        the caller should seed — the difference between 'start from here' and
+        'start from zero' is 18k duplicate detections in someone else's
+        database. "Unreadable file" means we had a mark and lost it, and
+        seeding then would skip the entire unsent backlog without a word. They
+        used to be indistinguishable here; they no longer are.
+        """
+        data, outcome = read_json_state(path)
+        if data is None:
+            return None, outcome
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError, OSError):
-            return None
-        return cls(path, int(data.get("last_pushed_id", 0)))
+            mark = int(data.get("last_pushed_id", 0))
+        except (TypeError, ValueError):
+            # Well-formed JSON, nonsense contents — corrupt by any useful
+            # definition, so do not let it read as a fresh start.
+            return None, StateRead.CORRUPT
+        state = cls(path, mark)
+        state.pending_clips = [
+            tuple(pair) for pair in data.get("pending_clips", [])
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+        ]
+        return state, outcome
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps({"last_pushed_id": self.last_pushed_id}), encoding="utf-8"
+        write_json_atomic(
+            self.path,
+            {
+                "last_pushed_id": self.last_pushed_id,
+                "pending_clips": [list(pair) for pair in self.pending_clips],
+            },
         )
 
 
@@ -113,16 +150,34 @@ def seed_state(db: Database, path: Path) -> CloudState:
     """
     state = CloudState(path, current_max_id(db))
     state.save()
-    log.info("birdnetcloud.state_seeded", last_pushed_id=state.last_pushed_id)
+    # Seeding always skips history by design, but say how much: on a unit that
+    # has been recording for months this is the one line that explains why the
+    # cloud dashboard starts empty.
+    log.info(
+        "birdnetcloud.state_seeded",
+        last_pushed_id=state.last_pushed_id,
+        skipped_rows=state.last_pushed_id,
+    )
     return state
 
 
-def fetch_batch(db: Database, since_id: int, limit: int) -> list[DetectionRow]:
+def fetch_batch(
+    db: Database, since_id: int, limit: int, min_confidence: float = 0.0
+) -> list[DetectionRow]:
+    """Sendable rows after ``since_id``, oldest first.
+
+    ``min_confidence`` is applied in SQL rather than by the caller. It used to
+    be a Python-side skip, which meant sub-threshold rows consumed the per-tick
+    budget: with the unit detecting at 0.5 and the cloud floor at 0.7, a tick
+    could spend all 60 of its slots deciding to send nothing. Filtering here
+    makes the cap a send-rate cap, which is what it was meant to be.
+    """
     with db.session() as s:
         return list(
             s.scalars(
                 select(DetectionRow)
                 .where(DetectionRow.id > since_id)
+                .where(DetectionRow.confidence >= min_confidence)
                 .order_by(DetectionRow.id.asc())
                 .limit(limit)
             )
@@ -385,34 +440,162 @@ def sync_once(
     Stops at the first transient failure without advancing past the offending
     row, so nothing is lost and nothing is duplicated on the retry.
     """
-    sent = skipped = 0
-    rows = fetch_batch(db, state.last_pushed_id, cfg.birdnetcloud_max_per_tick)
+    sent = 0
+    start_mark = state.last_pushed_id
+    # Read the ceiling BEFORE fetching. The clean-tick jump at the end moves the
+    # mark to "everything we could have seen", so it has to mean the state of
+    # the table at fetch time — a row inserted while we were POSTing must not be
+    # jumped over, or it is never sent.
+    ceiling = current_max_id(db)
+    _retry_pending_clips(db, cfg, state, token, session)
+
+    rows = fetch_batch(
+        db, state.last_pushed_id, cfg.birdnetcloud_max_per_tick,
+        cfg.birdnetcloud_min_confidence,
+    )
     for row in rows:
-        if (row.confidence or 0.0) < cfg.birdnetcloud_min_confidence:
-            # Decided about: advance past it so it is never reconsidered.
-            skipped += 1
-            state.last_pushed_id = row.id
-            state.save()
-            continue
         det_id = post_detection(
             cfg.birdnetcloud_endpoint, token, detection_payload(row, cfg), session=session
         )
         if det_id is None:
-            break  # transient — leave the mark, retry next tick
-        if cfg.birdnetcloud_upload_clips and row.clip_path:
-            upload_clip(
-                cfg.birdnetcloud_endpoint, token, det_id, row.clip_path, session=session
-            )
+            # Transient — leave the mark here and retry this same row next tick.
+            state.save()
+            return sent, _decided_not_sent(db, start_mark, state.last_pushed_id, sent)
+        if _should_upload_clip(cfg, row) and not upload_clip(
+            cfg.birdnetcloud_endpoint, token, det_id, row.clip_path, session=session
+        ):
+            # The detection landed and the mark is about to move past it, so
+            # queue the audio rather than losing it. The clip stays on the card
+            # for the retention window, far longer than any plausible outage.
+            state.queue_clip(row.id, det_id)
         sent += 1
+        # Saved per send, deliberately: their API has no idempotency key, so the
+        # window between "they accepted it" and "we recorded that" is the window
+        # in which a crash duplicates a detection. Keep it one row wide.
         state.last_pushed_id = row.id
         state.save()
-    return sent, skipped
+
+    # A short tick means everything above the floor up to `ceiling` has been
+    # sent, so whatever remains below it is provably sub-threshold and will
+    # never become sendable. Step the mark over that dead weight in one write,
+    # rather than the one-write-per-skipped-row that used to make a quiet unit
+    # rewrite its state file 60 times a tick.
+    if len(rows) < cfg.birdnetcloud_max_per_tick and ceiling > state.last_pushed_id:
+        state.last_pushed_id = ceiling
+        state.save()
+    return sent, _decided_not_sent(db, start_mark, state.last_pushed_id, sent)
+
+
+def _decided_not_sent(db: Database, start: int, end: int, sent: int) -> int:
+    """Rows the mark moved over this tick that were not sent — i.e. dropped for
+    being below the cloud's confidence floor.
+
+    Derived from how far the mark travelled rather than counted in the send
+    loop, because sub-threshold rows are now filtered in SQL and never reach it.
+    """
+    if end <= start:
+        return 0
+    return max(0, _count_between(db, start, end) - sent)
+
+
+def _should_upload_clip(cfg: AppConfig, row: DetectionRow) -> bool:
+    return bool(cfg.birdnetcloud_upload_clips and row.clip_path)
+
+
+def _count_between(db: Database, low: int, high: int) -> int:
+    """How many rows the clean-tick jump is stepping over (for the log line)."""
+    with db.session() as s:
+        return int(s.scalar(
+            select(func.count(DetectionRow.id))
+            .where(DetectionRow.id > low)
+            .where(DetectionRow.id <= high)
+        ) or 0)
+
+
+def _retry_pending_clips(
+    db: Database,
+    cfg: AppConfig,
+    state: CloudState,
+    token: str,
+    session: requests.Session | None = None,
+) -> None:
+    """Re-attempt audio uploads whose detection already landed.
+
+    Runs at the head of the tick so a recovered link clears the backlog before
+    adding to it. Entries whose clip has since been pruned are dropped — the
+    row is in the cloud, only its audio is gone, and there is nothing to retry.
+    """
+    if not state.pending_clips:
+        return
+    still_pending: list[tuple[int, str]] = []
+    uploaded = expired = 0
+    for local_id, cloud_uuid in list(state.pending_clips):
+        clip = _clip_path_for(db, local_id)
+        if clip is None:
+            expired += 1
+            continue
+        if upload_clip(cfg.birdnetcloud_endpoint, token, cloud_uuid, clip, session=session):
+            uploaded += 1
+        else:
+            still_pending.append((local_id, cloud_uuid))
+    state.pending_clips = still_pending
+    if uploaded or expired:
+        log.info(
+            "birdnetcloud.pending_clips_retried",
+            uploaded=uploaded, expired=expired, still_pending=len(still_pending),
+        )
+        state.save()
+
+
+def _clip_path_for(db: Database, local_id: int) -> str | None:
+    """Current clip path for a local detection id, or None if it is gone."""
+    with db.session() as s:
+        row = s.get(DetectionRow, local_id)
+        if row is None or not row.clip_path:
+            return None
+        return row.clip_path if Path(row.clip_path).is_file() else None
+
+
+def resolve_state(db: Database, path: Path) -> CloudState | None:
+    """Load the high-water mark, or decide how to proceed without one.
+
+    Returns None when the bridge must NOT start. That happens for exactly one
+    reason: the state file exists but cannot be read, and neither can its
+    backup. Seeding in that situation would jump the mark to the newest row and
+    silently drop every unsent detection behind it — and the moment it is most
+    likely to happen (an unclean power cut) is the moment the backlog is
+    largest. Refusing to start is loud and recoverable; seeding is neither.
+    """
+    state, outcome = CloudState.load(path)
+
+    if outcome is StateRead.OK:
+        return state
+    if outcome is StateRead.RECOVERED:
+        # A few duplicates at worst, against losing the queue. Their API has no
+        # dedupe, so say plainly that duplicates are the price paid here.
+        log.warning(
+            "birdnetcloud.state_recovered_from_backup",
+            path=str(path), last_pushed_id=state.last_pushed_id,
+            note="rows between the backup and the lost mark may be sent twice",
+        )
+        return state
+    if outcome is StateRead.MISSING:
+        return seed_state(db, path)
+
+    log.error(
+        "birdnetcloud.state_unreadable",
+        path=str(path),
+        pending_rows=current_max_id(db),
+        action="bridge not started; move the file aside to seed from now, "
+               "or restore it to resume where it left off",
+    )
+    return None
 
 
 def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event) -> None:
-    state = CloudState.load(cfg.birdnetcloud_state_file) or seed_state(
-        db, cfg.birdnetcloud_state_file
-    )
+    state = resolve_state(db, cfg.birdnetcloud_state_file)
+    if state is None:
+        return  # unreadable state — refuse rather than silently skip the backlog
     session = make_session(token)
     log.info(
         "birdnetcloud.start",

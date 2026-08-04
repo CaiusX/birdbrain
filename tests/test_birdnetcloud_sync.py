@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from datetime import UTC, datetime, timedelta
 
@@ -305,3 +306,175 @@ def test_heartbeat_interval_is_respected_after_the_first_beat(tmp_path, monkeypa
 
     assert ticks["n"] == 4
     assert len(beats) == 1, f"4 ticks x 60s inside a 1800s interval -> 1 beat, got {len(beats)}"
+
+
+# --- state durability: the backlog must survive a bad state file ------------
+
+def test_missing_state_seeds_but_corrupt_state_refuses(tmp_path):
+    """The whole point of Stage 2. Missing means first run — seed past history.
+    Unreadable means we HAD a mark and lost it, and seeding then silently drops
+    every unsent row. Their API has no dedupe, so a dropped backlog is gone."""
+    db = _db_with(tmp_path, [0.9] * 40)
+    cfg = _cfg(tmp_path)
+    path = cfg.birdnetcloud_state_file
+
+    # Missing -> seed to the newest row.
+    seeded = bnc.resolve_state(db, path)
+    assert seeded is not None and seeded.last_pushed_id == 40
+
+    # Corrupt, with no usable backup -> refuse to start.
+    path.write_text("{not json", encoding="utf-8")
+    path.with_name(path.name + ".bak").unlink(missing_ok=True)
+    assert bnc.resolve_state(db, path) is None
+
+
+def test_corrupt_state_recovers_from_the_backup(tmp_path):
+    """A few duplicates beats a lost queue."""
+    db = _db_with(tmp_path, [0.9] * 10)
+    cfg = _cfg(tmp_path)
+    path = cfg.birdnetcloud_state_file
+
+    good = bnc.CloudState(path, 3)
+    good.save()          # writes the primary
+    bnc.CloudState(path, 7).save()   # rotates 3 -> .bak, primary now 7
+    path.write_text("", encoding="utf-8")   # primary corrupted
+
+    recovered = bnc.resolve_state(db, path)
+    assert recovered is not None
+    assert recovered.last_pushed_id == 3, "should fall back to the retained copy"
+
+
+def test_state_write_is_atomic_and_keeps_a_backup(tmp_path):
+    path = tmp_path / "state.json"
+    bnc.CloudState(path, 5).save()
+    bnc.CloudState(path, 9).save()
+
+    assert json.loads(path.read_text())["last_pushed_id"] == 9
+    assert json.loads(path.with_suffix(".json.bak").read_text())["last_pushed_id"] == 5
+    # No temp file left lying around for a reader to trip over.
+    assert not (tmp_path / "state.json.tmp").exists()
+
+
+def test_garbage_contents_are_corrupt_not_a_fresh_start(tmp_path):
+    """Well-formed JSON with a nonsense mark must not read as first-run."""
+    db = _db_with(tmp_path, [0.9] * 5)
+    path = tmp_path / "s.json"
+    path.write_text('{"last_pushed_id": "banana"}', encoding="utf-8")
+    assert bnc.resolve_state(db, path) is None
+
+
+# --- drain efficiency -------------------------------------------------------
+
+def test_sub_threshold_rows_do_not_rewrite_state_or_eat_the_budget(tmp_path, monkeypatch):
+    """A unit detecting at 0.5 against a 0.7 cloud floor used to spend a full
+    state-file rewrite per dropped row, and those rows consumed the per-tick
+    send budget."""
+    db = _db_with(tmp_path, [0.1] * 50 + [0.9])
+    cfg = _cfg(tmp_path, birdnetcloud_max_per_tick=10)
+    state = bnc.CloudState(cfg.birdnetcloud_state_file, 0)
+    monkeypatch.setattr(bnc, "post_detection", _Recorder())
+
+    saves = []
+    real_save = bnc.CloudState.save
+    monkeypatch.setattr(bnc.CloudState, "save",
+                        lambda self: saves.append(self.last_pushed_id) or real_save(self))
+
+    sent, skipped = bnc.sync_once(db, cfg, state, "tok")
+
+    assert sent == 1, "the one row above the floor is sent despite 50 below it"
+    assert skipped == 50
+    assert state.last_pushed_id == 51, "mark clears the whole sub-threshold run"
+    assert len(saves) <= 3, f"expected a couple of writes, got {len(saves)}"
+
+
+def test_the_clean_tick_jump_cannot_skip_a_concurrent_insert(tmp_path, monkeypatch):
+    """The end-of-tick jump uses the max id read BEFORE the fetch. A row that
+    arrives mid-tick must be picked up next time, not stepped over."""
+    db = _db_with(tmp_path, [0.9])
+    cfg = _cfg(tmp_path)
+    state = bnc.CloudState(cfg.birdnetcloud_state_file, 0)
+
+    def send_then_insert(endpoint, token, payload, **kw):
+        db.insert_detections([
+            Detection(source_name="tbb-test", started_at=datetime(2026, 7, 30, tzinfo=UTC),
+                      duration_s=3.0, scientific_name="Late", common_name="Late",
+                      confidence=0.95)
+        ])
+        return "uuid-1"
+
+    monkeypatch.setattr(bnc, "post_detection", send_then_insert)
+    bnc.sync_once(db, cfg, state, "tok")
+    assert state.last_pushed_id == 1, "must not jump past the row inserted mid-tick"
+
+    rec = _Recorder()
+    monkeypatch.setattr(bnc, "post_detection", rec)
+    sent, _ = bnc.sync_once(db, cfg, state, "tok")
+    assert sent == 1 and rec.sent[0]["common_name"] == "Late"
+
+
+# --- clips are not lost when their upload fails -----------------------------
+
+def test_failed_clip_upload_is_queued_and_retried(tmp_path, monkeypatch):
+    """The detection lands and the mark moves past it, so a dropped clip is gone
+    for good unless we remember it. The audio is on the card for days."""
+    clip = tmp_path / "det.ogg"
+    clip.write_bytes(b"audio")
+    db = _db_with(tmp_path, [])
+    db.insert_detections([
+        Detection(source_name="tbb-test", started_at=datetime(2026, 7, 29, 8, tzinfo=UTC),
+                  duration_s=3.0, scientific_name="S", common_name="C", confidence=0.9)
+    ], clip_path=str(clip))
+    cfg = _cfg(tmp_path, birdnetcloud_upload_clips=True)
+    state = bnc.CloudState(cfg.birdnetcloud_state_file, 0)
+    monkeypatch.setattr(bnc, "post_detection", _Recorder())
+
+    monkeypatch.setattr(bnc, "upload_clip", lambda *a, **kw: False)   # link down
+    bnc.sync_once(db, cfg, state, "tok")
+    assert state.pending_clips == [(1, "uuid-1")]
+    assert state.last_pushed_id == 1, "the detection itself still went"
+
+    tried = []
+    monkeypatch.setattr(bnc, "upload_clip",
+                        lambda ep, tok, cid, path, **kw: tried.append((cid, path)) or True)
+    bnc.sync_once(db, cfg, state, "tok")
+    assert tried == [("uuid-1", str(clip))]
+    assert state.pending_clips == []
+
+
+def test_pending_clip_is_dropped_once_its_audio_is_pruned(tmp_path, monkeypatch):
+    """Retention wins: the row is in the cloud, only the audio is gone, and
+    there is nothing left to retry."""
+    db = _db_with(tmp_path, [])
+    db.insert_detections([
+        Detection(source_name="tbb-test", started_at=datetime(2026, 7, 29, 8, tzinfo=UTC),
+                  duration_s=3.0, scientific_name="S", common_name="C", confidence=0.9)
+    ], clip_path=str(tmp_path / "already-pruned.ogg"))
+    cfg = _cfg(tmp_path)
+    state = bnc.CloudState(cfg.birdnetcloud_state_file, 1)
+    state.queue_clip(1, "uuid-1")
+
+    monkeypatch.setattr(bnc, "upload_clip",
+                        lambda *a, **kw: pytest.fail("must not upload a missing file"))
+    bnc.sync_once(db, cfg, state, "tok")
+    assert state.pending_clips == []
+
+
+def test_pending_clips_are_bounded(tmp_path):
+    """A week offline must not grow the state file without limit."""
+    state = bnc.CloudState(tmp_path / "s.json", 0)
+    for i in range(bnc.CloudState.MAX_PENDING_CLIPS + 25):
+        state.queue_clip(i, f"uuid-{i}")
+    assert len(state.pending_clips) == bnc.CloudState.MAX_PENDING_CLIPS
+    assert state.pending_clips[0][0] == 25, "oldest dropped first"
+
+
+def test_pending_clips_survive_a_restart(tmp_path):
+    path = tmp_path / "s.json"
+    state = bnc.CloudState(path, 4)
+    state.queue_clip(7, "uuid-7")
+    state.save()
+
+    reloaded, outcome = bnc.CloudState.load(path)
+    assert outcome is bnc.StateRead.OK
+    assert reloaded.last_pushed_id == 4
+    assert reloaded.pending_clips == [(7, "uuid-7")]
