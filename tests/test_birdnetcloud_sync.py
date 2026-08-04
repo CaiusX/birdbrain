@@ -5,6 +5,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import requests
 
 from birdbrain import birdnetcloud_sync as bnc
 from birdbrain.config import AppConfig
@@ -478,3 +479,97 @@ def test_pending_clips_survive_a_restart(tmp_path):
     assert outcome is bnc.StateRead.OK
     assert reloaded.last_pushed_id == 4
     assert reloaded.pending_clips == [(7, "uuid-7")]
+
+
+# --- clip policy: the only bandwidth lever their API leaves us --------------
+
+def _db_with_clips(tmp_path, species_seq):
+    """One detection per entry, each with a real clip file on disk."""
+    db = Database(f"sqlite:///{tmp_path / 'bnc.sqlite'}")
+    base = datetime(2026, 7, 29, 8, 0, 0, tzinfo=UTC)
+    for i, sci in enumerate(species_seq):
+        clip = tmp_path / f"clip{i}.ogg"
+        clip.write_bytes(b"audio")
+        db.insert_detections([
+            Detection(source_name="tbb-test", started_at=base + timedelta(minutes=i),
+                      duration_s=3.0, scientific_name=sci, common_name=sci,
+                      confidence=0.9)
+        ], clip_path=str(clip))
+    return db
+
+
+def _uploads(tmp_path, monkeypatch, policy, species_seq, state=None, cfg=None):
+    db = _db_with_clips(tmp_path, species_seq)
+    cfg = cfg or _cfg(tmp_path, birdnetcloud_upload_clips=True,
+                      birdnetcloud_clip_policy=policy)
+    state = state or bnc.CloudState(cfg.birdnetcloud_state_file, 0)
+    monkeypatch.setattr(bnc, "post_detection", _Recorder())
+    got = []
+    monkeypatch.setattr(bnc, "upload_clip",
+                        lambda ep, tok, cid, path, **kw: got.append(path) or True)
+    bnc.sync_once(db, cfg, state, "tok")
+    return got, state
+
+
+def test_clip_policy_all_uploads_every_clip(tmp_path, monkeypatch):
+    got, _ = _uploads(tmp_path, monkeypatch, "all", ["Dove", "Dove", "Dove"])
+    assert len(got) == 3
+
+
+def test_clip_policy_none_uploads_nothing_but_still_sends_detections(tmp_path, monkeypatch):
+    got, state = _uploads(tmp_path, monkeypatch, "none", ["Dove", "Bulbul"])
+    assert got == []
+    assert state.last_pushed_id == 2, "detections still go; only the audio is dropped"
+
+
+def test_clip_policy_first_per_species_per_day(tmp_path, monkeypatch):
+    """The 30th Laughing Dove of the morning is where the bytes go."""
+    got, state = _uploads(
+        tmp_path, monkeypatch, "first_per_species_per_day",
+        ["Dove", "Dove", "Bulbul", "Dove", "Bulbul"],
+    )
+    assert len(got) == 2, "one per species, not one per detection"
+    assert state.clip_species == {"Dove", "Bulbul"}
+
+
+def test_clip_policy_resets_on_a_new_day(tmp_path):
+    state = bnc.CloudState(tmp_path / "s.json", 0)
+    assert state.claim_first_clip_of_day("2026-07-29", "Dove") is True
+    assert state.claim_first_clip_of_day("2026-07-29", "Dove") is False
+    assert state.claim_first_clip_of_day("2026-07-30", "Dove") is True
+    assert state.clip_species == {"Dove"}, "yesterday's set is discarded, not grown"
+
+
+def test_clip_policy_survives_a_restart(tmp_path):
+    """Otherwise every restart re-sends one clip per species."""
+    path = tmp_path / "s.json"
+    state = bnc.CloudState(path, 1)
+    state.claim_first_clip_of_day("2026-07-29", "Dove")
+    state.save()
+
+    reloaded, _ = bnc.CloudState.load(path)
+    assert reloaded.claim_first_clip_of_day("2026-07-29", "Dove") is False
+
+
+# --- failure classification -------------------------------------------------
+
+def test_connection_error_and_timeout_are_logged_differently(tmp_path, monkeypatch):
+    """A refused connection provably never arrived; a timeout may well have
+    been processed. Both retry, but only one can duplicate — and a duplicate on
+    their dashboard should have an explanation in the journal."""
+    events = []
+    monkeypatch.setattr(bnc.log, "warning", lambda ev, **kw: events.append(ev))
+
+    class _Boom:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def post(self, *a, **kw):
+            raise self.exc
+
+    assert bnc.post_detection("http://x", "t", {}, session=_Boom(
+        requests.ConnectionError("refused"))) is None
+    assert bnc.post_detection("http://x", "t", {}, session=_Boom(
+        requests.Timeout("slow"))) is None
+
+    assert events == ["birdnetcloud.unreachable", "birdnetcloud.ambiguous_send"]

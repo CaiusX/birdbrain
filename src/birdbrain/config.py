@@ -304,6 +304,12 @@ class AppConfig(BaseSettings):
     # observed detection rate). Turn off for field/metered deployments — you keep
     # every detection, you lose playable audio in their dashboard.
     birdnetcloud_upload_clips: bool = True
+    # Finer control than the on/off above, which it gates. Their API has no
+    # batch endpoint, so bandwidth can only be saved by sending fewer bytes,
+    # not fewer requests — and most of those bytes are the 30th Laughing Dove
+    # of the morning. "first_per_species_per_day" keeps their dashboard useful
+    # (every species still gets audio) at roughly a tenth of the traffic.
+    birdnetcloud_clip_policy: Literal["all", "first_per_species_per_day", "none"] = "all"
     # Their API takes one detection per request, so a tick is capped rather
     # than draining an unbounded backlog in one go.
     birdnetcloud_max_per_tick: int = 60

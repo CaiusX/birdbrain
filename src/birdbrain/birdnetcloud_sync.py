@@ -75,6 +75,9 @@ class CloudState:
         self.path = path
         self.last_pushed_id = last_pushed_id
         self.pending_clips: list[tuple[int, str]] = []
+        # Bookkeeping for birdnetcloud_clip_policy="first_per_species_per_day".
+        self.clip_day: str = ""
+        self.clip_species: set[str] = set()
 
     def queue_clip(self, local_id: int, cloud_uuid: str) -> None:
         """Remember a clip whose upload failed, dropping the oldest at the cap."""
@@ -83,6 +86,20 @@ class CloudState:
             dropped = len(self.pending_clips) - self.MAX_PENDING_CLIPS
             del self.pending_clips[:dropped]
             log.warning("birdnetcloud.pending_clips_dropped", count=dropped)
+
+    def claim_first_clip_of_day(self, day: str, species: str) -> bool:
+        """True the first time ``species`` is seen on ``day``, False after.
+
+        Rolls over by simply discarding the previous day's set, which keeps the
+        state file small without needing a sweep.
+        """
+        if day != self.clip_day:
+            self.clip_day = day
+            self.clip_species = set()
+        if species in self.clip_species:
+            return False
+        self.clip_species.add(species)
+        return True
 
     @classmethod
     def load(cls, path: Path) -> tuple[CloudState | None, StateRead]:
@@ -109,6 +126,8 @@ class CloudState:
             tuple(pair) for pair in data.get("pending_clips", [])
             if isinstance(pair, (list, tuple)) and len(pair) == 2
         ]
+        state.clip_day = str(data.get("clip_day") or "")
+        state.clip_species = set(data.get("clip_species") or [])
         return state, outcome
 
     def save(self) -> None:
@@ -117,6 +136,8 @@ class CloudState:
             {
                 "last_pushed_id": self.last_pushed_id,
                 "pending_clips": [list(pair) for pair in self.pending_clips],
+                "clip_day": self.clip_day,
+                "clip_species": sorted(self.clip_species),
             },
         )
 
@@ -243,8 +264,24 @@ def post_detection(
         resp = http.post(
             url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=timeout
         )
+    except requests.ConnectionError as e:
+        # Provably never reached them: DNS failure, refused, no route. This is
+        # the ordinary field case — the link is down — and retrying is free of
+        # any duplicate risk.
+        log.warning("birdnetcloud.unreachable", error=str(e)[:200])
+        return None
     except requests.RequestException as e:
-        log.warning("birdnetcloud.post_failed", error=str(e)[:200])
+        # Timeout, connection reset mid-body, chunked-encoding error: the
+        # request may well have been processed and only the answer lost. We
+        # retry anyway, because at-least-once beats losing the detection and
+        # their API gives us no idempotency key to do better — but say so, so a
+        # duplicate on their dashboard has an explanation in the journal rather
+        # than looking like a bug in the mark.
+        log.warning(
+            "birdnetcloud.ambiguous_send",
+            error=str(e)[:200],
+            note="may have been accepted; retry could duplicate",
+        )
         return None
     if resp.status_code in (401, 403):
         raise AuthRejected(f"http {resp.status_code}: {resp.text[:120]}")
@@ -461,7 +498,7 @@ def sync_once(
             # Transient — leave the mark here and retry this same row next tick.
             state.save()
             return sent, _decided_not_sent(db, start_mark, state.last_pushed_id, sent)
-        if _should_upload_clip(cfg, row) and not upload_clip(
+        if _should_upload_clip(cfg, state, row) and not upload_clip(
             cfg.birdnetcloud_endpoint, token, det_id, row.clip_path, session=session
         ):
             # The detection landed and the mark is about to move past it, so
@@ -498,8 +535,29 @@ def _decided_not_sent(db: Database, start: int, end: int, sent: int) -> int:
     return max(0, _count_between(db, start, end) - sent)
 
 
-def _should_upload_clip(cfg: AppConfig, row: DetectionRow) -> bool:
-    return bool(cfg.birdnetcloud_upload_clips and row.clip_path)
+def _should_upload_clip(cfg: AppConfig, state: CloudState, row: DetectionRow) -> bool:
+    """Whether to attach audio to this detection.
+
+    ``birdnetcloud_upload_clips`` is the master switch; the policy refines it.
+    "first_per_species_per_day" is the useful middle setting: their dashboard
+    still has playable audio for every species, but a chatty resident bird
+    stops costing 60KB every time it calls. The bookkeeping lives in the state
+    file so a restart does not re-send one clip per species all over again.
+    """
+    if not (cfg.birdnetcloud_upload_clips and row.clip_path):
+        return False
+    policy = cfg.birdnetcloud_clip_policy
+    if policy == "none":
+        return False
+    if policy == "all":
+        return True
+    return state.claim_first_clip_of_day(_row_day(row), row.scientific_name or "")
+
+
+def _row_day(row: DetectionRow) -> str:
+    """Date key for the per-day clip policy. UTC — using each unit's own
+    timezone would drift the reset hour across a fleet for no benefit."""
+    return row.started_at.date().isoformat() if row.started_at else ""
 
 
 def _count_between(db: Database, low: int, high: int) -> int:
