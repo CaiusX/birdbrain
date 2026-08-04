@@ -105,6 +105,24 @@ def _source_highpass(db: Database, name: str) -> int | None:
     return hz if hz > 0 else None
 
 
+def should_hash_clips(app: AppConfig, cfg: SourceConfig) -> bool:
+    """Whether to compute the perceptual clip fingerprint for this source.
+
+    The hash exists only to catch YouTube ad/highlight replays (see
+    :mod:`birdbrain.audio_hash`), so a live microphone gets nothing from it —
+    a mic cannot replay. It is also the single most expensive thing a capture
+    unit imports: the first ``clip_hash`` calls ``librosa.resample``, which
+    lazily drags in numba/llvmlite/scipy. Measured on a Pi Zero 2 W that is
+    **+64 MB RSS and +1068 modules**, paid on the first detection and carried
+    for the life of the process — 15% of a 415 MB unit's budget for a filter
+    it can never use.
+
+    ``kind`` is checked alongside the config flag so a unit provisioned before
+    ``BIRDBRAIN_AUDIO_HASH_ENABLED`` existed still gets the saving.
+    """
+    return app.audio_hash_enabled and cfg.kind != "mic"
+
+
 def _build_resolver(
     cfg: SourceConfig,
     source: AudioSource,
@@ -439,13 +457,13 @@ def _consume_stream(
         # Buffer this chunk for next iteration's pre-roll.
         prev_samples = chunk.samples
 
-        # Perceptual fingerprint of the saved clip, used by the replay
-        # filter to hide YouTube ad/highlight loops. All detections from one
-        # chunk share the same clip and therefore the same hash. Failures
-        # are non-fatal — we'd rather lose a row's dedup info than skip
-        # writing the detection itself.
+        # Perceptual fingerprint of the saved clip, used by the replay filter
+        # to hide YouTube ad/highlight loops. All detections from one chunk
+        # share the same clip and therefore the same hash. Failures are
+        # non-fatal — we'd rather lose a row's dedup info than skip writing
+        # the detection itself.
         audio_hash: str | None = None
-        if clip_path:
+        if clip_path and should_hash_clips(app, cfg):
             try:
                 audio_hash = clip_hash(clip_path)
             except Exception as e:

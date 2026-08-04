@@ -51,6 +51,11 @@ echo "=== writing .env ==="
   echo "BIRDBRAIN_TBB_TIMEZONE=Africa/Johannesburg"
   echo "BIRDBRAIN_TBB_CLIP_RETENTION_DAYS=14"
   echo "BIRDBRAIN_TBB_SYNC_ENABLED=false"
+  # The clip fingerprint only catches YouTube ad/highlight replays, which a
+  # live mic cannot produce. Computing it costs ~64MB RSS on a Zero 2 W (the
+  # first librosa.resample pulls in numba/llvmlite/scipy), so a unit turns it
+  # off. The pipeline also skips it for kind="mic" regardless of this line.
+  echo "BIRDBRAIN_AUDIO_HASH_ENABLED=false"
   echo "BIRDBRAIN_DB_URL=sqlite:///${ROOT}/data/birdbrain.sqlite"
   echo "BIRDBRAIN_CLIPS_DIR=${ROOT}/data/clips"
 } > "${ROOT}/.env"

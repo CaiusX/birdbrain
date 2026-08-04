@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from birdbrain.audio import MicSource
-from birdbrain.config import AppConfig
+from birdbrain.config import AppConfig, SourceConfig
 from birdbrain.detector.birdnet import NON_BIRD_CLASSES, Detection
-from birdbrain.pipeline import build_source
+from birdbrain.pipeline import build_source, should_hash_clips
 from birdbrain.storage import Database, DetectionRow
 from birdbrain.tbb import prune_clips, tbb_source_config
 
@@ -97,3 +97,31 @@ def test_prune_clips_noop_when_nothing_old(tmp_path):
 
     assert prune_clips(db, retention_days=14) == 0
     assert clip.exists()
+
+
+# --- clip fingerprinting is central-only ------------------------------------
+# The hash catches YouTube ad/highlight replays; a live mic cannot replay, and
+# computing it costs a Zero 2 W ~64MB RSS (librosa.resample pulls in numba).
+
+def test_a_mic_unit_does_not_fingerprint_its_clips():
+    app = AppConfig()  # default audio_hash_enabled=True — the mic check alone must win
+    cfg = tbb_source_config(AppConfig(tbb_unit_id="unit", tbb_mic_device="plughw:1,0"))
+    assert cfg.kind == "mic"
+    assert should_hash_clips(app, cfg) is False
+
+
+def test_central_still_fingerprints_by_default():
+    """Regression guard: the replay filter is load-bearing on YouTube sources."""
+    app = AppConfig()
+    assert app.audio_hash_enabled is True
+    yt = SourceConfig(name="Tembe", kind="youtube", url="https://example.test/x")
+    assert should_hash_clips(app, yt) is True
+
+
+def test_the_flag_switches_off_a_non_mic_source_too():
+    """A unit provisioned with BIRDBRAIN_AUDIO_HASH_ENABLED=false is honoured
+    whatever its source kind, so the .env is a real off-switch and not just
+    documentation of what the kind check already does."""
+    off = AppConfig(audio_hash_enabled=False)
+    yt = SourceConfig(name="Tembe", kind="youtube", url="https://example.test/x")
+    assert should_hash_clips(off, yt) is False

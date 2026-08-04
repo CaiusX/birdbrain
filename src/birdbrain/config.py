@@ -150,6 +150,11 @@ class AppConfig(BaseSettings):
     db_url: str = DEFAULT_DB_URL
     clips_dir: Path = Path("data/clips")
     save_clips: bool = True
+    # Perceptual clip fingerprinting (birdbrain.audio_hash) for the YouTube
+    # ad/highlight replay filter. Worth its cost on central; turn OFF on a
+    # capture unit, where it is both useless and expensive — see the skip in
+    # pipeline.py for the measured numbers.
+    audio_hash_enabled: bool = True
     # Container/codec for saved detection clips. OGG Vorbis is ~10× smaller
     # than WAV for negligible perceptual loss in audition. Use 'flac' for
     # lossless compression, or 'wav' to revert to uncompressed PCM.
