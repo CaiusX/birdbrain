@@ -287,6 +287,7 @@ def _consume_stream(
     quality = QualityAccumulator()
     last_quality_sample = 0.0
     last_quality_prune = 0.0
+    last_quality_flush = 0.0
     QUALITY_SAMPLE_S = 600.0
     QUALITY_PRUNE_S = 3600.0
     # Rolling pre-roll buffer: keep the previous chunk's PCM samples per
@@ -304,7 +305,7 @@ def _consume_stream(
         if stop_event.is_set():
             return
         now = time.monotonic()
-        if now - last_hb > 15.0:
+        if now - last_hb > app.worker_heartbeat_seconds:
             try:
                 db.worker_heartbeat(cfg.name)
             except Exception:
@@ -329,19 +330,29 @@ def _consume_stream(
                         _source_highpass(db, cfg.name) != source.highpass_hz:
                     slog.info("highpass.relaunch", to=_source_highpass(db, cfg.name))
                     return
-                # Flush the current audio-quality snapshot (once enough audio
-                # has accumulated to be meaningful). Detection yield over the
-                # last 6h is the masking signal — loud audio with ~no detections.
-                if quality.ready:
-                    det_6h = db.detection_count_since(
-                        cfg.name, datetime.now(UTC) - timedelta(hours=6)
-                    )
-                    snap = quality.snapshot(detections_per_h=det_6h / 6.0)
-                    if snap is not None:
-                        db.upsert_audio_quality(cfg.name, snap)
             except Exception:
                 slog.exception("worker.species_floor_refresh_failed")
             last_species_floor_refresh = now
+        # Flush the current audio-quality snapshot (once enough audio has
+        # accumulated to be meaningful). Detection yield over the last 6h is the
+        # masking signal — loud audio with ~no detections.
+        #
+        # On its own cadence, not the floor refresh's. The floors are polled
+        # often because they are *reads* that must pick up an /admin change
+        # promptly; this is a write, and at 60s it was 1,440 commits a day to
+        # restate a five-minute EMA. The UI greys the figure at 180s, so a unit
+        # can afford to slow it right down without the number ever looking dead.
+        if quality.ready and now - last_quality_flush > app.audio_quality_flush_seconds:
+            try:
+                det_6h = db.detection_count_since(
+                    cfg.name, datetime.now(UTC) - timedelta(hours=6)
+                )
+                snap = quality.snapshot(detections_per_h=det_6h / 6.0)
+                if snap is not None:
+                    db.upsert_audio_quality(cfg.name, snap)
+            except Exception:
+                slog.exception("quality.flush_failed")
+            last_quality_flush = now
         # Trend sample every ~10 min + hourly prune (separate slow cadences).
         if quality.ready and now - last_quality_sample > QUALITY_SAMPLE_S:
             try:

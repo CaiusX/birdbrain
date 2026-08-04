@@ -67,7 +67,19 @@ if ! git merge --ff-only "$REF"; then
   echo "tbb-update: cannot fast-forward (diverged) — skipping, unit untouched"; exit 1
 fi
 
-reinstall || echo "tbb-update: WARNING dependency install reported errors"
+# Only reinstall when the dependency profile actually moved. `uv pip install
+# -r requirements-tbb.txt` rewrites a large part of .venv even when nothing
+# changed — measured at a several-hundred-MB burst of SD writes, on a device
+# whose card we are otherwise counting kilobytes for, on every routine update.
+# The cheap `--no-deps -e .` always runs; it is what picks up the new code.
+if git diff --name-only "$before" "$target" \
+     | grep -qE 'deploy/tbb/requirements-tbb\.txt|pyproject\.toml'; then
+  echo "tbb-update: dependency profile changed — reinstalling"
+  reinstall || echo "tbb-update: WARNING dependency install reported errors"
+else
+  "$UV" pip install -q --no-deps -e . \
+    || echo "tbb-update: WARNING editable install reported errors"
+fi
 restart
 if healthy; then
   echo "tbb-update: updated to $target and healthy"; exit 0

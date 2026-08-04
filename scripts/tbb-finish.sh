@@ -60,6 +60,14 @@ echo "=== writing .env ==="
   # first librosa.resample pulls in numba/llvmlite/scipy), so a unit turns it
   # off. The pipeline also skips it for kind="mic" regardless of this line.
   echo "BIRDBRAIN_AUDIO_HASH_ENABLED=false"
+  # SD-card budget. Central keeps the fast defaults (its liveness view calls a
+  # source stale after 60s); a unit does not, because central learns a unit is
+  # alive from its ingest POSTs rather than from this row. 15s -> 60s removes
+  # ~4300 SQLite commits a day, which is comparable card wear to every clip the
+  # unit records; the quality snapshot is a 5-minute EMA that was being
+  # rewritten every minute.
+  echo "BIRDBRAIN_WORKER_HEARTBEAT_SECONDS=60"
+  echo "BIRDBRAIN_AUDIO_QUALITY_FLUSH_SECONDS=300"
   echo "BIRDBRAIN_DB_URL=sqlite:///${ROOT}/data/birdbrain.sqlite"
   echo "BIRDBRAIN_CLIPS_DIR=${ROOT}/data/clips"
 } > "${ROOT}/.env"

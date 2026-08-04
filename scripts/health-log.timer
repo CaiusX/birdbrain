@@ -1,10 +1,15 @@
-# Sample TBB unit resources every minute (see health-log.service).
+# Sample TBB unit resources every 5 minutes (see health-log.service).
+#
+# Was every minute, which appended 1,440 lines a day to a file on the SD card
+# plus a full rewrite each week when it hit the line cap. This log exists to be
+# read backwards after a hang, and 5-minute granularity is plenty to see a unit
+# swap-thrashing or under-volting its way into a stall.
 [Unit]
-Description=Sample TBB unit resources every minute
+Description=Sample TBB unit resources every 5 minutes
 
 [Timer]
 OnBootSec=1min
-OnUnitActiveSec=1min
+OnUnitActiveSec=5min
 AccuracySec=10s
 
 [Install]

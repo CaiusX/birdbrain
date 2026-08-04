@@ -95,6 +95,10 @@ class Database:
                 cur.execute("PRAGMA journal_mode=WAL")
                 cur.execute("PRAGMA synchronous=NORMAL")
                 cur.execute("PRAGMA journal_size_limit=16777216")  # 16 MB cap
+                # Keep sort/GROUP BY scratch space in RAM. On a unit the point
+                # is the SD card — a temp b-tree spilled to disk is pure wear
+                # for something thrown away moments later.
+                cur.execute("PRAGMA temp_store=MEMORY")
                 cur.close()
         self._Session = sessionmaker(self.engine, expire_on_commit=False)
         Base.metadata.create_all(self.engine)
@@ -175,8 +179,41 @@ class Database:
             # Without it the replay predicate would still latch onto
             # ix_detections_source_time for the started_at< inequality even
             # though ix_detections_source_hash_time is the better choice.
-            # Cheap (~100 ms on this DB) and runs once per process boot.
-            conn.exec_driver_sql("ANALYZE detections")
+            #
+            # Weekly, not per boot. It is a full index scan plus a write, it
+            # gets slower as the table grows, and Database() is constructed
+            # twice on a unit (pipeline and web) plus twice more on every
+            # self-update. The statistics it gathers change over weeks, not
+            # restarts, so re-running them on each boot bought nothing.
+            if self._analyze_is_due(conn):
+                conn.exec_driver_sql("ANALYZE detections")
+                conn.exec_driver_sql(
+                    "INSERT INTO app_settings (key, value, updated_at) "
+                    "VALUES ('analyze:detections', :now, :now) "
+                    "ON CONFLICT(key) DO UPDATE SET value=:now, updated_at=:now",
+                    {"now": datetime.now(UTC).isoformat()},
+                )
+
+    ANALYZE_INTERVAL_DAYS = 7
+
+    def _analyze_is_due(self, conn) -> bool:
+        """True when the planner statistics are missing or stale."""
+        try:
+            row = conn.exec_driver_sql(
+                "SELECT value FROM app_settings WHERE key = 'analyze:detections'"
+            ).fetchone()
+        except Exception:
+            return True  # table not there yet on a brand-new DB — just run it
+        if row is None or not row[0]:
+            return True
+        try:
+            last = datetime.fromisoformat(row[0])
+        except ValueError:
+            return True
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        age_days = (datetime.now(UTC) - last).total_seconds() / 86400.0
+        return age_days >= self.ANALYZE_INTERVAL_DAYS
 
     def session(self) -> Session:
         return self._Session()

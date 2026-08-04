@@ -9,7 +9,9 @@ from birdbrain.config import AppConfig, SourceConfig
 from birdbrain.detector.birdnet import NON_BIRD_CLASSES, Detection
 from birdbrain.pipeline import build_source, should_hash_clips
 from birdbrain.storage import Database, DetectionRow
+from birdbrain.storage.models import AppSettingRow
 from birdbrain.tbb import prune_clips, sweep_orphan_spectrograms, tbb_source_config
+from birdbrain.web.tbb_app import heartbeat_fresh_s
 
 
 def test_tbb_source_config_is_a_single_mic_source():
@@ -166,3 +168,63 @@ def test_sweep_orphan_spectrograms_is_idempotent_and_safe_when_empty(tmp_path):
     clips.mkdir()
     assert sweep_orphan_spectrograms(clips) == (0, 0)
     assert sweep_orphan_spectrograms(tmp_path / "does-not-exist") == (0, 0)
+
+
+# --- SD-card write budget ---------------------------------------------------
+
+def test_central_keeps_the_fast_heartbeat():
+    """Central's liveness view calls a source stale after 60s, so raising this
+    default would show every YouTube source as dead. A unit overrides it in its
+    own .env instead."""
+    assert AppConfig().worker_heartbeat_seconds == 15.0
+
+
+def test_listening_window_follows_the_heartbeat_cadence():
+    """tbb-update.sh gates its rollback on `"listening": true`. If the freshness
+    window ever falls below the beat interval, a perfectly good update rolls
+    itself back — so this must track the cadence, not be a fixed 90s."""
+
+    fast = AppConfig(worker_heartbeat_seconds=15.0)
+    slow = AppConfig(worker_heartbeat_seconds=60.0)
+    very_slow = AppConfig(worker_heartbeat_seconds=300.0)
+
+    assert heartbeat_fresh_s(fast) == 90.0          # floor still applies
+    assert heartbeat_fresh_s(slow) == 180.0         # 3 beats of slack
+    assert heartbeat_fresh_s(very_slow) == 900.0
+    for cfg in (fast, slow, very_slow):
+        assert heartbeat_fresh_s(cfg) > cfg.worker_heartbeat_seconds, (
+            "a unit must never look dead between two consecutive beats"
+        )
+
+
+def test_analyze_runs_once_not_on_every_boot(tmp_path):
+    """Database() is constructed twice per unit, plus twice per self-update, and
+    ANALYZE is a full index scan and a write that grows with the table."""
+    url = f"sqlite:///{tmp_path / 'a.sqlite'}"
+    Database(url)
+    with Database(url).session() as s:
+        marker = s.execute(
+            select(AppSettingRow).where(AppSettingRow.key == "analyze:detections")
+        ).scalar_one_or_none()
+    assert marker is not None, "first construction should record that it ran"
+
+    db = Database(url)
+    with db.engine.begin() as conn:
+        assert db._analyze_is_due(conn) is False, "a fresh marker means not due"
+
+
+def test_analyze_becomes_due_again_when_the_marker_is_stale(tmp_path):
+    url = f"sqlite:///{tmp_path / 'b.sqlite'}"
+    db = Database(url)
+    old = (datetime.now(UTC) - timedelta(days=db.ANALYZE_INTERVAL_DAYS + 1)).isoformat()
+    db.set_setting("analyze:detections", old)
+    with db.engine.begin() as conn:
+        assert db._analyze_is_due(conn) is True
+
+
+def test_temp_store_is_memory(tmp_path):
+    """Sort/GROUP BY scratch must not spill onto the card."""
+    db = Database(f"sqlite:///{tmp_path / 'c.sqlite'}")
+    with db.engine.begin() as conn:
+        # 2 == MEMORY
+        assert conn.exec_driver_sql("PRAGMA temp_store").scalar() == 2

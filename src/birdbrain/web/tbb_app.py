@@ -57,9 +57,19 @@ TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 # The feed serves the audio itself instead; see _tbb_feed.html.
 
 FEED_LIMIT = 60
-# A pipeline worker that has heartbeat within this is "listening". Generous vs.
-# the 15 s heartbeat cadence so a slow chunk doesn't flip the indicator.
-HEARTBEAT_FRESH_S = 90.0
+# Floor for "listening". Derived from the configured heartbeat cadence below,
+# because tbb-update.sh gates its rollback on `"listening": true` — if this ever
+# falls under the beat interval, a perfectly good update rolls itself back.
+HEARTBEAT_FRESH_FLOOR_S = 90.0
+
+
+def heartbeat_fresh_s(cfg: AppConfig) -> float:
+    """How stale a heartbeat may be before the unit stops reading as listening.
+
+    Three beats of slack, never less than the 90 s floor: one missed beat is a
+    slow chunk, three is a stopped worker.
+    """
+    return max(HEARTBEAT_FRESH_FLOOR_S, 3.0 * cfg.worker_heartbeat_seconds)
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -140,7 +150,7 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
         fresh = (
             row.state == "running"
             and last is not None
-            and (datetime.now(UTC) - last).total_seconds() < HEARTBEAT_FRESH_S
+            and (datetime.now(UTC) - last).total_seconds() < heartbeat_fresh_s(cfg)
         )
         return (fresh, last, row.state)
 

@@ -183,6 +183,20 @@ class AppConfig(BaseSettings):
     db_url: str = DEFAULT_DB_URL
     clips_dir: Path = Path("data/clips")
     save_clips: bool = True
+    # How often a capture worker restates "still alive" in the DB.
+    #
+    # DO NOT raise this on central. Its liveness view (_hb_status in web/app.py)
+    # calls a source "running" only if its heartbeat is under 60s old, so a
+    # slower beat would show every YouTube source as stale. A TBB unit is not
+    # affected by that threshold — central learns a unit is alive from the
+    # ingest POST, not from this row — so a unit overrides it to cut ~5,760
+    # SQLite commits a day, which is comparable card wear to every clip it
+    # records. Whatever a unit sets, tbb_app's HEARTBEAT_FRESH_S follows it, and
+    # tbb-update.sh gates rollback on that.
+    worker_heartbeat_seconds: float = 15.0
+    # How often the audio-quality snapshot is written. A read-mostly metric with
+    # a ~5 min EMA behind it; the UI greys it at 180s.
+    audio_quality_flush_seconds: float = 60.0
     # Perceptual clip fingerprinting (birdbrain.audio_hash) for the YouTube
     # ad/highlight replay filter. Worth its cost on central; turn OFF on a
     # capture unit, where it is both useless and expensive — see the skip in

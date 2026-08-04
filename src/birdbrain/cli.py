@@ -472,6 +472,12 @@ def tbb_web(
         host=host,
         port=port,
         log_level=cfg.log_level.lower(),
+        # No per-request access log. The Now page polls /feed every 5s, so one
+        # phone left open on a windowsill wrote ~17k lines a day into a
+        # persistent journal on the SD card — to record that a page someone is
+        # looking at is still being looked at. Errors still log; central keeps
+        # its access log (cli.py's `web` command is untouched).
+        access_log=False,
     )
 
 

@@ -43,7 +43,15 @@ WIFI_CYCLE_COOLDOWN_S="${WIFI_CYCLE_COOLDOWN_S:-600}"     # 10 min
 REBOOT_MIN_INTERVAL_S="${REBOOT_MIN_INTERVAL_S:-21600}"   # 6 h
 
 STATE_DIR="${STATE_DIR:-/var/lib/birdbrain-net-watchdog}"
-HISTORY_FILE="${HISTORY_FILE:-$STATE_DIR/history}"
+# The rolling probe window goes to tmpfs, not the SD card. It was rewritten
+# every 60s — 1,440 small writes a day on the device we are trying to protect —
+# and it is explicitly *meant* not to survive a reboot: the reboot path below
+# truncates it so a stale window cannot re-trigger. Losing it on an unplanned
+# reboot has the same effect, which is the desired one.
+RUN_DIR="${RUN_DIR:-/run/birdbrain-net-watchdog}"
+HISTORY_FILE="${HISTORY_FILE:-$RUN_DIR/history}"
+# These two must persist: they are what rate-limits the reboot they record, so
+# putting them in tmpfs would let a boot loop reset its own brake every time.
 LAST_CYCLE_FILE="${LAST_CYCLE_FILE:-$STATE_DIR/last_cycle}"
 LAST_REBOOT_FILE="${LAST_REBOOT_FILE:-$STATE_DIR/last_reboot}"
 
@@ -55,7 +63,7 @@ NMCLI="${NMCLI:-/usr/bin/nmcli}"
 SYSTEMCTL="${SYSTEMCTL:-/usr/bin/systemctl}"
 GETENT="${GETENT:-/usr/bin/getent}"
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$RUN_DIR"
 
 now=$(date +%s)
 
