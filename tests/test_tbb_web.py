@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import types
 from datetime import UTC, datetime
 
@@ -288,3 +290,35 @@ def test_clip_route_still_serves_audio(tmp_path):
     r = client.get("/clips/1")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("audio/")
+
+
+# --- the unit must not construct central's dashboard ------------------------
+
+_UNIT_IMPORT_PROBE = """
+import os, pathlib, sys, tempfile
+d = tempfile.mkdtemp()
+os.chdir(d)
+os.environ["BIRDBRAIN_DB_URL"] = "sqlite:///./probe.sqlite"
+os.environ["BIRDBRAIN_CLIPS_DIR"] = "./clips"
+import birdbrain.web.tbb_app  # noqa: F401
+print("central=%s lock=%s" % (
+    "birdbrain.web.app" in sys.modules,
+    pathlib.Path(".media-sweeper.lock").exists(),
+))
+"""
+
+
+def test_importing_the_unit_app_does_not_build_central():
+    """birdbrain.web.app ends with a module-level ``app = create_app()``, so an
+    eager re-export in birdbrain/web/__init__.py makes merely importing the unit
+    app construct the entire central dashboard: a second Database() with its
+    migration and ANALYZE, the operator account, the species linkifier, the
+    TOML loads, and a bid for the media-sweeper lock. On a 415MB field unit,
+    on every tbb-web start. Keep the package __init__ lazy.
+    """
+    out = subprocess.run(
+        [sys.executable, "-c", _UNIT_IMPORT_PROBE],
+        capture_output=True, text=True, timeout=180, check=True,
+    )
+    assert "central=False" in out.stdout, f"unit imported central's app: {out.stdout!r}"
+    assert "lock=False" in out.stdout, f"unit grabbed the sweeper lock: {out.stdout!r}"
