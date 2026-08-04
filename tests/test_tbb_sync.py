@@ -110,3 +110,65 @@ def test_start_sync_agent_noop_when_disabled(tmp_path):
     db = _db_with(tmp_path, 0)
     cfg = AppConfig(tbb_sync_enabled=False, tbb_sync_state_file=tmp_path / "s.json")
     assert start_sync_agent(db, cfg, threading.Event()) is None
+
+
+# --- audio quality travelling with the batch ---------------------------------
+
+_SNAP = {
+    "score": 74, "level_score": 0.62, "avail_score": 0.91, "structure_score": 0.44,
+    "level_dbfs": -31.5, "silence_fraction": 0.09, "clip_fraction": 0.0012,
+    "flatness": 0.33, "fraction_good": 0.81, "issue_label": "good",
+    "band_hz_low": 120, "band_hz_high": 11000,
+}
+
+
+def test_audio_quality_snapshot_roundtrips(tmp_path):
+    """The getter must hand back exactly what upsert stored, in the shape the
+    payload needs — it's the seam between the unit's pipeline and the wire."""
+    db = _db_with(tmp_path, 0)
+    assert db.audio_quality_snapshot("tbb-test") is None
+
+    db.upsert_audio_quality("tbb-test", _SNAP)
+    got = db.audio_quality_snapshot("tbb-test")
+    assert got == _SNAP
+    # updated_at is deliberately absent: central stamps its own receive time.
+    assert "updated_at" not in got
+
+
+def test_payload_carries_audio_quality(tmp_path):
+    db = _db_with(tmp_path, 1)
+    rows = fetch_batch(db, 0, 10)
+    assert detections_payload("tbb-test", rows)["audio_quality"] is None
+    payload = detections_payload("tbb-test", rows, None, _SNAP)
+    assert payload["audio_quality"]["score"] == 74
+
+
+def test_sync_once_attaches_the_units_own_quality(tmp_path, monkeypatch):
+    db = _db_with(tmp_path, 3)
+    db.upsert_audio_quality("tbb-test", _SNAP)
+    cfg = _cfg(tmp_path, tbb_sync_batch_size=2)
+    state = SyncState.load(cfg.tbb_sync_state_file)
+    seen = []
+    monkeypatch.setattr(
+        tbb_sync, "post_batch",
+        lambda url, tok, payload, **k: seen.append(payload["audio_quality"]) or True,
+    )
+
+    assert sync_once(db, cfg, state) == 3
+    # Every batch of the drain carries it; central keeps only the latest.
+    assert [q["score"] for q in seen] == [74, 74]
+
+
+def test_sync_once_without_a_quality_row_still_syncs(tmp_path, monkeypatch):
+    """A unit whose accumulator hasn't warmed up yet must not fail to sync."""
+    db = _db_with(tmp_path, 2)
+    cfg = _cfg(tmp_path)
+    state = SyncState.load(cfg.tbb_sync_state_file)
+    seen = []
+    monkeypatch.setattr(
+        tbb_sync, "post_batch",
+        lambda url, tok, payload, **k: seen.append(payload["audio_quality"]) or True,
+    )
+
+    assert sync_once(db, cfg, state) == 2
+    assert seen == [None]

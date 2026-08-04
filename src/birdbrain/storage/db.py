@@ -1121,6 +1121,33 @@ class Database:
         with self._Session() as s:
             return {r.source_name: r for r in s.scalars(select(AudioQualityMetricRow))}
 
+    def audio_quality_snapshot(self, source_name: str) -> dict | None:
+        """One source's current audio-quality row as the same plain dict shape
+        ``QualityAccumulator.snapshot()`` produces, or None if it has none yet.
+
+        Round-trips a stored metric back into a payload — a TBB unit reads its
+        own row this way to ship it to central (``updated_at`` is deliberately
+        left out: central stamps its own receive time, so freshness stays
+        central's clock and a unit with a skewed RTC can't fake a fresh row)."""
+        with self._Session() as s:
+            row = s.get(AudioQualityMetricRow, source_name)
+            if row is None:
+                return None
+            return {
+                "score": row.score,
+                "level_score": row.level_score,
+                "avail_score": row.avail_score,
+                "structure_score": row.structure_score,
+                "level_dbfs": row.level_dbfs,
+                "silence_fraction": row.silence_fraction,
+                "clip_fraction": row.clip_fraction,
+                "flatness": row.flatness,
+                "fraction_good": row.fraction_good,
+                "issue_label": row.issue_label,
+                "band_hz_low": row.band_hz_low,
+                "band_hz_high": row.band_hz_high,
+            }
+
     def detection_count_since(self, source_name: str, since: datetime) -> int:
         """Raw detection count for a source in [since, now). Feeds the audio-
         quality 'yield' term (loud audio + near-zero detections = masked)."""

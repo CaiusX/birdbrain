@@ -114,3 +114,120 @@ def test_public_tunnel_allows_ingest_but_still_blocks_other_writes(tmp_path):
     # A different mutating path over the public tunnel is still 404 (gate intact).
     blocked = client.post("/admin/anything", headers=public)
     assert blocked.status_code == 404
+
+
+# --- audio quality riding along with the batch -------------------------------
+# A push-fed unit keeps its audio local, so central can never measure the feed.
+# The unit ships its own snapshot instead; these pin the trust boundary.
+
+_QUALITY = {
+    "score": 74,
+    "level_score": 0.62,
+    "avail_score": 0.91,
+    "structure_score": 0.44,
+    "level_dbfs": -31.5,
+    "silence_fraction": 0.09,
+    "clip_fraction": 0.0012,
+    "flatness": 0.33,
+    "fraction_good": 0.81,
+    "issue_label": "good",
+    "band_hz_low": 120,
+    "band_hz_high": 11000,
+}
+
+
+def test_ingest_stores_unit_reported_audio_quality(tmp_path):
+    app, db = _central(tmp_path)
+    db.upsert_device("tbb-a1b2", hash_token("good-token"))
+    client = TestClient(app)
+
+    r = client.post("/ingest/detections", json={**_body(), "audio_quality": _QUALITY},
+                    headers={"Authorization": "Bearer good-token"})
+    assert r.status_code == 200
+
+    snap = db.audio_quality_snapshot("tbb-a1b2")
+    assert snap is not None
+    assert snap["score"] == 74
+    assert snap["issue_label"] == "good"
+    assert snap["band_hz_high"] == 11000
+    assert snap["level_dbfs"] == -31.5
+
+
+def test_audio_quality_is_optional(tmp_path):
+    """An older unit, or one whose accumulator hasn't warmed up, omits the key
+    entirely — the detections must still ingest and no row is invented."""
+    app, db = _central(tmp_path)
+    db.upsert_device("tbb-a1b2", hash_token("good-token"))
+    client = TestClient(app)
+
+    r = client.post("/ingest/detections", json=_body(),
+                    headers={"Authorization": "Bearer good-token"})
+    assert r.status_code == 200 and r.json()["accepted"] == 1
+    assert db.audio_quality_snapshot("tbb-a1b2") is None
+
+
+def test_audio_quality_is_written_even_for_an_empty_keep_alive(tmp_path):
+    """The silent-mic case: no detections is exactly when the measurement that
+    explains the silence matters most, so an empty batch still updates it."""
+    app, db = _central(tmp_path)
+    db.upsert_device("tbb-a1b2", hash_token("good-token"))
+    client = TestClient(app)
+
+    silent = {**_QUALITY, "score": 3, "issue_label": "mostly silent"}
+    r = client.post(
+        "/ingest/detections",
+        json={"unit": "tbb-a1b2", "schema": 1, "detections": [], "audio_quality": silent},
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert r.status_code == 200 and r.json()["accepted"] == 0
+    assert db.audio_quality_snapshot("tbb-a1b2")["issue_label"] == "mostly silent"
+
+
+@pytest.mark.parametrize("bad", [
+    {"score": 101},              # composite is 0..100
+    {"score": -1},
+    {"level_score": 1.4},        # sub-scores are 0..1
+    {"silence_fraction": -0.2},
+    {"level_dbfs": 9999.0},      # dBFS is bounded, not free-form
+    {"issue_label": "x" * 33},   # column is String(32)
+])
+def test_ingest_rejects_out_of_range_audio_quality(tmp_path, bad):
+    """This arrives over the public tunnel, so every bound is enforced before it
+    reaches columns that /admin and the site page render."""
+    app, db = _central(tmp_path)
+    db.upsert_device("tbb-a1b2", hash_token("good-token"))
+    client = TestClient(app)
+
+    r = client.post("/ingest/detections", json={**_body(), "audio_quality": {**_QUALITY, **bad}},
+                    headers={"Authorization": "Bearer good-token"})
+    assert r.status_code == 422
+    assert db.audio_quality_snapshot("tbb-a1b2") is None
+
+
+def test_audio_quality_is_keyed_to_the_token_not_the_body(tmp_path):
+    """A token may only ever describe its own unit — same rule as detections."""
+    app, db = _central(tmp_path)
+    db.upsert_device("tbb-a1b2", hash_token("good-token"))
+    db.upsert_device("tbb-victim", hash_token("victim-token"))
+    client = TestClient(app)
+
+    # body.unit must match the token's unit, so the mismatch is refused outright.
+    r = client.post(
+        "/ingest/detections",
+        json={**_body(unit="tbb-victim"), "audio_quality": {**_QUALITY, "score": 0}},
+        headers={"Authorization": "Bearer good-token"},
+    )
+    assert r.status_code == 400
+    assert db.audio_quality_snapshot("tbb-victim") is None
+
+
+def test_ingest_tolerates_version_skew_in_both_directions(tmp_path):
+    """Units and central update independently, so neither rollout order may
+    break sync: a new unit's extra keys must be ignored by an older central
+    (not 422 it into a stuck backlog), and a new central must accept an older
+    unit's body that has no audio_quality at all."""
+    # New unit → older central: unknown keys are ignored, not rejected.
+    body = IngestBody(**{**_body(), "some_future_field": {"x": 1}})
+    assert body.unit == "tbb-a1b2"
+    # Older unit → new central: the field is simply absent.
+    assert IngestBody(**_body()).audio_quality is None

@@ -65,16 +65,24 @@ def fetch_batch(db: Database, since_id: int, limit: int) -> list[DetectionRow]:
 
 
 def detections_payload(
-    unit_id: str, rows: list[DetectionRow], timezone: str | None = None
+    unit_id: str,
+    rows: list[DetectionRow],
+    timezone: str | None = None,
+    audio_quality: dict | None = None,
 ) -> dict:
     """Build the /ingest/detections body (see tbb-architecture.md §6.2). The
     unit's timezone rides along so central can register a new unit's source in
     its real local tz instead of defaulting to UTC (it's create-only on central,
-    so this only sets the tz at first registration)."""
+    so this only sets the tz at first registration).
+
+    ``audio_quality`` is the unit's own snapshot. Central can't measure a feed
+    whose audio never leaves the unit, so the measurement has to travel with the
+    batch; omitted (None) before the accumulator has warmed up."""
     return {
         "unit": unit_id,
         "schema": 1,
         "timezone": timezone,
+        "audio_quality": audio_quality,
         "detections": [
             {
                 # Stable across resends → idempotency key alongside the natural key.
@@ -116,11 +124,14 @@ def sync_once(db: Database, cfg: AppConfig, state: SyncState) -> int:
     the number of detections acked this run."""
     assert cfg.tbb_central_url and cfg.tbb_device_token  # guarded by start_sync_agent
     sent = 0
+    # Read once per tick, not per batch: draining a long backlog is many POSTs
+    # of the same instantaneous measurement, and central keeps only the latest.
+    quality = db.audio_quality_snapshot(cfg.tbb_unit_id)
     while True:
         rows = fetch_batch(db, state.last_synced_id, cfg.tbb_sync_batch_size)
         if not rows:
             break
-        payload = detections_payload(cfg.tbb_unit_id, rows, cfg.tbb_timezone)
+        payload = detections_payload(cfg.tbb_unit_id, rows, cfg.tbb_timezone, quality)
         if not post_batch(cfg.tbb_central_url, cfg.tbb_device_token, payload):
             break  # offline / rejected — don't advance; retry next tick
         state.last_synced_id = rows[-1].id  # rows are id-ascending
@@ -149,10 +160,16 @@ def _sync_loop(db: Database, cfg: AppConfig, stop_event: threading.Event) -> Non
                 # to refresh central's liveness. Central stamps the heartbeat on
                 # every ingest (even empty), so a quiet unit reads "running"
                 # instead of decaying to "stale" between bird detections.
+                # It carries the quality snapshot too — a silent or dead mic
+                # produces no detections, which is exactly when central most
+                # needs the measurement that explains the silence.
                 post_batch(
                     cfg.tbb_central_url,
                     cfg.tbb_device_token,
-                    detections_payload(cfg.tbb_unit_id, [], cfg.tbb_timezone),
+                    detections_payload(
+                        cfg.tbb_unit_id, [], cfg.tbb_timezone,
+                        db.audio_quality_snapshot(cfg.tbb_unit_id),
+                    ),
                 )
         except Exception:
             log.exception("tbb_sync.tick_failed")

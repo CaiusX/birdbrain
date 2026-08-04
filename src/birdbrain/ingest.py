@@ -38,6 +38,34 @@ class IngestDetection(BaseModel):
     has_clip: bool = False
 
 
+class IngestAudioQuality(BaseModel):
+    """A unit's own audio-quality snapshot, riding along with the batch.
+
+    A push-fed unit keeps its audio locally, so central can never measure the
+    feed itself — the unit's pipeline already computes this from the raw mic
+    stream, so it reports it instead. Field-for-field the dict
+    ``QualityAccumulator.snapshot()`` returns. Every bound is enforced here
+    because this arrives over the public tunnel: a buggy or hostile unit may
+    only write nonsense about *itself*, never a value that breaks the /admin
+    and site-page rendering that reads these columns."""
+
+    score: int = Field(ge=0, le=100)
+    level_score: float = Field(ge=0.0, le=1.0)
+    avail_score: float = Field(ge=0.0, le=1.0)
+    structure_score: float = Field(ge=0.0, le=1.0)
+    # dBFS is negative (0 = full scale). Bounded loosely — silence floors well
+    # below -100 on a quiet mic, and a tiny positive overshoot is possible.
+    level_dbfs: float = Field(ge=-200.0, le=20.0)
+    silence_fraction: float = Field(ge=0.0, le=1.0)
+    clip_fraction: float = Field(ge=0.0, le=1.0)
+    flatness: float = Field(ge=0.0, le=1.0)
+    fraction_good: float = Field(ge=0.0, le=1.0)
+    issue_label: str = Field(default="", max_length=32)
+    # NULL when the feed was too quiet to measure a band edge.
+    band_hz_low: int | None = Field(default=None, ge=0, le=1_000_000)
+    band_hz_high: int | None = Field(default=None, ge=0, le=1_000_000)
+
+
 class IngestBody(BaseModel):
     # max_length caps the body so a single POST can't be unbounded.
     model_config = {"populate_by_name": True}
@@ -48,6 +76,9 @@ class IngestBody(BaseModel):
     # new unit's source timezone at first registration; None = leave at UTC.
     timezone: str | None = Field(default=None, max_length=64)
     detections: list[IngestDetection] = Field(default_factory=list, max_length=2000)
+    # Optional so an older unit (or one whose accumulator hasn't warmed up yet)
+    # still ingests normally — absent just means "no quality update this tick".
+    audio_quality: IngestAudioQuality | None = None
 
 
 def _valid_tz(name: str | None) -> str:
@@ -98,11 +129,17 @@ def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
     )
     db.worker_heartbeat(device.unit_id)
     db.device_touch_seen(device.unit_id)
+    # The unit measured this on its own audio; central only stores it (stamping
+    # its own updated_at, so the freshness the UI greys out on stays our clock).
+    # Keyed to the token's unit, never to body.unit — same rule as detections.
+    if body.audio_quality is not None:
+        db.upsert_audio_quality(device.unit_id, body.audio_quality.model_dump())
     log.info(
         "ingest.batch",
         unit=device.unit_id,
         received=len(body.detections),
         inserted=inserted,
+        quality=body.audio_quality.score if body.audio_quality else None,
     )
     return {
         "unit": device.unit_id,
