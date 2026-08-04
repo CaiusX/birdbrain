@@ -33,6 +33,9 @@
   .sync-synced { color: #3ddc84; }
   .sync-offline { color: #f0b429; }
   .sync-disabled { color: #6b7280; }
+  /* Refusing to sync is not the same as failing to — an unreadable state file
+     needs a person, not patience. Red so it doesn't read as "offline". */
+  .sync-blocked { color: #f2545b; font-weight: 600; }
   ul.feed, ul.species { list-style: none; margin: 0; padding: 0; }
   li.det {
     display: flex; align-items: center; gap: .7rem; padding: .55rem 0;

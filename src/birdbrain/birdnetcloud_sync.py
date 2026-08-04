@@ -47,6 +47,7 @@ from sqlalchemy import func, select
 from birdbrain.config import AppConfig
 from birdbrain.logging import get_logger
 from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
+from birdbrain.sync_status import STATUS, jittered
 from birdbrain.storage import Database, DetectionRow
 
 log = get_logger(__name__)
@@ -653,7 +654,11 @@ def resolve_state(db: Database, path: Path) -> CloudState | None:
 def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event) -> None:
     state = resolve_state(db, cfg.birdnetcloud_state_file)
     if state is None:
-        return  # unreadable state — refuse rather than silently skip the backlog
+        # Unreadable state — refuse rather than silently skip the backlog. Say
+        # so on the unit's own page too, or "not syncing" looks like a network
+        # problem and nobody goes looking for the state file.
+        STATUS.cloud.block("state file unreadable")
+        return
     session = make_session(token)
     log.info(
         "birdnetcloud.start",
@@ -671,10 +676,13 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
     # stay silent for up to birdnetcloud_heartbeat_seconds (30 min on the field
     # profile) and read as offline on their dashboard for that whole window.
     last_heartbeat: float | None = None
+    prev_depth = 0
     while True:
         try:
             sent, skipped = sync_once(db, cfg, state, token, session)
             auth_warned = False
+            depth = max(0, current_max_id(db) - state.last_pushed_id)
+            STATUS.cloud.succeeded(queue_depth=depth)
             if sent or skipped:
                 log.info(
                     "birdnetcloud.flushed",
@@ -682,6 +690,13 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
                     skipped=skipped,
                     last_pushed_id=state.last_pushed_id,
                 )
+            # Depth alone means nothing — a unit back from a week offline has a
+            # legitimately huge one that is shrinking fine. Growth is the signal.
+            if depth > prev_depth and depth > cfg.birdnetcloud_max_per_tick:
+                log.warning(
+                    "birdnetcloud.backlog_growing", queue_depth=depth, was=prev_depth
+                )
+            prev_depth = depth
             # Heartbeat on its own clock, not once per poll. A field unit wants
             # to notice new detections promptly but has no reason to spend a
             # request every minute saying nothing changed — that was ~2MB/day
@@ -698,12 +713,14 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
         except AuthRejected as e:
             # Log once per outage rather than every tick — a rotated token would
             # otherwise fill the journal until someone notices.
+            STATUS.cloud.failed(f"auth rejected: {e}")
             if not auth_warned:
                 log.warning("birdnetcloud.auth_rejected", error=str(e))
                 auth_warned = True
-        except Exception:
+        except Exception as e:
+            STATUS.cloud.failed(str(e))
             log.exception("birdnetcloud.tick_failed")
-        if stop_event.wait(cfg.birdnetcloud_interval_seconds):
+        if stop_event.wait(jittered(cfg.birdnetcloud_interval_seconds)):
             session.close()
             return
 
@@ -717,7 +734,9 @@ def start_cloud_agent(
     token = resolve_token(cfg)
     if not (cfg.birdnetcloud_enabled and token):
         log.info("birdnetcloud.disabled", enabled=cfg.birdnetcloud_enabled)
+        STATUS.cloud.enabled = False
         return None
+    STATUS.cloud.enabled = True
     t = threading.Thread(
         target=_loop, args=(db, cfg, token, stop_event), name="birdnetcloud-sync", daemon=True
     )

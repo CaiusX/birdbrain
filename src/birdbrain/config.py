@@ -278,6 +278,11 @@ class AppConfig(BaseSettings):
     tbb_device_token: str | None = None
     tbb_sync_interval_seconds: int = 45
     tbb_sync_batch_size: int = 200
+    # Empty keep-alive batches only refresh central's "last seen"; they carry no
+    # data. Every tick cost ~2MB/day on a metered link to say nothing changed,
+    # so they get their own clock (as the BirdNET-Cloud heartbeat does). 0 = off,
+    # for a unit that should only ever speak when it has something to report.
+    tbb_sync_keepalive_seconds: int = 300
     # High-water-mark store (last synced detection id). A plain JSON file so the
     # unit's DB schema stays identical to central's.
     tbb_sync_state_file: Path = Path("data/tbb_sync_state.json")

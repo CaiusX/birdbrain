@@ -37,10 +37,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 
+from birdbrain.birdnetcloud_sync import start_cloud_agent
 from birdbrain.config import AppConfig
 from birdbrain.logging import get_logger
 from birdbrain.storage import Database, DetectionRow, WorkerHeartbeatRow
-from birdbrain.birdnetcloud_sync import start_cloud_agent
+from birdbrain.sync_status import STATUS
 from birdbrain.tbb_sync import start_sync_agent
 
 log = get_logger(__name__)
@@ -143,11 +144,22 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
         )
         return (fresh, last, row.state)
 
-    def _sync_state() -> str:
-        """synced | offline | disabled — sync is off until Phase 2."""
-        if not cfg.tbb_sync_enabled:
-            return "disabled"
-        return "offline"  # Phase 2 will flip this to 'synced' on a recent ack.
+    def _sync_targets() -> list[dict]:
+        """Both destinations, cloud first — it is the principal consumer.
+
+        Read live from what the agent threads publish. This used to be a single
+        hardcoded "offline" left over from before Phase 2 shipped, so a unit
+        that had been syncing for weeks still showed an offline dot to whoever
+        walked up to it.
+        """
+        targets = [
+            {"label": "cloud", **STATUS.cloud.as_dict()},
+            {"label": "central", **STATUS.central.as_dict()},
+        ]
+        # Filtered here rather than in the template so the separator logic
+        # stays trivial: a unit that only reports to the cloud should not
+        # carry a permanent "central: disabled" on its own page.
+        return [t for t in targets if t["enabled"] or t["blocked"]]
 
     def _header_ctx() -> dict:
         today_start = _today_start_utc()
@@ -164,7 +176,7 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
             "unique_species_today": int(unique_species),
             "listening": listening,
             "last_detection_local": last_det.astimezone(tz) if last_det else None,
-            "sync_state": _sync_state(),
+            "sync_targets": _sync_targets(),
             "central_url": cfg.tbb_central_url,
         }
 
@@ -444,7 +456,18 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
     @app.get("/healthz")
     def healthz() -> dict:
         listening, _last_hb, state = _listening()
-        return {"ok": True, "unit": cfg.tbb_unit_id, "listening": listening, "worker_state": state}
+        # `sync` is additive — tbb-update.sh gates rollback on `listening` and
+        # `worker_state`, so those keys keep their exact meaning and position.
+        # The backlog is here rather than only in the cloud heartbeat because a
+        # unit that is falling behind should be able to say so to anyone who
+        # asks it directly, including when the thing it is behind is the cloud.
+        return {
+            "ok": True,
+            "unit": cfg.tbb_unit_id,
+            "listening": listening,
+            "worker_state": state,
+            "sync": STATUS.as_dict(),
+        }
 
     # Sync agent runs in the web process (arch §10.1). No-op unless sync is
     # configured, so tests/imports and offline units never touch the network.

@@ -7,7 +7,11 @@
 #   e.g.  bash scripts/tbb-finish.sh tbb-mems -26.129 28.034
 #
 # mic-device defaults to the Codec Zero onboard MIC (plughw:CARD=Zero,DEV=0).
-# Sync to central is left OFF here — enable it after enrollment.
+#
+# Both reporting targets are left OFF here. BirdNET-Cloud is the one most units
+# want — it needs a station token, which is deliberately not written into this
+# .env (see scripts/save-token.sh). Central sync is the option you enable when
+# you run your own birdbrain, and is turned on by enrolling from /setup.
 set -euo pipefail
 
 UNIT_ID="${1:?usage: tbb-finish.sh <unit-id> [lat] [lon] [mic-device]}"

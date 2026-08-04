@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from birdbrain.config import AppConfig
 from birdbrain.detector.birdnet import Detection
 from birdbrain.storage import Database
+from birdbrain.sync_status import STATUS
 from birdbrain.web import tbb_app
 from birdbrain.web.tbb_app import create_tbb_app, list_alsa_devices, update_env_file
 
@@ -322,3 +323,61 @@ def test_importing_the_unit_app_does_not_build_central():
     )
     assert "central=False" in out.stdout, f"unit imported central's app: {out.stdout!r}"
     assert "lock=False" in out.stdout, f"unit grabbed the sweeper lock: {out.stdout!r}"
+
+
+# --- the unit must tell the truth about its own sync ------------------------
+
+def test_healthz_reports_both_targets(tmp_path):
+    """tbb-update.sh gates rollback on `listening` and `worker_state`, so those
+    must keep their exact meaning; `sync` is purely additive."""
+
+    client = TestClient(_make_app(tmp_path))
+    body = client.get("/healthz").json()
+
+    assert body["ok"] is True and "listening" in body and "worker_state" in body
+    assert set(body["sync"]) == {"cloud", "central"}
+    for target in body["sync"].values():
+        assert set(target) >= {"state", "enabled", "queue_depth", "last_error"}
+    STATUS.cloud.enabled = STATUS.central.enabled = False
+
+
+def test_a_syncing_unit_stops_claiming_to_be_offline(tmp_path):
+    """_sync_state was hardcoded to 'offline' whenever sync was on — a leftover
+    from before Phase 2 shipped. A unit syncing happily for weeks still showed
+    an offline dot to whoever walked up to it."""
+
+    # Create the app first: start_cloud_agent owns `enabled` and resets it on
+    # startup, which is exactly the behaviour we want it to have.
+    client = TestClient(_make_app(tmp_path))
+    STATUS.cloud.enabled = True
+    STATUS.cloud.succeeded(queue_depth=0)
+    try:
+        assert client.get("/healthz").json()["sync"]["cloud"]["state"] == "synced"
+        assert "cloud: synced" in client.get("/feed").text
+    finally:
+        STATUS.cloud.enabled = False
+        STATUS.cloud.last_success_at = None
+
+
+def test_a_blocked_target_is_distinguished_from_an_offline_one(tmp_path):
+    """An unreadable state file needs a person, not patience — it must not read
+    as 'the link is down'."""
+
+    client = TestClient(_make_app(tmp_path))
+    STATUS.cloud.enabled = True
+    STATUS.cloud.block("state file unreadable")
+    try:
+        assert client.get("/healthz").json()["sync"]["cloud"]["state"] == "blocked"
+        assert "cloud: blocked" in client.get("/feed").text
+    finally:
+        STATUS.cloud.blocked = None
+        STATUS.cloud.enabled = False
+
+
+def test_an_unconfigured_target_is_not_shown(tmp_path):
+    """A cloud-only unit should not carry a permanent 'central: disabled'."""
+
+    STATUS.cloud.enabled = False
+    STATUS.central.enabled = False
+    feed = TestClient(_make_app(tmp_path)).get("/feed").text
+    assert "central:" not in feed and "cloud:" not in feed

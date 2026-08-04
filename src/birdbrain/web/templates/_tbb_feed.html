@@ -3,8 +3,10 @@
   <span>{{ 'Listening' if header.listening else 'Mic idle' }}</span>
   <span class="sep">·</span>
   <span><b>{{ header.unique_species_today }}</b> species today</span>
-  <span class="sep">·</span>
-  <span class="sync-{{ header.sync_state }}">sync: {{ header.sync_state }}</span>
+  {% for t in header.sync_targets %}
+    <span class="sep">·</span>
+    <span class="sync-{{ t.state }}" {% if t.last_error %}title="{{ t.last_error }}"{% endif %}>{{ t.label }}: {{ t.state }}{% if t.queue_depth %} ({{ t.queue_depth }} queued){% endif %}</span>
+  {% endfor %}
   {% if header.last_detection_local %}
     <span class="sep">·</span>
     <span>last {{ header.last_detection_local.strftime('%H:%M:%S') }}</span>

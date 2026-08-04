@@ -7,6 +7,7 @@ from birdbrain import tbb_sync
 from birdbrain.config import AppConfig
 from birdbrain.detector.birdnet import Detection
 from birdbrain.storage import Database
+from birdbrain.sync_status import jittered
 from birdbrain.tbb_sync import (
     SyncState,
     detections_payload,
@@ -204,3 +205,81 @@ def test_a_non_file_database_leaves_the_defaults_relative():
     """No directory to anchor to — must not crash or invent one."""
     cfg = AppConfig(db_url="sqlite:///:memory:")
     assert not cfg.tbb_sync_state_file.is_absolute()
+
+
+# --- connection reuse, jitter, keep-alive clock -----------------------------
+
+def test_session_is_created_once_and_reused(tmp_path, monkeypatch):
+    """A fresh TLS handshake every 45s is ~4MB/day — more than the payload."""
+    db = _db_with(tmp_path, 0)
+    cfg = _cfg(tmp_path, tbb_sync_interval_seconds=1)
+    made = []
+    monkeypatch.setattr(tbb_sync, "make_session",
+                        lambda tok: made.append(tok) or _DummySession())
+    monkeypatch.setattr(tbb_sync, "post_batch", lambda *a, **k: True)
+
+    stop = threading.Event()
+    ticks = {"n": 0}
+    stop.wait = lambda t: (ticks.__setitem__("n", ticks["n"] + 1), ticks["n"] >= 3)[1]
+    tbb_sync._sync_loop(db, cfg, stop)
+
+    assert len(made) == 1, f"one session for the loop's life, got {len(made)}"
+
+
+def test_intervals_are_jittered_so_a_fleet_does_not_phase_lock(tmp_path):
+    """Units are flashed from one image and powered up together."""
+
+    seen = {round(jittered(300), 3) for _ in range(50)}
+    assert len(seen) > 40, "jitter should actually vary"
+    assert all(255 <= v <= 345 for v in seen), f"out of the +/-15% band: {sorted(seen)[:3]}"
+
+
+def test_keepalive_has_its_own_clock(tmp_path, monkeypatch):
+    """Empty batches carry no data and cost ~2MB/day on a metered link. They
+    should refresh central's liveness occasionally, not every tick."""
+    db = _db_with(tmp_path, 0)
+    cfg = _cfg(tmp_path, tbb_sync_interval_seconds=1, tbb_sync_keepalive_seconds=1800)
+    monkeypatch.setattr(tbb_sync, "make_session", lambda tok: _DummySession())
+    posts = []
+    monkeypatch.setattr(tbb_sync, "post_batch", lambda *a, **k: posts.append(1) or True)
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(tbb_sync.time, "monotonic", lambda: clock["t"])
+    stop = threading.Event()
+    ticks = {"n": 0}
+
+    def counting_wait(timeout):
+        ticks["n"] += 1
+        clock["t"] += 60.0          # a minute per tick, inside the 1800s window
+        return ticks["n"] >= 5
+    stop.wait = counting_wait
+    tbb_sync._sync_loop(db, cfg, stop)
+
+    assert len(posts) == 1, f"5 idle ticks inside one keep-alive window -> 1 post, got {len(posts)}"
+
+
+def test_keepalive_can_be_turned_off_entirely(tmp_path, monkeypatch):
+    """0 = a unit that only ever speaks when it has something to report."""
+    db = _db_with(tmp_path, 0)
+    cfg = _cfg(tmp_path, tbb_sync_interval_seconds=1, tbb_sync_keepalive_seconds=0)
+    monkeypatch.setattr(tbb_sync, "make_session", lambda tok: _DummySession())
+    posts = []
+    monkeypatch.setattr(tbb_sync, "post_batch", lambda *a, **k: posts.append(1) or True)
+
+    stop = threading.Event()
+    ticks = {"n": 0}
+    stop.wait = lambda t: (ticks.__setitem__("n", ticks["n"] + 1), ticks["n"] >= 4)[1]
+    tbb_sync._sync_loop(db, cfg, stop)
+
+    assert posts == [], "an idle unit with keep-alive off should send nothing"
+
+
+class _DummySession:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+    def post(self, *a, **kw):
+        raise AssertionError("post_batch is patched in these tests")

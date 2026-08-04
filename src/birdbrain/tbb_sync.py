@@ -1,5 +1,16 @@
 """TinyBirdBrain → central sync agent.
 
+The **optional** reporting target. A unit's principal consumer is BirdNET-Cloud
+(``birdnetcloud_sync``); this one is for operators who also run their own
+birdbrain, and stays off until someone enrolls the unit from ``/setup``. The two
+are independent — either, both, or neither.
+
+It is also the safer of the two by construction, which is why its failure
+handling looks relaxed next to the cloud bridge's: central upserts on
+``(source_name, started_at, scientific_name)`` and every row carries a stable
+``client_id``, so a resend is deduplicated rather than doubled. The cloud API
+offers neither, so it has to be paranoid about its high-water mark.
+
 On-device inference means we sync *detection rows*, not audio (a row is ~200
 bytes; clips stay local in Phase 2 — only a ``has_clip`` flag goes up). The
 agent batches new ``DetectionRow``s since a persisted high-water mark
@@ -15,15 +26,17 @@ Placement: a background thread in ``tbb-web`` (see tbb-architecture.md §10.1).
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from birdbrain.config import AppConfig
 from birdbrain.logging import get_logger
 from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
+from birdbrain.sync_status import STATUS, jittered
 
 log = get_logger(__name__)
 
@@ -114,12 +127,39 @@ def detections_payload(
     }
 
 
-def post_batch(central_url: str, token: str, payload: dict, *, timeout: float = 30.0) -> bool:
+def make_session(token: str) -> requests.Session:
+    """One connection, reused for the unit's lifetime.
+
+    Without keep-alive every tick pays a fresh TLS handshake — measured on the
+    cloud path at 1.4s of a 1.6s request from a Pi Zero, and roughly 4MB/day
+    here at a 45s interval, which is more than the payload it carries.
+
+    Unlike the cloud bridge this side *could* safely take a urllib3 Retry:
+    central upserts on the natural key and every row carries a stable
+    ``client_id``, so a transparently-retried POST that did reach it is
+    deduplicated rather than doubled. Left off anyway — the tick timer is
+    already the retry, and a retry inside the request would just make a POST
+    block for longer on a unit whose link is flapping.
+    """
+    s = requests.Session()
+    s.headers.update({"Authorization": f"Bearer {token}"})
+    return s
+
+
+def post_batch(
+    central_url: str,
+    token: str,
+    payload: dict,
+    *,
+    timeout: float = 30.0,
+    session: requests.Session | None = None,
+) -> bool:
     """POST one batch. Returns True only on a 2xx ack. Network errors and non-2xx
     return False (caller leaves the high-water mark put and retries next tick)."""
     url = central_url.rstrip("/") + "/ingest/detections"
+    http = session or requests
     try:
-        resp = requests.post(
+        resp = http.post(
             url,
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
@@ -127,14 +167,21 @@ def post_batch(central_url: str, token: str, payload: dict, *, timeout: float = 
         )
     except requests.RequestException as e:
         log.warning("tbb_sync.post_failed", error=str(e)[:200])
+        STATUS.central.failed(str(e))
         return False
     if resp.status_code // 100 != 2:
         log.warning("tbb_sync.rejected", status=resp.status_code, body=resp.text[:200])
+        STATUS.central.failed(f"http {resp.status_code}")
         return False
     return True
 
 
-def sync_once(db: Database, cfg: AppConfig, state: SyncState) -> int:
+def sync_once(
+    db: Database,
+    cfg: AppConfig,
+    state: SyncState,
+    session: requests.Session | None = None,
+) -> int:
     """Drain the backlog in capped batches until empty or a POST fails. Returns
     the number of detections acked this run."""
     assert cfg.tbb_central_url and cfg.tbb_device_token  # guarded by start_sync_agent
@@ -147,27 +194,39 @@ def sync_once(db: Database, cfg: AppConfig, state: SyncState) -> int:
         if not rows:
             break
         payload = detections_payload(cfg.tbb_unit_id, rows, cfg.tbb_timezone, quality)
-        if not post_batch(cfg.tbb_central_url, cfg.tbb_device_token, payload):
+        if not post_batch(
+            cfg.tbb_central_url, cfg.tbb_device_token, payload, session=session
+        ):
             break  # offline / rejected — don't advance; retry next tick
         state.last_synced_id = rows[-1].id  # rows are id-ascending
         state.save()
         sent += len(rows)
+        STATUS.central.succeeded(queue_depth=_backlog(db, state))
         if len(rows) < cfg.tbb_sync_batch_size:
             break  # fully drained
     return sent
 
 
+def _backlog(db: Database, state: SyncState) -> int:
+    with db.session() as s:
+        newest = s.scalar(select(func.max(DetectionRow.id))) or 0
+    return max(0, int(newest) - state.last_synced_id)
+
+
 def _sync_loop(db: Database, cfg: AppConfig, stop_event: threading.Event) -> None:
     state = SyncState.load(cfg.tbb_sync_state_file)
+    session = make_session(cfg.tbb_device_token or "")
     log.info(
         "tbb_sync.start",
         unit=cfg.tbb_unit_id,
         central=cfg.tbb_central_url,
         last_synced_id=state.last_synced_id,
+        keepalive_seconds=cfg.tbb_sync_keepalive_seconds,
     )
+    last_keepalive: float | None = None   # None = due now (see birdnetcloud_sync)
     while True:
         try:
-            n = sync_once(db, cfg, state)
+            n = sync_once(db, cfg, state, session)
             if n:
                 log.info("tbb_sync.flushed", count=n, last_synced_id=state.last_synced_id)
             else:
@@ -178,17 +237,31 @@ def _sync_loop(db: Database, cfg: AppConfig, stop_event: threading.Event) -> Non
                 # It carries the quality snapshot too — a silent or dead mic
                 # produces no detections, which is exactly when central most
                 # needs the measurement that explains the silence.
-                post_batch(
+                #
+                # On its own clock, though. Sending one every tick cost ~2MB/day
+                # on a metered link purely to say nothing had changed; 0 turns
+                # it off entirely for a unit that only reports when it has news.
+                now = time.monotonic()
+                due = cfg.tbb_sync_keepalive_seconds > 0 and (
+                    last_keepalive is None
+                    or now - last_keepalive >= cfg.tbb_sync_keepalive_seconds
+                )
+                if due and post_batch(
                     cfg.tbb_central_url,
                     cfg.tbb_device_token,
                     detections_payload(
                         cfg.tbb_unit_id, [], cfg.tbb_timezone,
                         db.audio_quality_snapshot(cfg.tbb_unit_id),
                     ),
-                )
-        except Exception:
+                    session=session,
+                ):
+                    last_keepalive = now
+                    STATUS.central.succeeded(queue_depth=_backlog(db, state))
+        except Exception as e:
+            STATUS.central.failed(str(e))
             log.exception("tbb_sync.tick_failed")
-        if stop_event.wait(cfg.tbb_sync_interval_seconds):
+        if stop_event.wait(jittered(cfg.tbb_sync_interval_seconds)):
+            session.close()
             return
 
 
@@ -200,7 +273,9 @@ def start_sync_agent(
     useful offline and tests/imports never reach the network."""
     if not (cfg.tbb_sync_enabled and cfg.tbb_central_url and cfg.tbb_device_token):
         log.info("tbb_sync.disabled", enabled=cfg.tbb_sync_enabled)
+        STATUS.central.enabled = False
         return None
+    STATUS.central.enabled = True
     t = threading.Thread(
         target=_sync_loop, args=(db, cfg, stop_event), name="tbb-sync", daemon=True
     )
