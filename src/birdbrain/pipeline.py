@@ -12,7 +12,6 @@ from birdbrain import sandbox
 from birdbrain.audio import AlsaSource, AudioSource, MicSource, RtspSource, YouTubeSource
 from birdbrain.audio.quality import QualityAccumulator, chunk_features
 from birdbrain.audio.source import AudioChunk
-from birdbrain.audio_hash import clip_hash
 from birdbrain.clips import save_chunk
 from birdbrain.config import AppConfig, OcrConfig, SourceConfig
 from birdbrain.detector import BirdNetDetector
@@ -465,6 +464,12 @@ def _consume_stream(
         audio_hash: str | None = None
         if clip_path and should_hash_clips(app, cfg):
             try:
+                # Imported here, not at module scope: birdbrain.audio_hash pulls
+                # in librosa (and with it scipy/numba/llvmlite/soxr). A capture
+                # unit never reaches this branch, so it should never pay for the
+                # import either — see should_hash_clips for the measured cost.
+                from birdbrain.audio_hash import clip_hash  # noqa: PLC0415
+
                 audio_hash = clip_hash(clip_path)
             except Exception as e:
                 slog.warning("audio_hash.failed", clip=clip_path, error=str(e)[:200])
