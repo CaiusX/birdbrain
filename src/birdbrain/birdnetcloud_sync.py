@@ -423,7 +423,13 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
         heartbeat_seconds=cfg.birdnetcloud_heartbeat_seconds,
     )
     auth_warned = False
-    last_heartbeat = 0.0
+    # None = "never beaten, so the first tick is due". NOT 0.0: time.monotonic()
+    # is time since boot on Linux, so `now - 0.0 >= heartbeat_seconds` is really
+    # asking "has this machine been up longer than the heartbeat interval?". A
+    # unit that just rebooted — which the net-watchdog does deliberately — would
+    # stay silent for up to birdnetcloud_heartbeat_seconds (30 min on the field
+    # profile) and read as offline on their dashboard for that whole window.
+    last_heartbeat: float | None = None
     while True:
         try:
             sent, skipped = sync_once(db, cfg, state, token, session)
@@ -440,7 +446,10 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
             # request every minute saying nothing changed — that was ~2MB/day
             # plus a TLS handshake each on metered links.
             now = time.monotonic()
-            if now - last_heartbeat >= cfg.birdnetcloud_heartbeat_seconds:
+            if (
+                last_heartbeat is None
+                or now - last_heartbeat >= cfg.birdnetcloud_heartbeat_seconds
+            ):
                 if post_heartbeat(
                     cfg.birdnetcloud_endpoint, token, db=db, state=state, session=session
                 ):

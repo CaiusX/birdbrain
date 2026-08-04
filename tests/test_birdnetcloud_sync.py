@@ -42,6 +42,16 @@ def _cfg(tmp_path, **kw):
     return AppConfig(**base)
 
 
+class _DummySession:
+    """Stands in for make_session; records that the loop closed it on exit."""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 class _Recorder:
     """Stands in for post_detection; records payloads, can fail on demand."""
 
@@ -209,7 +219,14 @@ def test_sync_once_passes_the_session_through(tmp_path, monkeypatch):
 
 def test_heartbeat_has_its_own_clock(tmp_path, monkeypatch):
     """A field unit polls for detections often but must not spend a request a
-    minute saying nothing changed."""
+    minute saying nothing changed.
+
+    This used to fail whenever the host's uptime was under an hour: the loop
+    seeded ``last_heartbeat = 0.0`` and compared it against ``time.monotonic()``,
+    which is time since boot, so the first beat only fired on a box that had
+    been up longer than the interval. Now the first tick always beats, so the
+    single beat asserted below no longer depends on the machine running it.
+    """
     cfg = _cfg(tmp_path, birdnetcloud_interval_seconds=1,
                birdnetcloud_heartbeat_seconds=3600)
     db = _db_with(tmp_path, [0.9])
@@ -217,12 +234,6 @@ def test_heartbeat_has_its_own_clock(tmp_path, monkeypatch):
 
     beats = []
     monkeypatch.setattr(bnc, "post_heartbeat", lambda *a, **kw: beats.append(1) or True)
-    class _DummySession:
-        closed = False
-
-        def close(self):
-            self.closed = True
-
     dummy = _DummySession()
     monkeypatch.setattr(bnc, "make_session", lambda tok: dummy)
 
@@ -241,3 +252,56 @@ def test_heartbeat_has_its_own_clock(tmp_path, monkeypatch):
     assert ticks["n"] == 4
     assert len(beats) == 1, f"expected 1 heartbeat across 4 polls, got {len(beats)}"
     assert dummy.closed, "session must be closed when the loop exits"
+
+
+def test_first_heartbeat_fires_immediately_after_a_reboot(tmp_path, monkeypatch):
+    """time.monotonic() is time since boot, so seeding last_heartbeat to 0.0
+    silently meant 'beat only if the box has been up longer than the interval'.
+    A unit the net-watchdog just rebooted would read offline on their dashboard
+    for a full heartbeat window. Pin the fresh-boot clock explicitly."""
+    cfg = _cfg(tmp_path, birdnetcloud_interval_seconds=1,
+               birdnetcloud_heartbeat_seconds=1800)
+    db = _db_with(tmp_path, [0.9])
+    bnc.seed_state(db, cfg.birdnetcloud_state_file)
+
+    # 12 s of uptime — far below the 1800 s heartbeat interval.
+    monkeypatch.setattr(bnc.time, "monotonic", lambda: 12.0)
+    beats = []
+    monkeypatch.setattr(bnc, "post_heartbeat", lambda *a, **kw: beats.append(1) or True)
+    monkeypatch.setattr(bnc, "make_session", lambda tok: _DummySession())
+
+    stop = threading.Event()
+    ticks = {"n": 0}
+    stop.wait = lambda timeout: (ticks.__setitem__("n", ticks["n"] + 1), ticks["n"] >= 2)[1]
+    bnc._loop(db, cfg, "tok", stop)
+
+    assert len(beats) == 1, "a freshly-booted unit must beat on its first tick"
+
+
+def test_heartbeat_interval_is_respected_after_the_first_beat(tmp_path, monkeypatch):
+    """The flip side: having beaten once, don't beat again until the interval
+    has genuinely elapsed. Clock is pinned so this no longer depends on the
+    host's uptime the way the original test silently did."""
+    cfg = _cfg(tmp_path, birdnetcloud_interval_seconds=1,
+               birdnetcloud_heartbeat_seconds=1800)
+    db = _db_with(tmp_path, [0.9])
+    bnc.seed_state(db, cfg.birdnetcloud_state_file)
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(bnc.time, "monotonic", lambda: clock["t"])
+    beats = []
+    monkeypatch.setattr(bnc, "post_heartbeat", lambda *a, **kw: beats.append(1) or True)
+    monkeypatch.setattr(bnc, "make_session", lambda tok: _DummySession())
+
+    stop = threading.Event()
+    ticks = {"n": 0}
+
+    def counting_wait(timeout):
+        ticks["n"] += 1
+        clock["t"] += 60.0          # a minute per tick, well inside the interval
+        return ticks["n"] >= 4
+    stop.wait = counting_wait
+    bnc._loop(db, cfg, "tok", stop)
+
+    assert ticks["n"] == 4
+    assert len(beats) == 1, f"4 ticks x 60s inside a 1800s interval -> 1 beat, got {len(beats)}"
