@@ -38,9 +38,12 @@
     display: flex; align-items: center; gap: .7rem; padding: .55rem 0;
     border-bottom: 1px solid #1d242c;
   }
-  li.det .spec {
-    width: 120px; height: 34px; border-radius: 4px; object-fit: cover;
-    background: #0c0f13; flex: none;
+  li.det .clip { width: 180px; height: 32px; flex: none; }
+  /* Narrow phones: let the player drop under the name rather than squeeze the
+     species out. The feed is read one-handed in the field. */
+  @media (max-width: 30rem) {
+    li.det { flex-wrap: wrap; }
+    li.det .clip { width: 100%; order: 3; }
   }
   li.det .meta { flex: 1 1 auto; min-width: 0; }
   li.det .name { font-weight: 600; }

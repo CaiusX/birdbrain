@@ -6439,8 +6439,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     def _unit_base_url(source: str) -> str | None:
         """Base http://host:port for a push-fed unit, derived from its configured
-        live-audio URL (the unit serves /clips and /spectrograms on the same
-        port). None if the source has no live-audio URL set."""
+        live-audio URL (the unit serves /clips on the same port). None if the
+        source has no live-audio URL set.
+
+        Clips only — units no longer render spectrograms; central regenerates
+        them from the clip it pulls through here."""
         u = db.get_setting(f"live_audio_url:{source}")
         if not u:
             return None

@@ -48,10 +48,12 @@ log = get_logger(__name__)
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
-# Inline spectrogram thumbnail (small only — no popout/large on the unit).
-SPEC_SIZE = "240x60"
-SPEC_FILTER = "legend=0:scale=log:fscale=log:start=80:stop=12000"
-SPEC_PALETTE = "fire"
+# No spectrograms on a unit. The feed used to render one PNG per detection via
+# a per-request ffmpeg fork, cached onto the SD card. That cost CPU and card
+# writes on the smallest machine in the fleet to produce an image central can
+# regenerate for free from the clip it already syncs — and with 60 lazy <img>
+# tags and no concurrency limit it was failing ~1 request in 5 on a Zero 2 W.
+# The feed serves the audio itself instead; see _tbb_feed.html.
 
 FEED_LIMIT = 60
 # A pipeline worker that has heartbeat within this is "listening". Generous vs.
@@ -385,38 +387,6 @@ def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (r
                 503, "Microphone capture failed — check the device selection and `arecord -l`."
             )
         return Response(content=proc.stdout, media_type="audio/ogg")
-
-    @app.get("/spectrograms/{detection_id}.png")
-    def spectrogram(detection_id: int) -> Response:
-        """Lazy PNG spectrogram thumbnail, cached next to the clip."""
-        with db.session() as s:
-            row = s.get(DetectionRow, detection_id)
-            if row is None or row.clip_path is None:
-                raise HTTPException(404, "no clip for this detection")
-            clip = Path(row.clip_path).resolve()
-        try:
-            clip.relative_to(clips_root)
-        except ValueError as e:
-            raise HTTPException(403, "clip outside allowed root") from e
-        if not clip.is_file():
-            raise HTTPException(404, "clip file missing")
-        png = clip.parent / f"{clip.stem}.{SPEC_PALETTE}.png"
-        if not png.exists():
-            try:
-                subprocess.run(
-                    [
-                        "ffmpeg", "-y", "-loglevel", "error", "-i", str(clip),
-                        "-lavfi",
-                        f"showspectrumpic=s={SPEC_SIZE}:{SPEC_FILTER}:color={SPEC_PALETTE}",
-                        str(png),
-                    ],
-                    check=True, capture_output=True, timeout=15,
-                )
-            except (
-                subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError
-            ) as e:
-                raise HTTPException(500, f"failed to render spectrogram: {e}") from e
-        return FileResponse(png, media_type="image/png")
 
     @app.get("/clips/{detection_id}")
     def clip(detection_id: int) -> FileResponse:

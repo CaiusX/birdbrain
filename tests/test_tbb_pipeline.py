@@ -9,7 +9,7 @@ from birdbrain.config import AppConfig, SourceConfig
 from birdbrain.detector.birdnet import NON_BIRD_CLASSES, Detection
 from birdbrain.pipeline import build_source, should_hash_clips
 from birdbrain.storage import Database, DetectionRow
-from birdbrain.tbb import prune_clips, tbb_source_config
+from birdbrain.tbb import prune_clips, sweep_orphan_spectrograms, tbb_source_config
 
 
 def test_tbb_source_config_is_a_single_mic_source():
@@ -68,9 +68,17 @@ def test_prune_clips_deletes_old_keeps_recent(tmp_path):
     new_clip = tmp_path / "new.ogg"
     old_clip.write_bytes(b"clip")
     new_clip.write_bytes(b"clip")
-    # A cached spectrogram PNG next to the old clip should go too.
-    old_png = old_clip.with_suffix(".png")
-    old_png.write_bytes(b"png")
+    # Every cached spectrogram variant next to the old clip should go too.
+    # ".fire.png" is the one that actually leaked: the pruner used to look for
+    # "<stem>.png" and "<stem>.large.png" while the web app wrote "<stem>.fire.png",
+    # so the cache grew forever while its clips were deleted.
+    old_pngs = [
+        old_clip.with_suffix(".png"),
+        old_clip.parent / f"{old_clip.stem}.large.png",
+        old_clip.parent / f"{old_clip.stem}.fire.png",
+    ]
+    for png in old_pngs:
+        png.write_bytes(b"png")
 
     now = datetime.now(UTC)
     db.insert_detections([_det("Old", now - timedelta(days=30))], clip_path=str(old_clip))
@@ -80,7 +88,8 @@ def test_prune_clips_deletes_old_keeps_recent(tmp_path):
 
     assert deleted == 1
     assert not old_clip.exists()
-    assert not old_png.exists()
+    for png in old_pngs:
+        assert not png.exists(), f"{png.name} outlived its clip"
     assert new_clip.exists()
 
     with db.session() as s:
@@ -100,8 +109,10 @@ def test_prune_clips_noop_when_nothing_old(tmp_path):
 
 
 # --- clip fingerprinting is central-only ------------------------------------
-# The hash catches YouTube ad/highlight replays; a live mic cannot replay, and
-# computing it costs a Zero 2 W ~64MB RSS (librosa.resample pulls in numba).
+# The hash catches YouTube ad/highlight replays, which a live mic cannot
+# produce. Skipping it saves an OGG decode + resample + mel-spectrogram per
+# detection. (The memory win came separately, from dropping librosa out of
+# audio/quality.py — see test_audio_quality.py.)
 
 def test_a_mic_unit_does_not_fingerprint_its_clips():
     app = AppConfig()  # default audio_hash_enabled=True — the mic check alone must win
@@ -125,3 +136,33 @@ def test_the_flag_switches_off_a_non_mic_source_too():
     off = AppConfig(audio_hash_enabled=False)
     yt = SourceConfig(name="Tembe", kind="youtube", url="https://example.test/x")
     assert should_hash_clips(off, yt) is False
+
+
+def test_sweep_orphan_spectrograms_clears_the_leaked_cache(tmp_path):
+    """PNGs whose clip was already pruned are unreachable by prune_clips — that
+    row's clip_path is NULL, so nothing points at them. They need their own
+    sweep or they stay on the card forever."""
+    clips = tmp_path / "clips" / "tbb-test" / "2026-08-01"
+    clips.mkdir(parents=True)
+    orphan = clips / "20260801T100000_000000Z.fire.png"
+    orphan.write_bytes(b"x" * 4096)
+    (clips / "nested").mkdir()
+    (clips / "nested" / "another.png").write_bytes(b"y" * 2048)
+    keep = clips / "20260801T100000_000000Z.ogg"
+    keep.write_bytes(b"audio")
+
+    files, freed = sweep_orphan_spectrograms(tmp_path / "clips")
+
+    assert files == 2
+    assert freed == 4096 + 2048
+    assert not orphan.exists()
+    assert keep.exists(), "the sweep must never touch audio"
+
+
+def test_sweep_orphan_spectrograms_is_idempotent_and_safe_when_empty(tmp_path):
+    """Runs on every pipeline start, so a second pass must be a cheap no-op —
+    and a unit with no clips_dir yet must not crash the prune thread."""
+    clips = tmp_path / "clips"
+    clips.mkdir()
+    assert sweep_orphan_spectrograms(clips) == (0, 0)
+    assert sweep_orphan_spectrograms(tmp_path / "does-not-exist") == (0, 0)

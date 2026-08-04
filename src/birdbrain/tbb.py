@@ -76,9 +76,14 @@ def prune_clips(db: Database, retention_days: int) -> int:
             if p.is_file():
                 p.unlink()
                 deleted += 1
-                for png in (p.with_suffix(".png"), p.parent / f"{p.stem}.large.png"):
-                    if png.is_file():
-                        png.unlink()
+                # Glob rather than name the variants: the old code looked for
+                # "<stem>.png" and "<stem>.large.png" while the web app wrote
+                # "<stem>.fire.png", so every cached spectrogram outlived the
+                # clip it described and the cache grew without bound. Units no
+                # longer render any, but a glob also cleans up whatever a future
+                # (or older) build leaves behind.
+                for png in p.parent.glob(f"{p.stem}*.png"):
+                    png.unlink(missing_ok=True)
             for det_id in ids:
                 det = s.get(DetectionRow, det_id)
                 if det is not None:
@@ -86,8 +91,36 @@ def prune_clips(db: Database, retention_days: int) -> int:
     return deleted
 
 
+def sweep_orphan_spectrograms(clips_dir: Path) -> tuple[int, int]:
+    """Delete every cached spectrogram PNG under ``clips_dir``. Returns
+    (files, bytes).
+
+    A unit renders no spectrograms — central regenerates them from the synced
+    clip — so any PNG here is left over from a build that did. They cannot be
+    reached by :func:`prune_clips`, which only touches files belonging to a row
+    it is expiring: once a clip was pruned its ``clip_path`` went NULL, so its
+    orphaned PNG was unreferenced and immortal. Runs once at startup rather than
+    every tick, since after the first pass there is nothing left to find.
+    """
+    files = size = 0
+    for png in clips_dir.rglob("*.png"):
+        try:
+            size += png.stat().st_size
+            png.unlink()
+            files += 1
+        except OSError:
+            continue
+    return files, size
+
+
 def _prune_loop(db: Database, app: AppConfig, stop_event: threading.Event) -> None:
     """Background retention sweep: prune once on start, then every tick until stop."""
+    try:
+        files, freed = sweep_orphan_spectrograms(app.clips_dir)
+        if files:
+            log.info("tbb.spectrograms_swept", files=files, bytes_freed=freed)
+    except Exception:
+        log.exception("tbb.spectrogram_sweep_failed")
     while True:
         try:
             n = prune_clips(db, app.tbb_clip_retention_days)

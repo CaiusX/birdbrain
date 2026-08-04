@@ -223,3 +223,68 @@ def test_update_env_file_replaces_and_appends(tmp_path):
     assert "BIRDBRAIN_TBB_MIC_DEVICE=plughw:0,0" in text  # appended
     assert "BIRDBRAIN_LOG_LEVEL=INFO" in text  # untouched
     assert "# unit config" in text  # comment preserved
+
+
+# --- no spectrograms on a unit; the feed serves the audio itself -------------
+
+def _app_with_clip(tmp_path):
+    """App whose one detection has a real clip file, so has_clip is True."""
+    clips = tmp_path / "clips"
+    clips.mkdir(parents=True, exist_ok=True)
+    clip = clips / "det.ogg"
+    clip.write_bytes(b"not really ogg, but a file")
+    cfg = AppConfig(
+        db_url=f"sqlite:///{tmp_path / 'web.sqlite'}",
+        clips_dir=clips,
+        tbb_unit_id="tbb-test",
+        tbb_timezone="UTC",
+    )
+    db = Database(cfg.db_url)
+    db.insert_detections([
+        Detection(
+            source_name="tbb-test",
+            started_at=datetime.now(UTC),
+            duration_s=3.0,
+            scientific_name="Pycnonotus tricolor",
+            common_name="Dark-capped Bulbul",
+            confidence=0.83,
+        )
+    ], clip_path=str(clip))
+    return create_tbb_app(cfg)
+
+
+def test_spectrogram_route_is_gone(tmp_path):
+    """Rendering these cost a per-request ffmpeg fork and an SD write on the
+    smallest box in the fleet, to make something central regenerates for free."""
+    client = TestClient(_app_with_clip(tmp_path))
+    assert client.get("/spectrograms/1.png").status_code == 404
+
+
+def test_feed_offers_playable_audio_instead_of_an_image(tmp_path):
+    client = TestClient(_app_with_clip(tmp_path))
+    feed = client.get("/feed")
+    assert feed.status_code == 200
+    assert "/clips/1" in feed.text
+    # preload="none" is load-bearing: the fragment re-renders every 5s, so an
+    # eager preload would re-fetch every clip in the feed on every poll.
+    assert 'preload="none"' in feed.text
+    assert "/spectrograms/" not in feed.text
+    assert 'class="spec"' not in feed.text
+
+
+def test_feed_omits_the_player_when_the_clip_was_pruned(tmp_path):
+    """clip_path goes NULL at retention, so the row survives without audio —
+    the feed must not offer a dead play button."""
+    client = TestClient(_make_app(tmp_path))     # detection has no clip
+    feed = client.get("/feed")
+    assert feed.status_code == 200
+    assert "Dark-capped Bulbul" in feed.text
+    assert "<audio" not in feed.text
+
+
+def test_clip_route_still_serves_audio(tmp_path):
+    """Central pulls unit clips from here, so this must keep working."""
+    client = TestClient(_app_with_clip(tmp_path))
+    r = client.get("/clips/1")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("audio/")

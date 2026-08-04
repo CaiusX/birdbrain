@@ -14,7 +14,9 @@
 {% for d in detections %}
   <li class="det">
     {% if d.has_clip %}
-      <img class="spec" src="/spectrograms/{{ d.id }}.png" alt="spectrogram" loading="lazy">
+      {# preload="none" is load-bearing: this fragment re-renders every 5s, and
+         any eager preload would re-fetch every clip in the feed each time. #}
+      <audio class="clip" controls preload="none" src="/clips/{{ d.id }}"></audio>
     {% endif %}
     <div class="meta">
       <div class="name">{{ d.common_name }}</div>
