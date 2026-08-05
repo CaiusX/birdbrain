@@ -38,7 +38,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 
 from birdbrain.birdnetcloud_sync import start_cloud_agent
-from birdbrain.config import AppConfig
+from birdbrain.config_core import UnitConfig
 from birdbrain.logging import get_logger
 from birdbrain.storage import Database, DetectionRow, WorkerHeartbeatRow
 from birdbrain.sync_status import STATUS
@@ -63,7 +63,7 @@ FEED_LIMIT = 60
 HEARTBEAT_FRESH_FLOOR_S = 90.0
 
 
-def heartbeat_fresh_s(cfg: AppConfig) -> float:
+def heartbeat_fresh_s(cfg: UnitConfig) -> float:
     """How stale a heartbeat may be before the unit stops reading as listening.
 
     Three beats of slack, never less than the 90 s floor: one missed beat is a
@@ -122,8 +122,8 @@ def update_env_file(path: Path, updates: dict[str, str]) -> None:
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
-def create_tbb_app(cfg: AppConfig | None = None) -> FastAPI:  # noqa: PLR0915 (route closures)
-    cfg = cfg or AppConfig()
+def create_tbb_app(cfg: UnitConfig | None = None) -> FastAPI:  # noqa: PLR0915 (route closures)
+    cfg = cfg or UnitConfig()
     db = Database(cfg.db_url)
     clips_root = cfg.clips_dir.resolve()
     try:

@@ -44,7 +44,7 @@ from pathlib import Path
 import requests
 from sqlalchemy import func, select
 
-from birdbrain.config import AppConfig
+from birdbrain.config_core import UnitConfig
 from birdbrain.logging import get_logger
 from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.sync_status import STATUS, jittered
@@ -143,7 +143,7 @@ class CloudState:
         )
 
 
-def resolve_token(cfg: AppConfig) -> str | None:
+def resolve_token(cfg: UnitConfig) -> str | None:
     """Inline token wins; otherwise read the file. A file keeps the secret out
     of the unit's .env and out of shell history."""
     if cfg.birdnetcloud_token:
@@ -206,7 +206,7 @@ def fetch_batch(
         )
 
 
-def detection_payload(row: DetectionRow, cfg: AppConfig) -> dict:
+def detection_payload(row: DetectionRow, cfg: UnitConfig) -> dict:
     """Map a birdbrain row onto their detection shape."""
     started = row.started_at
     if started is not None and started.tzinfo is None:
@@ -468,7 +468,7 @@ def post_heartbeat(
 
 def sync_once(
     db: Database,
-    cfg: AppConfig,
+    cfg: UnitConfig,
     state: CloudState,
     token: str,
     session: requests.Session | None = None,
@@ -536,7 +536,7 @@ def _decided_not_sent(db: Database, start: int, end: int, sent: int) -> int:
     return max(0, _count_between(db, start, end) - sent)
 
 
-def _should_upload_clip(cfg: AppConfig, state: CloudState, row: DetectionRow) -> bool:
+def _should_upload_clip(cfg: UnitConfig, state: CloudState, row: DetectionRow) -> bool:
     """Whether to attach audio to this detection.
 
     ``birdnetcloud_upload_clips`` is the master switch; the policy refines it.
@@ -573,7 +573,7 @@ def _count_between(db: Database, low: int, high: int) -> int:
 
 def _retry_pending_clips(
     db: Database,
-    cfg: AppConfig,
+    cfg: UnitConfig,
     state: CloudState,
     token: str,
     session: requests.Session | None = None,
@@ -651,7 +651,7 @@ def resolve_state(db: Database, path: Path) -> CloudState | None:
     return None
 
 
-def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event) -> None:
+def _loop(db: Database, cfg: UnitConfig, token: str, stop_event: threading.Event) -> None:
     state = resolve_state(db, cfg.birdnetcloud_state_file)
     if state is None:
         # Unreadable state — refuse rather than silently skip the backlog. Say
@@ -726,7 +726,7 @@ def _loop(db: Database, cfg: AppConfig, token: str, stop_event: threading.Event)
 
 
 def start_cloud_agent(
-    db: Database, cfg: AppConfig, stop_event: threading.Event
+    db: Database, cfg: UnitConfig, stop_event: threading.Event
 ) -> threading.Thread | None:
     """Start the bridge iff it is configured. Returns None when disabled, so a
     unit without a token is completely unaffected — this matters because every

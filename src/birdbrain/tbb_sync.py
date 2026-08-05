@@ -32,7 +32,7 @@ from pathlib import Path
 import requests
 from sqlalchemy import func, select
 
-from birdbrain.config import AppConfig
+from birdbrain.config_core import UnitConfig
 from birdbrain.logging import get_logger
 from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
@@ -194,7 +194,7 @@ def post_batch(
 
 def sync_once(
     db: Database,
-    cfg: AppConfig,
+    cfg: UnitConfig,
     state: SyncState,
     session: requests.Session | None = None,
 ) -> int:
@@ -229,7 +229,7 @@ def _backlog(db: Database, state: SyncState) -> int:
     return max(0, int(newest) - state.last_synced_id)
 
 
-def _sync_loop(db: Database, cfg: AppConfig, stop_event: threading.Event) -> None:
+def _sync_loop(db: Database, cfg: UnitConfig, stop_event: threading.Event) -> None:
     state = SyncState.load(cfg.tbb_sync_state_file)
     session = make_session(cfg.tbb_device_token or "")
     log.info(
@@ -282,7 +282,7 @@ def _sync_loop(db: Database, cfg: AppConfig, stop_event: threading.Event) -> Non
 
 
 def start_sync_agent(
-    db: Database, cfg: AppConfig, stop_event: threading.Event
+    db: Database, cfg: UnitConfig, stop_event: threading.Event
 ) -> threading.Thread | None:
     """Start the background sync thread iff sync is configured. Returns None
     (and does nothing) when disabled / unconfigured — so the unit is fully

@@ -38,7 +38,7 @@ import numpy as np
 from birdbrain.audio.quality import QualityAccumulator, chunk_features
 from birdbrain.audio.source import AudioChunk
 from birdbrain.clips import save_chunk
-from birdbrain.config import AppConfig, SourceConfig
+from birdbrain.config_core import SourceConfig, UnitConfig
 from birdbrain.detector import BirdNetDetector
 from birdbrain.logging import get_logger
 from birdbrain.storage import Database
@@ -61,7 +61,7 @@ QUALITY_SAMPLE_RETENTION_DAYS = 7
 
 def run_capture(
     cfg: SourceConfig,
-    app: AppConfig,
+    app: UnitConfig,
     detector: BirdNetDetector,
     db: Database,
     source,
@@ -113,7 +113,7 @@ def _safely(slog, event: str, fn, *args) -> None:
 def _consume(
     source,
     cfg: SourceConfig,
-    app: AppConfig,
+    app: UnitConfig,
     detector: BirdNetDetector,
     db: Database,
     slog,
@@ -210,7 +210,7 @@ def _consume(
 def _quality_tick(
     db: Database,
     cfg: SourceConfig,
-    app: AppConfig,
+    app: UnitConfig,
     quality: QualityAccumulator,
     slog,
     now: float,
@@ -261,7 +261,7 @@ def _snapshot(db: Database, cfg: SourceConfig, quality: QualityAccumulator, slog
         return None
 
 
-def _save_clip(chunk: AudioChunk, prev_samples: np.ndarray | None, app: AppConfig) -> str:
+def _save_clip(chunk: AudioChunk, prev_samples: np.ndarray | None, app: UnitConfig) -> str:
     """Write a 6 s clip: the previous chunk as pre-roll plus this one.
 
     The filename's timestamp is shifted back by the pre-roll so the file names

@@ -21,7 +21,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from birdbrain.audio.mic import MicSource
-from birdbrain.config import AppConfig, SourceConfig
+from birdbrain.config_core import SourceConfig, UnitConfig
 from birdbrain.detector import BirdNetDetector
 from birdbrain.logging import get_logger
 from birdbrain.storage import Database, DetectionRow
@@ -30,7 +30,7 @@ from birdbrain.tbb_capture import run_capture
 log = get_logger(__name__)
 
 
-def tbb_source_config(app: AppConfig) -> SourceConfig:
+def tbb_source_config(app: UnitConfig) -> SourceConfig:
     """Build the single mic ``SourceConfig`` a unit runs from its tbb_* settings."""
     return SourceConfig(
         name=app.tbb_unit_id,
@@ -114,7 +114,7 @@ def sweep_orphan_spectrograms(clips_dir: Path) -> tuple[int, int]:
     return files, size
 
 
-def _prune_loop(db: Database, app: AppConfig, stop_event: threading.Event) -> None:
+def _prune_loop(db: Database, app: UnitConfig, stop_event: threading.Event) -> None:
     """Background retention sweep: prune once on start, then every tick until stop."""
     try:
         files, freed = sweep_orphan_spectrograms(app.clips_dir)
@@ -133,7 +133,7 @@ def _prune_loop(db: Database, app: AppConfig, stop_event: threading.Event) -> No
             return
 
 
-def run_tbb(app: AppConfig) -> None:
+def run_tbb(app: UnitConfig) -> None:
     """Run the unit's mic → detector → SQLite + clips loop until signalled.
 
     Uses the unit's own capture loop (``tbb_capture``) rather than central's
