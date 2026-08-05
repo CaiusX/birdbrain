@@ -8,106 +8,31 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
 
-from pydantic import BaseModel, Field
+# Shared model types live with the unit — SourceConfig is what a capture
+# worker is handed, so it belongs on the side that must build standalone.
+# Re-exported here because callers already import them from this module, and
+# a second definition would give central a SourceConfig that is not the one
+# the capture loop type-checks against.
+from birdbrain.config_core import (
+    DEFAULT_DB_URL,
+    LEGACY_DB_PATH,
+    OcrConfig,
+    SourceConfig,
+    UnitConfig,
+    resolve_db_url,
+)
 
-from birdbrain.config_core import UnitConfig
-
-
-class OcrConfig(BaseModel):
-    """Per-source OCR settings for site auto-detection."""
-
-    enabled: bool = False
-    # How often to grab a frame and run OCR.
-    every_seconds: int = 30
-    # Optional [x, y, w, h] crop in pixels of the frame, where the camera caption
-    # appears. Tighter crops are faster and more accurate. None = OCR full frame.
-    crop: tuple[int, int, int, int] | None = None
-    # Minimum number of consecutive matches against the same site before the
-    # resolver promotes it to "current". Guards against transient OCR misreads.
-    confirm_count: int = 1
-
-
-class SourceConfig(BaseModel):
-    name: str
-    # "device" = pi's AlsaSource, "mic" = TBB's MicSource — both capture local
-    # audio (kept separate during the tbb->pi merge; unify later). url is unused
-    # by these but stays required so the youtube/rtsp path is unchanged.
-    kind: Literal["youtube", "rtsp", "device", "mic"]
-    url: str
-    # ALSA capture device for the "mic" kind (e.g. "plughw:1,0"). Ignored by the
-    # youtube/rtsp kinds. Lives here so a MicSource's config travels with it.
-    device: str = "plughw:1,0"
-    # Drop BirdNET's non-bird noise classes (Engine, Dog, Siren, …). Off by
-    # default so central is unchanged; the TBB profile turns it on.
-    exclude_non_bird: bool = False
-    lat: float | None = None
-    lon: float | None = None
-    min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-    # Week of year (1-48) used by BirdNET's location/time filter. None = current week.
-    week: int | None = None
-    # If true, the source rotates between cameras and the pipeline should
-    # consult the SiteResolver per-detection to override lat/lon and record
-    # the active site name. False = static lat/lon, no resolver.
-    multisite: bool = False
-    ocr: OcrConfig = Field(default_factory=OcrConfig)
-    # YouTube only. Passed through to yt-dlp's --cookies-from-browser; needed
-    # when YouTube's anti-bot checks demand auth ("Sign in to confirm you're
-    # not a bot"). Common values: "chrome", "firefox", "edge", "brave".
-    # Closing the browser before the pipeline starts avoids cookie-db locks.
-    # NOTE: Chrome 127+ uses App-Bound (DPAPI) cookie encryption which yt-dlp
-    # may fail to decrypt — use cookies_file in that case.
-    cookies_from_browser: str | None = None
-    # Path to a Netscape-format cookies.txt. Export once with a browser
-    # extension like "Get cookies.txt LOCALLY" (filter to youtube.com) and
-    # point at the file. More robust than cookies_from_browser on Windows.
-    cookies_file: Path | None = None
-    # IANA timezone for display (e.g. "Africa/Johannesburg"). The DB always
-    # stores UTC; the dashboard converts using this when rendering rows.
-    timezone: str = "UTC"
-
-
-# Transitional: the pre-2026-07 name of this project. See
-# settings_customise_sources below and resolve_db_url.
-LEGACY_ENV_PREFIX = "AFRICAM_"
-LEGACY_DB_PATH = Path("data/africam.sqlite")
-DEFAULT_DB_URL = "sqlite:///data/birdbrain.sqlite"
-
-
-def _sqlite_dir(db_url: str) -> Path | None:
-    """Directory holding an on-disk SQLite database, or None for anything else
-    (``:memory:``, postgres, …). Used to anchor sibling state files."""
-    prefix = "sqlite:///"
-    if not db_url.startswith(prefix):
-        return None
-    raw = db_url[len(prefix):]
-    if not raw or raw.startswith(":memory:"):
-        return None
-    return Path(raw).expanduser().resolve().parent
-
-
-def resolve_db_url(db_url: str) -> str:
-    """Fall back to the pre-rename database if the new one is not there yet.
-
-    Without this the rename's worst failure mode is silent: pointing at a
-    filename that does not exist makes SQLite create a fresh empty database
-    next to 592 MB of real detections, and the site comes up looking merely
-    "quiet" rather than broken. Only applies to on-disk sqlite URLs.
-    """
-    prefix = "sqlite:///"
-    if db_url != DEFAULT_DB_URL or not db_url.startswith(prefix):
-        return db_url
-    new_path = Path(db_url[len(prefix):])
-    if new_path.exists() or not LEGACY_DB_PATH.exists():
-        return db_url
-    print(
-        f"[config] {new_path} not found; using pre-rename database "
-        f"{LEGACY_DB_PATH}. Rename it to complete the migration.",
-        flush=True,
-    )
-    return f"{prefix}{LEGACY_DB_PATH}"
-
+__all__ = [
+    "DEFAULT_DB_URL",
+    "LEGACY_DB_PATH",
+    "AppConfig",
+    "OcrConfig",
+    "SourceConfig",
+    "UnitConfig",
+    "load_sources",
+    "resolve_db_url",
+]
 
 
 class AppConfig(UnitConfig):
