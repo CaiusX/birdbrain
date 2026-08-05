@@ -37,6 +37,7 @@ from birdbrain.logging import get_logger
 from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
 from birdbrain.sync_status import STATUS, jittered
+from birdbrain.wire import SCHEMA_CONFLICT_STATUS, SCHEMA_VERSION
 
 log = get_logger(__name__)
 
@@ -108,7 +109,7 @@ def detections_payload(
     batch; omitted (None) before the accumulator has warmed up."""
     return {
         "unit": unit_id,
-        "schema": 1,
+        "schema": SCHEMA_VERSION,
         "timezone": timezone,
         "audio_quality": audio_quality,
         "detections": [
@@ -169,10 +170,25 @@ def post_batch(
         log.warning("tbb_sync.post_failed", error=str(e)[:200])
         STATUS.central.failed(str(e))
         return False
+    if resp.status_code == SCHEMA_CONFLICT_STATUS:
+        # Central cannot parse this wire version. Unlike a network failure this
+        # will not clear on its own — every retry costs a request and produces
+        # the identical answer — so say so where a person will see it rather
+        # than looping quietly until someone wonders why the backlog is growing.
+        log.error(
+            "tbb_sync.schema_rejected",
+            status=resp.status_code, body=resp.text[:200], sent_schema=SCHEMA_VERSION,
+            action="central and this unit disagree about the wire format; "
+                   "update whichever is older",
+        )
+        STATUS.central.block(f"wire schema {SCHEMA_VERSION} rejected by central")
+        return False
     if resp.status_code // 100 != 2:
         log.warning("tbb_sync.rejected", status=resp.status_code, body=resp.text[:200])
         STATUS.central.failed(f"http {resp.status_code}")
         return False
+    # A previously-blocked unit recovers on its own once central is updated.
+    STATUS.central.blocked = None
     return True
 
 

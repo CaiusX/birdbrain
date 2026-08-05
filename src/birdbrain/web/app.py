@@ -116,7 +116,14 @@ from birdbrain import weather as weather_module
 from birdbrain.config import AppConfig, SourceConfig, load_sources
 from birdbrain.enroll import EnrollBody, enroll
 from birdbrain.host import host_metrics
-from birdbrain.ingest import IngestBody, hash_token, ingest_batch
+from birdbrain.ingest import (
+    SCHEMA_CONFLICT_STATUS,
+    SUPPORTED_SCHEMAS,
+    IngestBody,
+    UnsupportedSchemaError,
+    hash_token,
+    ingest_batch,
+)
 from birdbrain.site_resolver import state_to_resolved
 from birdbrain.sites import Site, load_sites
 from birdbrain.storage.db import ALL_SITES_SENTINEL
@@ -6627,6 +6634,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(429, "rate limit exceeded")
         try:
             return ingest_batch(db, device, body)
+        except UnsupportedSchemaError as e:
+            # 409, not 400. A unit must be able to tell "you and I disagree
+            # about the format" from "that payload was malformed": the first is
+            # permanent until somebody updates one side, so retrying is
+            # pointless and the unit stops and says so instead (tbb_sync).
+            log.warning(
+                "ingest.unsupported_schema", unit=device.unit_id, got=e.got,
+                supported=sorted(SUPPORTED_SCHEMAS),
+            )
+            raise HTTPException(SCHEMA_CONFLICT_STATUS, str(e)) from e
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 

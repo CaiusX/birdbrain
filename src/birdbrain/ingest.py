@@ -12,13 +12,40 @@ This module holds the pure validation + upsert logic; the FastAPI route in
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-from pydantic import BaseModel, Field
 
 from birdbrain.logging import get_logger
 from birdbrain.storage import Database, DeviceRow
+from birdbrain.wire import (
+    SCHEMA_CONFLICT_STATUS,
+    SUPPORTED_SCHEMAS,
+    UnsupportedSchemaError,
+    WireAudioQuality,
+    WireBatch,
+    WireDetection,
+    check_schema,
+)
+
+# The wire format is the contract now that a unit builds from its own
+# repository; see birdbrain.wire. These aliases keep the central-side names
+# that web/app.py and the tests already use.
+IngestBody = WireBatch
+IngestDetection = WireDetection
+IngestAudioQuality = WireAudioQuality
+
+# Re-exported so the FastAPI route can answer a schema conflict without adding
+# another import to web/app.py, whose import block already sits after code.
+__all__ = [
+    "SCHEMA_CONFLICT_STATUS",
+    "SUPPORTED_SCHEMAS",
+    "IngestAudioQuality",
+    "IngestBody",
+    "IngestDetection",
+    "UnsupportedSchemaError",
+    "hash_token",
+    "ingest_batch",
+]
 
 log = get_logger(__name__)
 
@@ -26,59 +53,6 @@ log = get_logger(__name__)
 def hash_token(token: str) -> str:
     """SHA-256 hex of a device token. Central stores only this, never the token."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-class IngestDetection(BaseModel):
-    client_id: str | None = None
-    started_at: datetime
-    duration_s: float = 3.0
-    scientific_name: str = Field(min_length=1, max_length=256)
-    common_name: str = Field(default="", max_length=256)
-    confidence: float = Field(ge=0.0, le=1.0)
-    has_clip: bool = False
-
-
-class IngestAudioQuality(BaseModel):
-    """A unit's own audio-quality snapshot, riding along with the batch.
-
-    A push-fed unit keeps its audio locally, so central can never measure the
-    feed itself — the unit's pipeline already computes this from the raw mic
-    stream, so it reports it instead. Field-for-field the dict
-    ``QualityAccumulator.snapshot()`` returns. Every bound is enforced here
-    because this arrives over the public tunnel: a buggy or hostile unit may
-    only write nonsense about *itself*, never a value that breaks the /admin
-    and site-page rendering that reads these columns."""
-
-    score: int = Field(ge=0, le=100)
-    level_score: float = Field(ge=0.0, le=1.0)
-    avail_score: float = Field(ge=0.0, le=1.0)
-    structure_score: float = Field(ge=0.0, le=1.0)
-    # dBFS is negative (0 = full scale). Bounded loosely — silence floors well
-    # below -100 on a quiet mic, and a tiny positive overshoot is possible.
-    level_dbfs: float = Field(ge=-200.0, le=20.0)
-    silence_fraction: float = Field(ge=0.0, le=1.0)
-    clip_fraction: float = Field(ge=0.0, le=1.0)
-    flatness: float = Field(ge=0.0, le=1.0)
-    fraction_good: float = Field(ge=0.0, le=1.0)
-    issue_label: str = Field(default="", max_length=32)
-    # NULL when the feed was too quiet to measure a band edge.
-    band_hz_low: int | None = Field(default=None, ge=0, le=1_000_000)
-    band_hz_high: int | None = Field(default=None, ge=0, le=1_000_000)
-
-
-class IngestBody(BaseModel):
-    # max_length caps the body so a single POST can't be unbounded.
-    model_config = {"populate_by_name": True}
-
-    unit: str = Field(min_length=1, max_length=64)
-    schema_version: int = Field(default=1, alias="schema")
-    # IANA tz the unit reports (e.g. "Africa/Johannesburg"). Used only to set a
-    # new unit's source timezone at first registration; None = leave at UTC.
-    timezone: str | None = Field(default=None, max_length=64)
-    detections: list[IngestDetection] = Field(default_factory=list, max_length=2000)
-    # Optional so an older unit (or one whose accumulator hasn't warmed up yet)
-    # still ingests normally — absent just means "no quality update this tick".
-    audio_quality: IngestAudioQuality | None = None
 
 
 def _valid_tz(name: str | None) -> str:
@@ -95,8 +69,19 @@ def _valid_tz(name: str | None) -> str:
 
 def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
     """Upsert a batch for ``device``. Stamps ``last_seen_at``. Returns a small
-    summary. Raises ValueError if the payload's unit doesn't match the token's
-    unit (a token may only write its own source_name)."""
+    summary.
+
+    Raises :class:`~birdbrain.wire.UnsupportedSchemaError` if the payload declares a
+    wire version this build cannot parse, and ValueError if its unit doesn't
+    match the token's (a token may only write its own source_name).
+
+    The schema is checked before anything else and before anything is written.
+    An unknown version means a field may have changed meaning, and guessing
+    would put wrong rows in the database — worse than the stalled backlog a
+    rejection causes, because the stall is visible on the unit's own page and
+    the wrong data is not.
+    """
+    check_schema(body.schema_version)
     if body.unit != device.unit_id:
         raise ValueError(f"unit {body.unit!r} does not match token unit {device.unit_id!r}")
 
