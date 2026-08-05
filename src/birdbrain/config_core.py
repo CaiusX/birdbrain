@@ -1,0 +1,281 @@
+"""Configuration a TinyBirdBrain capture unit needs — and only that.
+
+Split out of ``config.py`` because a unit reads 35 of the 54 settings central
+defines; the rest configure things it does not run — AI commentary, weather
+backfill, the media cache, multi-source TOML, web sessions and invite codes.
+
+``UnitConfig`` also carries the settings machinery (env prefix, the legacy
+``AFRICAM_*`` fallback, the db-url and state-file validators), because those
+apply on both sides. ``AppConfig`` in ``config.py`` inherits all of it and adds
+central's own, so nothing on that side changes.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+
+class OcrConfig(BaseModel):
+    """Per-source OCR settings for site auto-detection."""
+
+    enabled: bool = False
+    # How often to grab a frame and run OCR.
+    every_seconds: int = 30
+    # Optional [x, y, w, h] crop in pixels of the frame, where the camera caption
+    # appears. Tighter crops are faster and more accurate. None = OCR full frame.
+    crop: tuple[int, int, int, int] | None = None
+    # Minimum number of consecutive matches against the same site before the
+    # resolver promotes it to "current". Guards against transient OCR misreads.
+    confirm_count: int = 1
+
+
+class SourceConfig(BaseModel):
+    name: str
+    # "device" = pi's AlsaSource, "mic" = TBB's MicSource — both capture local
+    # audio (kept separate during the tbb->pi merge; unify later). url is unused
+    # by these but stays required so the youtube/rtsp path is unchanged.
+    kind: Literal["youtube", "rtsp", "device", "mic"]
+    url: str
+    # ALSA capture device for the "mic" kind (e.g. "plughw:1,0"). Ignored by the
+    # youtube/rtsp kinds. Lives here so a MicSource's config travels with it.
+    device: str = "plughw:1,0"
+    # Drop BirdNET's non-bird noise classes (Engine, Dog, Siren, …). Off by
+    # default so central is unchanged; the TBB profile turns it on.
+    exclude_non_bird: bool = False
+    lat: float | None = None
+    lon: float | None = None
+    min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Week of year (1-48) used by BirdNET's location/time filter. None = current week.
+    week: int | None = None
+    # If true, the source rotates between cameras and the pipeline should
+    # consult the SiteResolver per-detection to override lat/lon and record
+    # the active site name. False = static lat/lon, no resolver.
+    multisite: bool = False
+    ocr: OcrConfig = Field(default_factory=OcrConfig)
+    # YouTube only. Passed through to yt-dlp's --cookies-from-browser; needed
+    # when YouTube's anti-bot checks demand auth ("Sign in to confirm you're
+    # not a bot"). Common values: "chrome", "firefox", "edge", "brave".
+    # Closing the browser before the pipeline starts avoids cookie-db locks.
+    # NOTE: Chrome 127+ uses App-Bound (DPAPI) cookie encryption which yt-dlp
+    # may fail to decrypt — use cookies_file in that case.
+    cookies_from_browser: str | None = None
+    # Path to a Netscape-format cookies.txt. Export once with a browser
+    # extension like "Get cookies.txt LOCALLY" (filter to youtube.com) and
+    # point at the file. More robust than cookies_from_browser on Windows.
+    cookies_file: Path | None = None
+    # IANA timezone for display (e.g. "Africa/Johannesburg"). The DB always
+    # stores UTC; the dashboard converts using this when rendering rows.
+    timezone: str = "UTC"
+
+
+# Transitional: the pre-2026-07 name of this project. See
+# settings_customise_sources below and resolve_db_url.
+LEGACY_ENV_PREFIX = "AFRICAM_"
+LEGACY_DB_PATH = Path("data/africam.sqlite")
+DEFAULT_DB_URL = "sqlite:///data/birdbrain.sqlite"
+
+
+def _sqlite_dir(db_url: str) -> Path | None:
+    """Directory holding an on-disk SQLite database, or None for anything else
+    (``:memory:``, postgres, …). Used to anchor sibling state files."""
+    prefix = "sqlite:///"
+    if not db_url.startswith(prefix):
+        return None
+    raw = db_url[len(prefix):]
+    if not raw or raw.startswith(":memory:"):
+        return None
+    return Path(raw).expanduser().resolve().parent
+
+
+def resolve_db_url(db_url: str) -> str:
+    """Fall back to the pre-rename database if the new one is not there yet.
+
+    Without this the rename's worst failure mode is silent: pointing at a
+    filename that does not exist makes SQLite create a fresh empty database
+    next to 592 MB of real detections, and the site comes up looking merely
+    "quiet" rather than broken. Only applies to on-disk sqlite URLs.
+    """
+    prefix = "sqlite:///"
+    if db_url != DEFAULT_DB_URL or not db_url.startswith(prefix):
+        return db_url
+    new_path = Path(db_url[len(prefix):])
+    if new_path.exists() or not LEGACY_DB_PATH.exists():
+        return db_url
+    print(
+        f"[config] {new_path} not found; using pre-rename database "
+        f"{LEGACY_DB_PATH}. Rename it to complete the migration.",
+        flush=True,
+    )
+    return f"{prefix}{LEGACY_DB_PATH}"
+
+
+class UnitConfig(BaseSettings):
+    """Settings a capture unit reads. See config.py for central's."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="BIRDBRAIN_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @model_validator(mode="after")
+    def _apply_legacy_db_fallback(self) -> UnitConfig:
+        self.db_url = resolve_db_url(self.db_url)
+        return self
+
+    @model_validator(mode="after")
+    def _anchor_state_files(self) -> UnitConfig:
+        """Resolve the sync high-water-mark files against the database's
+        directory rather than the current working directory.
+
+        These defaulted to relative paths ("data/…"), so a process started from
+        anywhere but the checkout root looked at a path that did not exist. On
+        the BirdNET-Cloud side that reads as first-run and seeds the mark to the
+        newest row, silently dropping the backlog; on the central side it
+        replays from zero. Both are silent. The db_url is already absolute on a
+        provisioned unit (tbb-finish.sh writes it that way), so anchoring to it
+        makes the state files land next to the database they describe.
+        """
+        root = _sqlite_dir(self.db_url)
+        if root is not None:
+            for field in ("tbb_sync_state_file", "birdnetcloud_state_file"):
+                value = getattr(self, field)
+                if not value.is_absolute():
+                    setattr(self, field, (root / value.name).resolve())
+        return self
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Accept the legacy ``AFRICAM_*`` names at lower priority than
+        ``BIRDBRAIN_*``.
+
+        TRANSITIONAL, and the single most important guard in the rename: a
+        missed variable does not raise, it silently falls back to the field
+        default. A unit whose .env still says AFRICAM_TBB_SYNC_ENABLED would
+        quietly stop syncing rather than crash, and nothing would look wrong.
+        This lets old and new .env files both work while the fleet catches up.
+        """
+        legacy_env = EnvSettingsSource(settings_cls, env_prefix=LEGACY_ENV_PREFIX)
+        legacy_dotenv = DotEnvSettingsSource(
+            settings_cls,
+            env_file=cls.model_config.get("env_file"),
+            env_file_encoding=cls.model_config.get("env_file_encoding"),
+            env_prefix=LEGACY_ENV_PREFIX,
+        )
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            legacy_env,
+            legacy_dotenv,
+            file_secret_settings,
+        )
+
+    db_url: str = DEFAULT_DB_URL
+    clips_dir: Path = Path("data/clips")
+    save_clips: bool = True
+    # How often a capture worker restates "still alive" in the DB.
+    #
+    # DO NOT raise this on central. Its liveness view (_hb_status in web/app.py)
+    # calls a source "running" only if its heartbeat is under 60s old, so a
+    # slower beat would show every YouTube source as stale. A TBB unit is not
+    # affected by that threshold — central learns a unit is alive from the
+    # ingest POST, not from this row — so a unit overrides it to cut ~5,760
+    # SQLite commits a day, which is comparable card wear to every clip it
+    # records. Whatever a unit sets, tbb_app's HEARTBEAT_FRESH_S follows it, and
+    # tbb-update.sh gates rollback on that.
+    worker_heartbeat_seconds: float = 15.0
+    # How often the audio-quality snapshot is written. A read-mostly metric with
+    # a ~5 min EMA behind it; the UI greys it at 180s.
+    audio_quality_flush_seconds: float = 60.0
+    # Container/codec for saved detection clips. OGG Vorbis is ~10× smaller
+    # than WAV for negligible perceptual loss in audition. Use 'flac' for
+    # lossless compression, or 'wav' to revert to uncompressed PCM.
+    clip_format: Literal["ogg", "wav", "flac"] = "ogg"
+    sample_rate: int = 48_000
+    chunk_seconds: float = 3.0
+    log_level: str = "INFO"
+
+    # --- TinyBirdBrain (TBB) capture-unit profile ---
+    # These are inert on the central deploy. The `tbb-pipeline` / `tbb-web`
+    # entrypoints read them to run a single USB-mic source with the
+    # central-only workers (notes, weather, media, anomalies, OCR) left off.
+    # Override via BIRDBRAIN_TBB_* env or the unit's .env.
+    tbb_unit_id: str = "tbb-dev"
+    # ALSA capture device of the USB mic; pick from `arecord -l` on the unit.
+    tbb_mic_device: str = "plughw:1,0"
+    # Static location for BirdNET's locality filter (set at enrollment). None
+    # leaves the filter off (global model).
+    tbb_lat: float | None = None
+    tbb_lon: float | None = None
+    tbb_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    tbb_timezone: str = "UTC"
+    # Local clip retention: prune saved clips older than this many days to
+    # protect the SD card. The pipeline runs the prune sweep itself.
+    tbb_clip_retention_days: int = 14
+    tbb_prune_tick_seconds: int = 3600
+    # Sync to central (birdbrain.co.za). Off by default; enable per unit once a
+    # device token is issued. The agent runs as a background task in tbb-web.
+    tbb_sync_enabled: bool = False
+    tbb_central_url: str | None = None  # e.g. https://birdbrain.co.za
+    tbb_device_token: str | None = None
+    tbb_sync_interval_seconds: int = 45
+    tbb_sync_batch_size: int = 200
+    # Empty keep-alive batches only refresh central's "last seen"; they carry no
+    # data. Every tick cost ~2MB/day on a metered link to say nothing changed,
+    # so they get their own clock (as the BirdNET-Cloud heartbeat does). 0 = off,
+    # for a unit that should only ever speak when it has something to report.
+    tbb_sync_keepalive_seconds: int = 300
+    # High-water-mark store (last synced detection id). A plain JSON file so the
+    # unit's DB schema stays identical to central's.
+    tbb_sync_state_file: Path = Path("data/tbb_sync_state.json")
+
+    # --- BirdNET-Cloud bridge (PixCams) ---
+    # Optional second sync target: push detections to birdnetcloud.com instead
+    # of running their edge agent, which would be a whole second BirdNET
+    # pipeline competing for the same mic. Off unless a token is present, so
+    # units that track origin/tbb without one are entirely unaffected.
+    birdnetcloud_enabled: bool = False
+    birdnetcloud_endpoint: str = "https://api.birdnetcloud.com"
+    birdnetcloud_token: str | None = None
+    # Alternative to the inline token: read it from a 0600 file, keeping the
+    # secret out of the unit's .env.
+    birdnetcloud_token_file: Path | None = None
+    # Their edge agent defaults to 0.7 and it matches our own trust floor —
+    # below this the dashboard fills with noise.
+    birdnetcloud_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    birdnetcloud_interval_seconds: int = 60
+    # Heartbeat on its own clock so a metered/field unit can poll for detections
+    # often while rarely spending a request just to say "still alive".
+    birdnetcloud_heartbeat_seconds: int = 60
+    # Clips are ~60KB each and dominate a unit's uplink (~19MB/day at the
+    # observed detection rate). Turn off for field/metered deployments — you keep
+    # every detection, you lose playable audio in their dashboard.
+    birdnetcloud_upload_clips: bool = True
+    # Finer control than the on/off above, which it gates. Their API has no
+    # batch endpoint, so bandwidth can only be saved by sending fewer bytes,
+    # not fewer requests — and most of those bytes are the 30th Laughing Dove
+    # of the morning. "first_per_species_per_day" keeps their dashboard useful
+    # (every species still gets audio) at roughly a tenth of the traffic.
+    birdnetcloud_clip_policy: Literal["all", "first_per_species_per_day", "none"] = "all"
+    # Their API takes one detection per request, so a tick is capped rather
+    # than draining an unbounded backlog in one go.
+    birdnetcloud_max_per_tick: int = 60
+    birdnetcloud_state_file: Path = Path("data/birdnetcloud_sync_state.json")

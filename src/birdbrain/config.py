@@ -1,17 +1,18 @@
+"""Central's configuration: the unit's settings plus its own.
+
+The unit-side settings live in :mod:`birdbrain.config_core`; ``AppConfig``
+inherits them, so ``from birdbrain.config import AppConfig`` is unchanged and
+every field is still on one object.
+"""
 from __future__ import annotations
 
 import tomllib
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
-from pydantic_settings import (
-    BaseSettings,
-    DotEnvSettingsSource,
-    EnvSettingsSource,
-    PydanticBaseSettingsSource,
-    SettingsConfigDict,
-)
+from pydantic import BaseModel, Field
+
+from birdbrain.config_core import UnitConfig
 
 
 class OcrConfig(BaseModel):
@@ -108,113 +109,23 @@ def resolve_db_url(db_url: str) -> str:
     return f"{prefix}{LEGACY_DB_PATH}"
 
 
-class AppConfig(BaseSettings):
+
+class AppConfig(UnitConfig):
     """Top-level config. Loaded from env (BIRDBRAIN_*) and an optional .env file."""
-
-    model_config = SettingsConfigDict(
-        env_prefix="BIRDBRAIN_",
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    @model_validator(mode="after")
-    def _apply_legacy_db_fallback(self) -> AppConfig:
-        self.db_url = resolve_db_url(self.db_url)
-        return self
-
-    @model_validator(mode="after")
-    def _anchor_state_files(self) -> AppConfig:
-        """Resolve the sync high-water-mark files against the database's
-        directory rather than the current working directory.
-
-        These defaulted to relative paths ("data/…"), so a process started from
-        anywhere but the checkout root looked at a path that did not exist. On
-        the BirdNET-Cloud side that reads as first-run and seeds the mark to the
-        newest row, silently dropping the backlog; on the central side it
-        replays from zero. Both are silent. The db_url is already absolute on a
-        provisioned unit (tbb-finish.sh writes it that way), so anchoring to it
-        makes the state files land next to the database they describe.
-        """
-        root = _sqlite_dir(self.db_url)
-        if root is not None:
-            for field in ("tbb_sync_state_file", "birdnetcloud_state_file"):
-                value = getattr(self, field)
-                if not value.is_absolute():
-                    setattr(self, field, (root / value.name).resolve())
-        return self
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Accept the legacy ``AFRICAM_*`` names at lower priority than
-        ``BIRDBRAIN_*``.
-
-        TRANSITIONAL, and the single most important guard in the rename: a
-        missed variable does not raise, it silently falls back to the field
-        default. A unit whose .env still says AFRICAM_TBB_SYNC_ENABLED would
-        quietly stop syncing rather than crash, and nothing would look wrong.
-        This lets old and new .env files both work while the fleet catches up.
-        """
-        legacy_env = EnvSettingsSource(settings_cls, env_prefix=LEGACY_ENV_PREFIX)
-        legacy_dotenv = DotEnvSettingsSource(
-            settings_cls,
-            env_file=cls.model_config.get("env_file"),
-            env_file_encoding=cls.model_config.get("env_file_encoding"),
-            env_prefix=LEGACY_ENV_PREFIX,
-        )
-        return (
-            init_settings,
-            env_settings,
-            dotenv_settings,
-            legacy_env,
-            legacy_dotenv,
-            file_secret_settings,
-        )
 
     sources_file: Path = Path("sources.toml")
     sites_file: Path = Path("sites.toml")
-    db_url: str = DEFAULT_DB_URL
-    clips_dir: Path = Path("data/clips")
-    save_clips: bool = True
-    # How often a capture worker restates "still alive" in the DB.
-    #
-    # DO NOT raise this on central. Its liveness view (_hb_status in web/app.py)
-    # calls a source "running" only if its heartbeat is under 60s old, so a
-    # slower beat would show every YouTube source as stale. A TBB unit is not
-    # affected by that threshold — central learns a unit is alive from the
-    # ingest POST, not from this row — so a unit overrides it to cut ~5,760
-    # SQLite commits a day, which is comparable card wear to every clip it
-    # records. Whatever a unit sets, tbb_app's HEARTBEAT_FRESH_S follows it, and
-    # tbb-update.sh gates rollback on that.
-    worker_heartbeat_seconds: float = 15.0
-    # How often the audio-quality snapshot is written. A read-mostly metric with
-    # a ~5 min EMA behind it; the UI greys it at 180s.
-    audio_quality_flush_seconds: float = 60.0
     # Perceptual clip fingerprinting (birdbrain.audio_hash) for the YouTube
     # ad/highlight replay filter. Worth its cost on central; turn OFF on a
     # capture unit, where it is both useless and expensive — see the skip in
     # pipeline.py for the measured numbers.
     audio_hash_enabled: bool = True
-    # Container/codec for saved detection clips. OGG Vorbis is ~10× smaller
-    # than WAV for negligible perceptual loss in audition. Use 'flac' for
-    # lossless compression, or 'wav' to revert to uncompressed PCM.
-    clip_format: Literal["ogg", "wav", "flac"] = "ogg"
-    sample_rate: int = 48_000
-    chunk_seconds: float = 3.0
     # Measured per-chunk BirdNET inference time (ms), used only to estimate the
     # serialized-detector saturation shown on the health panel. All workers
     # share one locked detector, so capacity ≈ chunk_seconds*1000 / this.
     # Re-measure (BirdNetDetector.analyze on a 3s chunk) if the hardware changes.
     # ~100ms measured on the Pi 5 (2026-06, median 99 / mean 102 under load).
     inference_ms_estimate: float = 100.0
-    log_level: str = "INFO"
     # Xeno-Canto API v3 requires a key (free, per-account). When set, the
     # audition modal shows reference recordings inline. When unset, it falls
     # back to a plain "search XC" link that needs no auth.
@@ -266,73 +177,6 @@ class AppConfig(BaseSettings):
     weather_archive_enabled: bool = True
     weather_tick_seconds: int = 3600
     weather_backfill_days: int = 92
-
-    # --- TinyBirdBrain (TBB) capture-unit profile ---
-    # These are inert on the central deploy. The `tbb-pipeline` / `tbb-web`
-    # entrypoints read them to run a single USB-mic source with the
-    # central-only workers (notes, weather, media, anomalies, OCR) left off.
-    # Override via BIRDBRAIN_TBB_* env or the unit's .env.
-    tbb_unit_id: str = "tbb-dev"
-    # ALSA capture device of the USB mic; pick from `arecord -l` on the unit.
-    tbb_mic_device: str = "plughw:1,0"
-    # Static location for BirdNET's locality filter (set at enrollment). None
-    # leaves the filter off (global model).
-    tbb_lat: float | None = None
-    tbb_lon: float | None = None
-    tbb_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-    tbb_timezone: str = "UTC"
-    # Local clip retention: prune saved clips older than this many days to
-    # protect the SD card. The pipeline runs the prune sweep itself.
-    tbb_clip_retention_days: int = 14
-    tbb_prune_tick_seconds: int = 3600
-    # Sync to central (birdbrain.co.za). Off by default; enable per unit once a
-    # device token is issued. The agent runs as a background task in tbb-web.
-    tbb_sync_enabled: bool = False
-    tbb_central_url: str | None = None  # e.g. https://birdbrain.co.za
-    tbb_device_token: str | None = None
-    tbb_sync_interval_seconds: int = 45
-    tbb_sync_batch_size: int = 200
-    # Empty keep-alive batches only refresh central's "last seen"; they carry no
-    # data. Every tick cost ~2MB/day on a metered link to say nothing changed,
-    # so they get their own clock (as the BirdNET-Cloud heartbeat does). 0 = off,
-    # for a unit that should only ever speak when it has something to report.
-    tbb_sync_keepalive_seconds: int = 300
-    # High-water-mark store (last synced detection id). A plain JSON file so the
-    # unit's DB schema stays identical to central's.
-    tbb_sync_state_file: Path = Path("data/tbb_sync_state.json")
-
-    # --- BirdNET-Cloud bridge (PixCams) ---
-    # Optional second sync target: push detections to birdnetcloud.com instead
-    # of running their edge agent, which would be a whole second BirdNET
-    # pipeline competing for the same mic. Off unless a token is present, so
-    # units that track origin/tbb without one are entirely unaffected.
-    birdnetcloud_enabled: bool = False
-    birdnetcloud_endpoint: str = "https://api.birdnetcloud.com"
-    birdnetcloud_token: str | None = None
-    # Alternative to the inline token: read it from a 0600 file, keeping the
-    # secret out of the unit's .env.
-    birdnetcloud_token_file: Path | None = None
-    # Their edge agent defaults to 0.7 and it matches our own trust floor —
-    # below this the dashboard fills with noise.
-    birdnetcloud_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
-    birdnetcloud_interval_seconds: int = 60
-    # Heartbeat on its own clock so a metered/field unit can poll for detections
-    # often while rarely spending a request just to say "still alive".
-    birdnetcloud_heartbeat_seconds: int = 60
-    # Clips are ~60KB each and dominate a unit's uplink (~19MB/day at the
-    # observed detection rate). Turn off for field/metered deployments — you keep
-    # every detection, you lose playable audio in their dashboard.
-    birdnetcloud_upload_clips: bool = True
-    # Finer control than the on/off above, which it gates. Their API has no
-    # batch endpoint, so bandwidth can only be saved by sending fewer bytes,
-    # not fewer requests — and most of those bytes are the 30th Laughing Dove
-    # of the morning. "first_per_species_per_day" keeps their dashboard useful
-    # (every species still gets audio) at roughly a tenth of the traffic.
-    birdnetcloud_clip_policy: Literal["all", "first_per_species_per_day", "none"] = "all"
-    # Their API takes one detection per request, so a tick is capped rather
-    # than draining an unbounded backlog in one go.
-    birdnetcloud_max_per_tick: int = 60
-    birdnetcloud_state_file: Path = Path("data/birdnetcloud_sync_state.json")
 
 
 def load_sources(path: Path) -> list[SourceConfig]:

@@ -18,6 +18,7 @@ import soundfile as sf
 
 from birdbrain.audio.source import AudioChunk
 from birdbrain.config import AppConfig, SourceConfig
+from birdbrain.config_core import UnitConfig
 from birdbrain.detector.birdnet import Detection
 from birdbrain.storage import Database, DetectionRow, WorkerHeartbeatRow, models, models_core
 from birdbrain.tbb_capture import run_capture
@@ -292,3 +293,47 @@ def test_the_unit_reads_no_central_only_table():
     for method in ("species_min_confidence_map", "global_min_confidence",
                    "source_min_confidence"):
         assert method not in ast.dump(tree), f"{method} is central's live-tuning path"
+
+
+# --- the config boundary ----------------------------------------------------
+
+def test_unit_config_holds_only_what_a_unit_reads():
+    """config_core.py is what the standalone repo takes. Central's own settings
+    — AI commentary, weather backfill, the media cache, TOML source files, web
+    sessions and invite codes — must not follow it there."""
+
+    fields = set(UnitConfig.model_fields)
+    for central_only in (
+        "notes_enabled", "notes_model", "weather_tick_seconds",
+        "media_cache_enabled", "sources_file", "sites_file",
+        "secret_key", "invite_code", "xeno_canto_key",
+    ):
+        assert central_only not in fields, f"{central_only} is central's"
+    # Everything the unit's own subsystems configure.
+    for needed in (
+        "db_url", "clips_dir", "log_level", "worker_heartbeat_seconds",
+        "tbb_unit_id", "tbb_mic_device", "tbb_min_confidence",
+        "birdnetcloud_enabled", "birdnetcloud_clip_policy",
+    ):
+        assert needed in fields, f"{needed} is the unit's"
+
+
+def test_central_config_is_a_superset_and_unchanged():
+    """The split must be invisible to central: one object, every field on it,
+    and `from birdbrain.config import AppConfig` untouched."""
+
+    assert issubclass(AppConfig, UnitConfig)
+    assert set(UnitConfig.model_fields) < set(AppConfig.model_fields)
+    assert AppConfig.model_config["env_prefix"] == "BIRDBRAIN_"
+
+
+def test_the_settings_machinery_lives_with_the_unit(tmp_path):
+    """Env loading and both validators apply on either side, so they belong in
+    the base — a unit that could not resolve its own state files or read its
+    .env would be a repo that does not run."""
+
+    root = tmp_path / "data"
+    root.mkdir()
+    cfg = UnitConfig(db_url=f"sqlite:///{root / 'unit.sqlite'}")
+    assert cfg.tbb_sync_state_file == root / "tbb_sync_state.json"
+    assert cfg.birdnetcloud_state_file == root / "birdnetcloud_sync_state.json"

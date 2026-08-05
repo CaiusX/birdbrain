@@ -55,11 +55,6 @@ echo "=== writing .env ==="
   echo "BIRDBRAIN_TBB_TIMEZONE=Africa/Johannesburg"
   echo "BIRDBRAIN_TBB_CLIP_RETENTION_DAYS=14"
   echo "BIRDBRAIN_TBB_SYNC_ENABLED=false"
-  # The clip fingerprint only catches YouTube ad/highlight replays, which a
-  # live mic cannot produce. Computing it costs ~64MB RSS on a Zero 2 W (the
-  # first librosa.resample pulls in numba/llvmlite/scipy), so a unit turns it
-  # off. The pipeline also skips it for kind="mic" regardless of this line.
-  echo "BIRDBRAIN_AUDIO_HASH_ENABLED=false"
   # SD-card budget. Central keeps the fast defaults (its liveness view calls a
   # source stale after 60s); a unit does not, because central learns a unit is
   # alive from its ingest POSTs rather than from this row. 15s -> 60s removes
