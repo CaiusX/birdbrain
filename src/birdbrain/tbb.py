@@ -1,11 +1,11 @@
 """TinyBirdBrain (TBB) capture-unit runtime.
 
-A TBB runs the *same* `birdbrain` pipeline as central, but as a single USB-mic
-source with the central-only workers (notes, weather, media sweeper, anomalies,
-OCR site-resolver) left off, plus a local clip-retention sweep to protect the SD
-card. Everything heavy is reused verbatim: ``MicSource`` feeds the existing
-``run_source`` worker (heartbeat, backoff, pre-roll clip writing) which writes to
-the same SQLite schema.
+A TBB is a single USB mic feeding BirdNET, plus a clip-retention sweep to
+protect the SD card. It runs its own capture loop (:mod:`birdbrain.tbb_capture`)
+rather than central's ``run_source``: that one is shaped by central's needs and
+importing it pulled in AI commentary, weather, OCR, highlight watching, site
+resolution and sandbox mode — seven modules a microphone in a field cannot use.
+The schema, detector and clip writer are still shared verbatim.
 
 This module is the `tbb-pipeline` entrypoint. Sync to central (Phase 2) and the
 minimal local web UI (Phase 1b) live elsewhere; this is just the detector loop.
@@ -20,11 +20,12 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from birdbrain.audio.mic import MicSource
 from birdbrain.config import AppConfig, SourceConfig
 from birdbrain.detector import BirdNetDetector
 from birdbrain.logging import get_logger
-from birdbrain.pipeline import run_source
 from birdbrain.storage import Database, DetectionRow
+from birdbrain.tbb_capture import run_capture
 
 log = get_logger(__name__)
 
@@ -135,10 +136,11 @@ def _prune_loop(db: Database, app: AppConfig, stop_event: threading.Event) -> No
 def run_tbb(app: AppConfig) -> None:
     """Run the unit's mic → detector → SQLite + clips loop until signalled.
 
-    Reuses the central ``run_source`` worker (so we get heartbeats, restart
-    backoff, and pre-roll clips for free) for a single non-multisite mic source.
-    None of the central-only background workers are started. Stops cleanly on
-    SIGINT/SIGTERM so systemd can supervise it."""
+    Uses the unit's own capture loop (``tbb_capture``) rather than central's
+    ``run_source``. Importing the latter dragged in seven central-only modules —
+    AI commentary, weather, OCR, highlight watching, site resolution, sandbox —
+    for a box that can use none of them. Stops cleanly on SIGINT/SIGTERM so
+    systemd can supervise it."""
     cfg = tbb_source_config(app)
     detector = BirdNetDetector()
     db = Database(app.db_url)
@@ -166,10 +168,14 @@ def run_tbb(app: AppConfig) -> None:
         retention_days=app.tbb_clip_retention_days,
     )
     try:
-        # Empty sites dict + non-multisite cfg → SiteResolver returns the static
-        # lat/lon with no DB/OCR work. run_source loops with retry/backoff and
-        # exits when stop_event is set.
-        run_source(cfg, app, detector, db, sites={}, stop_event=stop_event)
+        # run_capture loops with retry/backoff and exits when stop_event is set.
+        mic = MicSource(
+            name=cfg.name,
+            device=cfg.device,
+            sample_rate=app.sample_rate,
+            chunk_seconds=app.chunk_seconds,
+        )
+        run_capture(cfg, app, detector, db, mic, stop_event)
     finally:
         stop_event.set()
         log.info("tbb.pipeline_stopped", unit=app.tbb_unit_id)
