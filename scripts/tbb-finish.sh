@@ -108,6 +108,37 @@ if [ -f scripts/journald-persistent-tbb.conf ]; then
     echo "  (could not install journald conf — need sudo)"
   fi
 fi
+# ext4 flushes its journal every 5s by default. On a unit that is mostly making
+# small, frequent writes, that commit interval — not the data — is what dominates
+# the card. Measured on the bench unit: 39 MB/h before, 26 MB/h after.
+#
+# The trade is up to 10 minutes of writes lost on an unclean power cut. Acceptable
+# here: the detections DB is WAL with synchronous=NORMAL, clips are re-derivable,
+# and the sync high-water marks are written atomically (birdbrain.statefile) so a
+# lost tail costs a replay, never a corrupt mark.
+#
+# Applied carefully because a bad fstab is a trip to the unit with a card reader:
+# prove the kernel accepts the option on the live mount first, keep a backup, and
+# roll back if the result does not parse. Root itself is mounted from
+# cmdline.txt on Pi OS, so this line is a remount rather than the boot path.
+# Guarded on BOTH the live mount and fstab: the substitution below appends, so
+# running it twice would leave "commit=600,commit=600".
+if ! findmnt -no OPTIONS / | grep -q "commit=" && ! grep -q "commit=" /etc/fstab; then
+  if sudo mount -o remount,commit=600 / 2>/dev/null; then
+    sudo cp /etc/fstab /etc/fstab.bak-tbb
+    sudo sed -i "s|^\(PARTUUID=[^ ]*[[:space:]]*/[[:space:]]*ext4[[:space:]]*\)defaults,noatime|\1defaults,noatime,commit=600|" /etc/fstab
+    if findmnt --verify 2>&1 | grep -q "0 parse errors"; then
+      sudo systemctl daemon-reload 2>/dev/null || true
+      echo "  fstab: commit=600 set (live now, persists on reboot)"
+    else
+      sudo cp /etc/fstab.bak-tbb /etc/fstab
+      echo "  WARNING: fstab would not verify — reverted, commit=600 live only"
+    fi
+  else
+    echo "  (kernel refused commit=600 — leaving the mount alone)"
+  fi
+fi
+
 # Pi Zero 2 W wifi defaults to power-save ON → the unit silently drops off the
 # LAN. Disable it (system-wide, persists across reconnects). We only reload NM
 # here (not a radio cycle) so we don't kill the SSH session running this script;
