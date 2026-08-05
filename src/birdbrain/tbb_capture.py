@@ -121,9 +121,6 @@ def _consume(
 ) -> None:
     """Pull chunks until the stream ends or ``stop_event`` is set."""
     last_hb = last_floors = last_flush = last_sample = last_prune = 0.0
-    species_floor: dict[str, float] = {}
-    global_min: float | None = None
-    source_min: float | None = None
     suppressed: set[str] = set()
     quality = QualityAccumulator()
     # One chunk of pre-roll so a call straddling a chunk boundary is saved whole
@@ -139,14 +136,19 @@ def _consume(
             _safely(slog, "worker.heartbeat_failed", db.worker_heartbeat, cfg.name)
             last_hb = now
 
+        # Suppressions only. Central also polls three confidence floors out of
+        # app_settings and species_notes here, live-tunable from /admin — a unit
+        # has no /admin, sets its floor in .env as tbb_min_confidence, and was
+        # therefore querying three tables a minute that it can never write. On
+        # the bench unit after six weeks: species_notes had 70 rows and not one
+        # with min_confidence set, and app_settings held nothing but debris.
+        # Suppressions stay because there is no config equivalent — a unit
+        # plagued by one phantom species has no other way to silence it.
         if now - last_floors > FLOOR_REFRESH_S:
             try:
-                species_floor = db.species_min_confidence_map()
-                global_min = db.global_min_confidence()
-                source_min = db.source_min_confidence(cfg.name)
                 suppressed = db.species_suppressions_for(cfg.name)
             except Exception:
-                slog.exception("floors.refresh_failed")
+                slog.exception("suppressions.refresh_failed")
             last_floors = now
 
         # Accumulate quality from every live chunk, before detection — a silent
@@ -161,30 +163,20 @@ def _consume(
             db, cfg, app, quality, slog, now, last_flush, last_sample, last_prune
         )
 
-        # Floor tiers, strongest first: a site-wide override beats a per-source
-        # one, which beats the source's own setting.
-        base_min = source_min if source_min is not None else cfg.min_confidence
-        effective_min = global_min if global_min is not None else base_min
+        # One floor, from the unit's own config (BIRDBRAIN_TBB_MIN_CONFIDENCE).
         try:
             detections = detector.analyze(
                 chunk,
                 lat=cfg.lat,
                 lon=cfg.lon,
                 week=cfg.week,
-                min_confidence=effective_min,
+                min_confidence=cfg.min_confidence,
                 drop_non_bird=cfg.exclude_non_bird,
             )
         except Exception:
             slog.exception("detect.failed")
             continue
 
-        # A species' own floor may sit ABOVE the source floor, to hold back a
-        # loud common bird that would otherwise bury everything quieter.
-        if species_floor and detections:
-            detections = [
-                d for d in detections
-                if d.confidence >= species_floor.get(d.scientific_name, effective_min)
-            ]
         if suppressed and detections:
             detections = [d for d in detections if d.scientific_name not in suppressed]
 

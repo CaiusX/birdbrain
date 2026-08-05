@@ -19,7 +19,7 @@ import soundfile as sf
 from birdbrain.audio.source import AudioChunk
 from birdbrain.config import AppConfig, SourceConfig
 from birdbrain.detector.birdnet import Detection
-from birdbrain.storage import Database, DetectionRow, WorkerHeartbeatRow
+from birdbrain.storage import Database, DetectionRow, WorkerHeartbeatRow, models, models_core
 from birdbrain.tbb_capture import run_capture
 
 
@@ -123,19 +123,25 @@ def test_worker_state_transitions_are_recorded(tmp_path):
     assert row.state == "stopped", "loop exited cleanly, so the worker is stopped"
 
 
-def test_a_species_floor_can_sit_above_the_source_floor(tmp_path):
-    """Used to hold back a loud common bird that buries everything quieter."""
+def test_the_units_floor_comes_from_its_config(tmp_path):
+    """Central polls three live-tunable floors from app_settings and
+    species_notes every minute. A unit has no /admin to set them: after six
+    weeks the bench unit's species_notes held 70 rows and not one with a
+    min_confidence, and app_settings held only debris. So the unit passes
+    tbb_min_confidence straight to the detector and reads neither table.
+    """
     app = _app(tmp_path)
     db = Database(app.db_url)
+    # A floor set the central way must NOT influence the unit.
     db.set_species_min_confidence("Corvus albus", 0.95)
-    detector = _FakeDetector([_det("Corvus albus", 0.80), _det("Quiet bird", 0.80)])
+    detector = _FakeDetector([_det("Corvus albus", 0.80)])
 
-    stop = threading.Event()
-    run_capture(_cfg(), app, detector, db, _FakeSource(1), stop)
+    run_capture(_cfg(min_confidence=0.6), app, detector, db, _FakeSource(1), threading.Event())
 
+    assert detector.kwargs["min_confidence"] == 0.6, "cfg.min_confidence is the floor"
     with db.session() as s:
         kept = [r.scientific_name for r in s.query(DetectionRow).all()]
-    assert kept == ["Quiet bird"], f"0.80 is below the 0.95 species floor, got {kept}"
+    assert kept == ["Corvus albus"], "the central-only species floor is not consulted"
 
 
 def test_suppressed_species_are_dropped(tmp_path):
@@ -236,3 +242,53 @@ def test_unit_modules_do_not_import_central_only_code(module):
     path = pathlib.Path("src/birdbrain") / module
     leaked = _birdbrain_imports(path) & CENTRAL_ONLY
     assert not leaked, f"{module} imports central-only: {sorted(leaked)}"
+
+
+# --- the schema boundary ----------------------------------------------------
+
+# The 8 tables a unit owns. Everything else belongs to central and should not
+# follow the unit into its own repository.
+UNIT_TABLES = {
+    "detections",
+    "worker_heartbeats",
+    "worker_downtime",
+    "species_suppressions",
+    "audio_quality_metrics",
+    "audio_quality_samples",
+    "app_settings",
+}
+
+
+def test_models_core_holds_exactly_the_units_tables():
+    """models_core.py is what the standalone repo takes. If a central table
+    drifts into it, the unit repo inherits users, weather, page views and the
+    rest — and has to explain why they are in a microphone's schema."""
+
+    tables = {
+        obj.__tablename__ for name, obj in vars(models_core).items()
+        if name.endswith("Row") and hasattr(obj, "__tablename__")
+    }
+    assert tables == UNIT_TABLES, f"unexpected: {tables ^ UNIT_TABLES}"
+
+
+def test_central_still_sees_every_table():
+    """The split must be invisible to central: one Base, all 23 tables, and
+    `from birdbrain.storage.models import X` unchanged for every X."""
+
+    assert models.Base is models_core.Base, "a second Base would split the metadata"
+    assert len(models.Base.metadata.tables) == 23
+    # A representative from each side, imported the way callers already do.
+    assert models.DetectionRow.__tablename__ == "detections"
+    assert models.UserRow.__tablename__ == "users"
+
+
+def test_the_unit_reads_no_central_only_table():
+    """Guards the trim: tbb_capture used to poll species_notes and app_settings
+    every minute for floors a unit cannot set."""
+
+    tree = ast.parse(pathlib.Path("src/birdbrain/tbb_capture.py").read_text())
+    referenced = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "SpeciesNoteRow" not in referenced
+    for method in ("species_min_confidence_map", "global_min_confidence",
+                   "source_min_confidence"):
+        assert method not in ast.dump(tree), f"{method} is central's live-tuning path"
