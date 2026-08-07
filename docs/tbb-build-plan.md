@@ -12,8 +12,13 @@ schema, or clip writer.
 
 ## Ground rules (read first)
 
-1. **Branch.** Do all TBB work on a branch: `git checkout -b tbb`. Do not
-   commit to `main`. Keep commits small and per-step.
+1. **Branch.** Work on a branch, not directly on `main`. Keep commits small and
+   per-step. *(Revised 2026-08-07: this rule originally named `tbb` as the
+   branch and `pi` as production. Both are gone — `main` is now the trunk and
+   the default branch, and current work is on `tbb-field`. See "Deploy decision,
+   revised" under Phase 3. Note that field units fast-forward `origin/<their own
+   checked-out branch>`, so check what the fleet tracks before moving whichever
+   branch you land on.)*
 2. **Do not reformat the tree.** The working copy currently shows whole-file
    CRLF churn (Windows checkout). **Only stage files you actually changed** —
    `git add <specific paths>`, never `git add -A`/`git add .`. If you see 60+
@@ -313,8 +318,49 @@ deploy decision below). Not yet exercised on production.
   complete (reconcile the public-gate/auth and the privacy model with pi's
   accounts then). Do **not** deploy mid-build.
 
-**Outstanding before "done":** the `tbb`→`pi` integration (deploy to production —
-reconcile with pi's tester-accounts/auth). Per-owner login is Phase 4.
+  > **Superseded 2026-08-07 — `pi` no longer exists.** The integration happened,
+  > but not as the `tbb`→`pi` merge described above. See the entry below.
+
+**Outstanding before "done":** nothing on the branch/integration axis — that
+landed 2026-08-07 (below). Per-owner login is still Phase 4.
+
+### Deploy decision, revised (2026-08-07)
+
+**`main` is the trunk and the default branch.** The `tbb`→`pi` merge this plan
+called for never happened in that shape. Instead the work converged on
+`tbb-field`, which by then contained both sides of the conflict this plan was
+worried about: the tester-accounts / per-user-scoring auth system (`5311f10`,
+an ancestor of `main`) and the whole TBB surface (`ingest.py`, `wire.py`,
+`tbb*.py`). They coexist in one tree, and the running central exercises both —
+3 user rows and 343 `detection_scores` in the live database. So the
+reconciliation this plan deferred is done; it just arrived by accumulation
+rather than by one deliberate merge.
+
+What changed on 2026-08-07:
+
+- `main` fast-forwarded to `tbb-field` (`e3c76a5..211b187`, 229 commits). Clean
+  fast-forward — no merge commit, nothing rewritten.
+- The GitHub default branch moved `pi` → `main`.
+- `pi` was deleted, locally and on origin. Its two apparently-unique commits
+  were patch-id duplicates of `ce0c7ce` / `0474c19` already on the trunk, and
+  its tree was 3,739 lines behind. Nothing unique was lost. Recovery SHA, should
+  it ever be wanted: `4444242`.
+
+**"Do not deploy mid-build" is retired.** Central on the Pi 5 already runs this
+code from a working tree on `tbb-field` (≡ `main`) under
+`birdbrain-pipeline.service` / `birdbrain-web.service`.
+
+**Units track `tbb-field`, not `main`.** `scripts/tbb-update.sh` fast-forwards
+`origin/<the unit's own checked-out branch>`, so which branch a unit sits on
+decides what its nightly timer pulls. `tbb-test` is on `tbb-field` — verified by
+it serving the `sync:{cloud,central}` healthz shape from `007c87c`, a commit
+that at the time existed only there. Anyone repointing units at `main` should
+know that moving `main` then becomes a fleet deploy.
+
+**Still stale after this:** `docs/tbb-integration-brief.md` is written entirely
+as a review request for merging `tbb` into `pi`, including a "land strategy"
+against a branch that no longer exists. It describes a plan that was overtaken,
+not a thing to do.
 
 ---
 
