@@ -74,6 +74,61 @@ def test_ingest_batch_upserts_idempotently(tmp_path):
     assert rows[0].source_name == "tbb-a1b2"
     assert rows[0].latitude == -25.7
 
+def test_ingest_applies_central_species_floor(tmp_path):
+    """A unit runs its own pipeline and never sees central's per-species floors,
+    so central has to apply them at ingest. Skipping this let a floored species
+    through from units while every locally-analysed source filtered it —
+    measured as a 2.5x phantom gap between tbb-test and a co-located Pi 5 mic
+    (docs/tbb-hardware-log.md, 2026-08-07)."""
+    db = Database(f"sqlite:///{tmp_path / 'c.sqlite'}")
+    db.upsert_device("tbb-a1b2", hash_token("tok"), lat=-25.7, lon=28.2)
+    device = db.get_device("tbb-a1b2")
+    db.set_species_min_confidence("Bostrychia hagedash", 0.9)
+
+    # 0.83 is above the unit's own floor but below central's floor for it.
+    below = IngestBody.model_validate(_body(sci="Bostrychia hagedash"))
+    res = ingest_batch(db, device, below)
+    assert res["accepted"] == 0
+    assert res["filtered"] == 1
+    assert res["duplicate"] == 0  # filtered is not a dedupe, and not an error
+
+    # Same species above the floor still lands.
+    ok = _body(sci="Bostrychia hagedash", at="2026-06-22T06:00:00+00:00")
+    ok["detections"][0]["confidence"] = 0.95
+    ok["detections"][0]["client_id"] = "tbb-a1b2:2"
+    assert ingest_batch(db, device, IngestBody.model_validate(ok))["accepted"] == 1
+
+    # A species with no floor is untouched — central must not second-guess the
+    # unit's own min_confidence, only apply its own species policy.
+    other = _body(at="2026-06-22T07:00:00+00:00")
+    other["detections"][0]["client_id"] = "tbb-a1b2:3"
+    assert ingest_batch(db, device, IngestBody.model_validate(other))["accepted"] == 1
+
+    with db.session() as s:
+        rows = list(s.scalars(select(DetectionRow)))
+    assert len(rows) == 2
+    assert all(r.confidence >= 0.9 or r.scientific_name != "Bostrychia hagedash" for r in rows)
+
+
+def test_ingest_applies_species_suppressions(tmp_path):
+    """Suppressions reach a unit no more than floors do — same asymmetry, and
+    the all-sites (``*``) rule has to cover units too or it isn't all-sites."""
+    db = Database(f"sqlite:///{tmp_path / 'c.sqlite'}")
+    db.upsert_device("tbb-a1b2", hash_token("tok"), lat=-25.7, lon=28.2)
+    device = db.get_device("tbb-a1b2")
+
+    db.add_species_suppression("tbb-a1b2", "Pycnonotus tricolor")
+    res = ingest_batch(db, device, IngestBody.model_validate(_body()))
+    assert res["accepted"] == 0 and res["filtered"] == 1
+
+    # An all-sites rule applies to a different unit's rows as well.
+    db.upsert_device("tbb-other", hash_token("tok2"), lat=-25.7, lon=28.2)
+    other = db.get_device("tbb-other")
+    db.add_species_suppression("*", "Corvus albus")
+    body = _body(unit="tbb-other", sci="Corvus albus")
+    assert ingest_batch(db, other, IngestBody.model_validate(body))["filtered"] == 1
+
+
 def test_ingest_batch_rejects_unit_mismatch(tmp_path):
     db = Database(f"sqlite:///{tmp_path / 'c.sqlite'}")
     db.upsert_device("tbb-a1b2", hash_token("tok"))

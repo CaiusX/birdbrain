@@ -80,13 +80,39 @@ def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
     would put wrong rows in the database — worse than the stalled backlog a
     rejection causes, because the stall is visible on the unit's own page and
     the wrong data is not.
+
+    Central's admin-set species rules are applied here, because a unit cannot
+    apply them: it runs its own pipeline against its own config and never sees
+    them. Until this existed, a species floored at 0.9 was filtered at every
+    locally-analysed source but arrived unfiltered from every unit, so unit rows
+    entered the database held to a laxer standard than the rest — which silently
+    biased any unit-vs-central comparison. See docs/tbb-hardware-log.md
+    (2026-08-07) for the measurement that surfaced it.
     """
     check_schema(body.schema_version)
     if body.unit != device.unit_id:
         raise ValueError(f"unit {body.unit!r} does not match token unit {device.unit_id!r}")
 
+    # Deliberately uncached and un-caught: one read per batch is cheap next to
+    # the upserts, and a failed read must reject the batch rather than fall back
+    # to storing unfiltered rows. Same rule as check_schema — a stalled backlog
+    # is visible on the unit's page, wrongly-admitted rows are not.
+    floors = db.species_min_confidence_map()
+    suppressed = db.species_suppressions_for(device.unit_id)
+
     inserted = 0
+    filtered = 0
     for d in body.detections:
+        if d.scientific_name in suppressed:
+            filtered += 1
+            continue
+        # Only species with an explicit floor are re-checked. The unit already
+        # applied its own min_confidence, and second-guessing that here would
+        # overrule a unit's local config rather than central's species policy.
+        floor = floors.get(d.scientific_name)
+        if floor is not None and d.confidence < floor:
+            filtered += 1
+            continue
         started = (
             d.started_at.astimezone(UTC)
             if d.started_at.tzinfo
@@ -124,11 +150,15 @@ def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
         unit=device.unit_id,
         received=len(body.detections),
         inserted=inserted,
+        filtered=filtered,
         quality=body.audio_quality.score if body.audio_quality else None,
     )
     return {
         "unit": device.unit_id,
         "received": len(body.detections),
         "accepted": inserted,
-        "duplicate": len(body.detections) - inserted,
+        # Dropped by central's species floors / suppressions — not an error, and
+        # not a resend candidate. The unit advances its cursor on any 2xx.
+        "filtered": filtered,
+        "duplicate": len(body.detections) - inserted - filtered,
     }
