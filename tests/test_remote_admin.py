@@ -120,20 +120,21 @@ def test_nav_shows_admin_exactly_when_admin_is_reachable(tmp_path):
 
 
 @pytest.mark.skipif(not terminal.available(), reason="no PTY on this platform")
-def test_admin_page_links_the_terminal_only_when_usable(tmp_path):
+def test_nothing_links_to_the_terminal(tmp_path):
+    """The shell is URL-only on purpose: a hijacked admin session shouldn't be
+    handed a signposted route to a root-equivalent prompt. Enabled, and viewed
+    by an admin, is the case where a link would appear if one were ever added
+    back — so that is the case to assert on."""
     app, db = _app(tmp_path, terminal_enabled=True)
     _user(db, "caiusx", "operator")
     client = TestClient(app)
     _login(client, "caiusx")
-    assert '/admin/terminal' in client.get("/admin").text
 
-    # Same admin, opt-in off → no link, and no page.
-    app2, db2 = _app(tmp_path / "off")
-    _user(db2, "caiusx", "operator")
-    c2 = TestClient(app2)
-    _login(c2, "caiusx")
-    assert '/admin/terminal' not in c2.get("/admin").text
-    assert c2.get("/admin/terminal").status_code == 404
+    for path in ("/admin", "/"):
+        assert "/admin/terminal" not in client.get(path).text
+
+    # Still reachable by URL for that same admin — unlinked, not disabled.
+    assert client.get("/admin/terminal").status_code == 200
 
 
 def test_admin_on_lan_is_unchanged_for_everyone(tmp_path):

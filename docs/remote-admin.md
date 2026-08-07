@@ -72,6 +72,12 @@ systemctl --user restart birdbrain-web.service
 
 Then `https://birdbrain.co.za/admin/terminal`.
 
+**Nothing links to it.** Not the nav, not `/admin`. That is deliberate: an admin
+session someone else gets hold of shouldn't come with a signposted route to a
+root-equivalent prompt. You have to know the URL.
+`tests/test_remote_admin.py::test_nothing_links_to_the_terminal` keeps it that
+way — if a convenience link is ever added back, that test fails.
+
 ## What the app enforces, and one trap
 
 `/admin` over the tunnel now requires an admin-role session; everyone else still

@@ -813,9 +813,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
     def _terminal_ready() -> bool:
         """Both preconditions the terminal needs that don't depend on who is
-        asking: the opt-in, and a PTY existing on this platform. Defined up here
-        (not next to the routes) so the middleware can publish it to templates —
-        one definition, so the nav can't advertise a page the route refuses."""
+        asking: the opt-in, and a PTY existing on this platform. Not published to
+        templates — nothing renders a link to the terminal, by design."""
         return bool(cfg.terminal_enabled) and terminal.available()
 
     @app.middleware("http")
@@ -832,7 +831,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # places is how the nav ended up hiding a link to a page the gate was
         # happily serving.
         request.state.is_admin = auth_mod.is_admin(request.state.user)
-        request.state.terminal_ready = _terminal_ready()
         if is_public:
             path = request.url.path
             if path.startswith(_PUBLIC_BLOCKED_PREFIXES):
