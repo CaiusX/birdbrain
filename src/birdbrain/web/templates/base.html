@@ -123,7 +123,11 @@
           <a href="/rare" class="text-zinc-400 hover:text-zinc-100">rare</a>
           <a href="/diurnal" class="text-zinc-400 hover:text-zinc-100">daily</a>
           <a href="/help" class="text-zinc-400 hover:text-zinc-100">help</a>
-          {% if not request.state.is_public %}
+          {# Mirror the gate in app.py::restrict_public exactly: ungated on the
+             LAN, admin-role only over the public tunnel. If these two drift the
+             link disappears while the page still serves (or worse, advertises a
+             page that 404s). #}
+          {% if not request.state.is_public or request.state.is_admin %}
             <a href="/admin" class="text-zinc-400 hover:text-zinc-100">admin</a>
           {% endif %}
           {% if request.state.user %}

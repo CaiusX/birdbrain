@@ -10,6 +10,24 @@
 
 {% block content %}
 
+{# Only when the opt-in is on AND this session may use it — same two conditions
+   the route enforces, so this never advertises a page that 404s. #}
+{% if request.state.terminal_ready and request.state.is_admin %}
+<section class="bg-zinc-900 border border-amber-900/60 rounded-xl mb-6">
+  <div class="px-5 py-3 flex items-center justify-between gap-4">
+    <div>
+      <h2 class="text-sm uppercase tracking-wider text-amber-500">Terminal</h2>
+      <p class="text-xs text-zinc-500 mt-0.5">
+        Shell as the service user — no sandbox. Anyone who reaches it owns this Pi.
+      </p>
+    </div>
+    <a href="/admin/terminal"
+       class="text-sm px-3 py-1.5 rounded border border-amber-800 text-amber-300
+              hover:bg-amber-950/40 shrink-0">open</a>
+  </div>
+</section>
+{% endif %}
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
   <div class="px-5 py-3 border-b border-zinc-800">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">System health

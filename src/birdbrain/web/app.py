@@ -811,6 +811,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
+    def _terminal_ready() -> bool:
+        """Both preconditions the terminal needs that don't depend on who is
+        asking: the opt-in, and a PTY existing on this platform. Defined up here
+        (not next to the routes) so the middleware can publish it to templates —
+        one definition, so the nav can't advertise a page the route refuses."""
+        return bool(cfg.terminal_enabled) and terminal.available()
+
     @app.middleware("http")
     async def restrict_public(request: Request, call_next):
         is_public = request.headers.get("cf-connecting-ip") is not None
@@ -820,6 +827,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # a session exists — anonymous public traffic pays nothing.
         uid = request.session.get("uid")
         request.state.user = db.get_user_by_id(uid) if uid else None
+        # Single source of truth for "may see admin things", used by the gate
+        # below, the routes, and the nav in base.html. Computing it in three
+        # places is how the nav ended up hiding a link to a page the gate was
+        # happily serving.
+        request.state.is_admin = auth_mod.is_admin(request.state.user)
+        request.state.terminal_ready = _terminal_ready()
         if is_public:
             path = request.url.path
             if path.startswith(_PUBLIC_BLOCKED_PREFIXES):
@@ -829,7 +842,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 # admin console — put an edge authenticator in front of /admin
                 # too. See docs/remote-admin.md. 404 rather than 403 for
                 # everyone else, so the tunnel doesn't confirm /admin exists.
-                if not auth_mod.is_admin(request.state.user):
+                if not request.state.is_admin:
                     return Response(status_code=404)
             if any(path.startswith(p) for p in _PUBLIC_ALLOWED_PREFIXES):
                 pass                                       # TBB ingest/enroll (token/code-gated)
@@ -4243,15 +4256,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     #   3. auth_mod.is_admin()   — the session belongs to an admin-role account
     _terminal_sessions: set[terminal.TerminalSession] = set()
 
-    def _terminal_ready() -> bool:
-        return bool(cfg.terminal_enabled) and terminal.available()
-
     @app.get("/admin/terminal", response_class=HTMLResponse)
     def admin_terminal(request: Request) -> HTMLResponse:
         """The terminal page. 404 (not 403) when unavailable or unauthorised, so
         a probe can't distinguish 'disabled' from 'you aren't allowed' from
         'no such route'."""
-        if not _terminal_ready() or not auth_mod.is_admin(request.state.user):
+        if not _terminal_ready() or not request.state.is_admin:
             raise HTTPException(status_code=404)
         return TEMPLATES.TemplateResponse(
             request,

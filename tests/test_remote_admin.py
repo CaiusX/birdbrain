@@ -79,6 +79,63 @@ def test_admin_over_tunnel_needs_an_admin_role(tmp_path):
     assert client.get("/admin", headers=PUBLIC).status_code == 200
 
 
+def test_nav_shows_admin_exactly_when_admin_is_reachable(tmp_path):
+    """The nav link and the gate must agree.
+
+    They didn't: the gate was opened for admin sessions over the tunnel but the
+    nav still hid the link whenever the request was public, so /admin worked
+    only if you typed the URL. A link that lies in either direction is a bug —
+    advertising a 404, or hiding a working page.
+    """
+    app, db = _app(tmp_path)
+    _user(db, "caiusx", "operator")
+    _user(db, "alice", "tester")
+    client = TestClient(app)
+
+    def nav_has_admin(**kw) -> bool:
+        return 'href="/admin"' in client.get("/", **kw).text
+
+    def admin_reachable(**kw) -> bool:
+        return client.get("/admin", **kw).status_code == 200
+
+    # Anonymous over the tunnel: hidden, and unreachable.
+    assert nav_has_admin(headers=PUBLIC) is False
+    assert admin_reachable(headers=PUBLIC) is False
+
+    # Non-admin over the tunnel: still both false.
+    _login(client, "alice")
+    assert nav_has_admin(headers=PUBLIC) is False
+    assert admin_reachable(headers=PUBLIC) is False
+    client.post("/auth/logout", follow_redirects=False)
+
+    # Admin over the tunnel: both true — this is the case that was broken.
+    _login(client, "caiusx")
+    assert nav_has_admin(headers=PUBLIC) is True
+    assert admin_reachable(headers=PUBLIC) is True
+
+    # On the LAN the link shows for everyone, as it always did.
+    client.post("/auth/logout", follow_redirects=False)
+    assert nav_has_admin() is True
+    assert admin_reachable() is True
+
+
+@pytest.mark.skipif(not terminal.available(), reason="no PTY on this platform")
+def test_admin_page_links_the_terminal_only_when_usable(tmp_path):
+    app, db = _app(tmp_path, terminal_enabled=True)
+    _user(db, "caiusx", "operator")
+    client = TestClient(app)
+    _login(client, "caiusx")
+    assert '/admin/terminal' in client.get("/admin").text
+
+    # Same admin, opt-in off → no link, and no page.
+    app2, db2 = _app(tmp_path / "off")
+    _user(db2, "caiusx", "operator")
+    c2 = TestClient(app2)
+    _login(c2, "caiusx")
+    assert '/admin/terminal' not in c2.get("/admin").text
+    assert c2.get("/admin/terminal").status_code == 404
+
+
 def test_admin_on_lan_is_unchanged_for_everyone(tmp_path):
     """No cf-connecting-ip means LAN/localhost, which was never gated and must
     not become gated by this change."""
