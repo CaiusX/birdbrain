@@ -22,6 +22,40 @@ def _detect_js_runtime() -> str | None:
     return None
 
 
+# The single player client used for live-stream format resolution. YouTube
+# rotates which clients publish a working HLS manifest, so this needs revisiting
+# whenever every source starts failing "No video formats found!": first
+# `uv run yt-dlp -U`, then re-test clients against a live cam with *fresh*
+# cookies (`--extractor-args youtube:player_client=<name>`) and update this.
+#   2026-08 (yt-dlp 2026.07.04): android_vr → mweb. android_vr, tv, web,
+#   web_safari and ios all return "No video formats found!"; mweb resolves.
+#   Cookies are required — mweb without them is bot-gated.
+PLAYER_CLIENT = "mweb"
+
+
+def resolve_args() -> list[str]:
+    """The yt-dlp flags that decide *how* a YouTube live stream resolves.
+
+    Shared with the cookie refresher (`birdbrain.cookies`) so its validation
+    probe resolves exactly the way the pipeline does. When these drifted apart,
+    the refresher's probe failed on the player client rather than the cookies,
+    so it discarded every fresh export and no cam could ever recover.
+    """
+    args: list[str] = []
+    # Tell yt-dlp where to find a JS runtime so it can solve YouTube's n-sig
+    # challenge. Deno is auto-detected; for Node we have to be explicit. The EJS
+    # solver script is cached on disk after a one-time --remote-components fetch.
+    runtime = _detect_js_runtime()
+    if runtime:
+        args += ["--js-runtimes", runtime]
+    # Pin one client rather than the multi-client default to keep each resolve to
+    # a single query: on a pipeline restart every source re-resolves at once, and
+    # multiplying the YouTube request burst raises the odds of tripping the IP
+    # bot-block.
+    args += ["--extractor-args", f"youtube:player_client={PLAYER_CLIENT}"]
+    return args
+
+
 class YouTubeSource(AudioSource):
     """Stream audio from a YouTube URL (live or VOD).
 
@@ -71,25 +105,7 @@ class YouTubeSource(AudioSource):
                 cmd += ["--cookies", str(self.cookies_file)]
         elif self.cookies_from_browser:
             cmd += ["--cookies-from-browser", self.cookies_from_browser]
-        # Tell yt-dlp where to find a JS runtime so it can solve YouTube's
-        # n-sig challenge. Deno is auto-detected; for Node we have to be
-        # explicit. The EJS solver script itself is cached on disk after a
-        # one-time download via --remote-components.
-        runtime = _detect_js_runtime()
-        if runtime:
-            cmd += ["--js-runtimes", runtime]
-        # Force a single player client for live-stream format resolution. As of
-        # 2026-08 (yt-dlp 2026.07.04) the mweb/tv/web/web_safari clients all
-        # return "No video formats found!" for these YouTube live streams, while
-        # android_vr still publishes a working HLS manifest (cookie-free). We pin
-        # one client (rather than the multi-client default) to keep each resolve
-        # to a single query: on a pipeline restart every source re-resolves at
-        # once, and multiplying the YouTube request burst raises the odds of
-        # tripping the IP bot-block. YouTube rotates which clients work — if this
-        # starts failing "No video formats found!" again, first `uv run yt-dlp -U`,
-        # then re-test clients (`--extractor-args youtube:player_client=<name>`)
-        # and update the one below.
-        cmd += ["--extractor-args", "youtube:player_client=android_vr"]
+        cmd += resolve_args()
         cmd += [self.url]
 
         try:

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import structlog
 
-from birdbrain.audio.youtube import _detect_js_runtime
+from birdbrain.audio.youtube import resolve_args
 from birdbrain.config import AppConfig, load_sources
 from birdbrain.storage import Database
 
@@ -143,9 +143,10 @@ def refresh(
         "--cookies", tmp,
         "-f", "bestaudio/best", "-g", "--no-warnings",
     ]
-    runtime = _detect_js_runtime()  # match the pipeline's resolve so validation is faithful
-    if runtime:
-        cmd += ["--js-runtimes", runtime]
+    # Resolve exactly the way the pipeline does — same JS runtime, same pinned
+    # player client. Anything less and the probe can fail for reasons that have
+    # nothing to do with the cookies, which silently discards a good export.
+    cmd += resolve_args()
     cmd.append(url)
     ok = False
     reason = ""
