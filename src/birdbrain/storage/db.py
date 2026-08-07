@@ -762,6 +762,19 @@ class Database:
                 u.password_hash = password_hash
         return True
 
+    def set_user_role(self, username: str, role: str) -> bool:
+        """Set an existing user's role. Returns False if there is no such user.
+
+        Roles are only meaningful against ``web.auth.ADMIN_ROLES``; this does no
+        validation of its own so a future role can be added without touching
+        storage."""
+        with self._Session() as s, s.begin():
+            u = s.scalar(select(UserRow).where(UserRow.username == username))
+            if u is None:
+                return False
+            u.role = role
+        return True
+
     def operator_exists(self) -> bool:
         with self._Session() as s:
             n = s.scalar(

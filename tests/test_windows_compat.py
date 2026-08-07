@@ -30,6 +30,7 @@ _SRC = _REPO / "src" / "birdbrain"
 # makes the whole module unimportable there (ModuleNotFoundError at import time).
 _UNIX_ONLY_MODULES = (
     "fcntl",
+    "pty",
     "termios",
     "pwd",
     "grp",

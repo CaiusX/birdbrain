@@ -56,6 +56,14 @@ class AppConfig(UnitConfig):
     # back to a plain "search XC" link that needs no auth.
     xeno_canto_key: str | None = None
 
+    # /admin/terminal: an interactive shell, in the browser, running as the web
+    # service's own user. OFF by default and deliberately opt-in — BirdBrain is
+    # self-hosted by other people, and a shell that shipped on by default would
+    # be an RCE none of those deployments asked for. Turning it on is a decision
+    # about your own threat model; put an edge authenticator (Cloudflare Access
+    # or equivalent) in front of /admin before you expose it publicly.
+    terminal_enabled: bool = False
+
     # Tester accounts. ``secret_key`` signs the session cookie; if unset, a
     # stable key is generated once and persisted in app_settings (so logins
     # survive restarts). ``invite_code`` gates self-serve signup over the

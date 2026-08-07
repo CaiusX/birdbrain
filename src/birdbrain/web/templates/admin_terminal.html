@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}BirdBrain · terminal{% endblock %}
+
+{# xterm is vendored rather than pulled from a CDN: the pipeline is offline-first
+   (see CLAUDE.md), and this page in particular must not depend on a third party
+   being reachable — it's the page you open when something is already wrong. #}
+{% block head_extra %}
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/xterm-addon-fit.js"></script>
+{% endblock %}
+
+{% block content %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between gap-3">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      Terminal
+      <span class="text-zinc-500 text-xs ml-1 normal-case">
+        shell as the service user{% if user %} · {{ user.username }}{% endif %}
+      </span>
+    </h2>
+    <div class="flex items-center gap-3">
+      <span id="term-status" class="text-xs text-zinc-500">connecting…</span>
+      <button id="term-reconnect"
+              class="text-xs px-2 py-1 rounded border border-zinc-700 text-zinc-300
+                     hover:bg-zinc-800 hidden">reconnect</button>
+    </div>
+  </div>
+  <div id="term" class="p-2" style="height:70vh"></div>
+</section>
+
+<script>
+(function () {
+  const statusEl = document.getElementById("term-status");
+  const againEl  = document.getElementById("term-reconnect");
+  const term = new Terminal({
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: 13,
+    cursorBlink: true,
+    // Matches the zinc palette the rest of the dashboard uses.
+    theme: { background: "#18181b", foreground: "#e4e4e7", cursor: "#e4e4e7" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("term"));
+  fit.fit();
+
+  let sock = null;
+
+  function setStatus(text, showReconnect) {
+    statusEl.textContent = text;
+    againEl.classList.toggle("hidden", !showReconnect);
+  }
+
+  function sendSize() {
+    if (sock && sock.readyState === WebSocket.OPEN) {
+      sock.send(JSON.stringify({ t: "r", rows: term.rows, cols: term.cols }));
+    }
+  }
+
+  function connect() {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    sock = new WebSocket(scheme + "://" + location.host + "/admin/terminal/ws");
+
+    sock.onopen = () => { setStatus("connected", false); sendSize(); term.focus(); };
+    sock.onmessage = (ev) => term.write(ev.data);
+    sock.onerror = () => setStatus("connection error", true);
+    sock.onclose = (ev) => {
+      // 4403 is our own "not authorised" close code — reconnecting won't help,
+      // so don't offer it. Anything else is worth another try.
+      if (ev.code === 4403) {
+        setStatus("not authorised", false);
+        term.write("\r\n\x1b[31mNot authorised.\x1b[0m\r\n");
+      } else if (ev.code === 4429) {
+        setStatus("too many sessions", true);
+      } else {
+        setStatus("disconnected", true);
+        term.write("\r\n\x1b[33mDisconnected.\x1b[0m\r\n");
+      }
+    };
+  }
+
+  term.onData((d) => {
+    if (sock && sock.readyState === WebSocket.OPEN) {
+      sock.send(JSON.stringify({ t: "i", d: d }));
+    }
+  });
+
+  againEl.addEventListener("click", () => { term.reset(); setStatus("connecting…", false); connect(); });
+  window.addEventListener("resize", () => { fit.fit(); sendSize(); });
+
+  connect();
+})();
+</script>
+{% endblock %}

@@ -839,5 +839,35 @@ def set_password(
     )
 
 
+@app.command(name="set-role")
+def set_role(
+    username: Annotated[str, typer.Argument(help="Existing account username.")],
+    role: Annotated[
+        str, typer.Option("--role", help="Role to assign, e.g. operator or tester.")
+    ],
+) -> None:
+    """Set an account's role.
+
+    ``operator`` is the admin role: it is what lets an account reach /admin
+    (and, when enabled, /admin/terminal) over the public tunnel. Granting it is
+    granting a shell — the terminal runs as the web service's own user. Pair it
+    with an edge authenticator; see docs/remote-admin.md.
+    """
+    from birdbrain.web import auth as auth_mod
+
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    uname = auth_mod.normalize_username(username)
+    if not db.set_user_role(uname, role):
+        console.print(f"[red]No such user: {uname!r}.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]{uname!r} is now {role!r}.[/green]")
+    if role in auth_mod.ADMIN_ROLES:
+        console.print(
+            "[yellow]That is an admin role — this account can now reach /admin "
+            "remotely, and a shell if BIRDBRAIN_TERMINAL_ENABLED is on.[/yellow]"
+        )
+
+
 if __name__ == "__main__":
     app()

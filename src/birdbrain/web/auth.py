@@ -15,6 +15,13 @@ import secrets
 _PBKDF2_ITERS = 240_000
 _USERNAME_RE = re.compile(r"^[a-z0-9_.-]{3,64}$")
 
+# Roles that may reach /admin over the public tunnel. Until 2026-08-07 the
+# ``role`` column existed but nothing read it — every account was equally
+# privileged in code, and /admin was kept safe purely by being LAN-only. Now
+# that /admin is reachable remotely, the column is load-bearing: adding a role
+# here grants shell-adjacent access, so change it deliberately.
+ADMIN_ROLES = frozenset({"operator"})
+
 # A password_hash that verify_password always rejects — used for the operator
 # account created by the backfill when no password has been set yet.
 UNUSABLE_PASSWORD = "!"
@@ -65,6 +72,16 @@ def normalize_username(raw: str) -> str:
 
 def valid_username(name: str) -> bool:
     return bool(_USERNAME_RE.match(name))
+
+
+def is_admin(user) -> bool:
+    """True if ``user`` (a UserRow or None) holds an admin role.
+
+    Deliberately total on None so callers can pass an unauthenticated request's
+    user straight in without a separate None check — the common path is
+    ``if not is_admin(request.state.user): 404``.
+    """
+    return user is not None and getattr(user, "role", None) in ADMIN_ROLES
 
 
 def get_or_create_secret_key(db) -> str:

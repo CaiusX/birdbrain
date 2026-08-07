@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import json
 import math
@@ -98,7 +99,15 @@ def _birdnet_catalog() -> list[dict[str, str]]:
 
 import squarify
 import structlog
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import (
+    FastAPI,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -140,6 +149,7 @@ from birdbrain.storage import (
     WorkerHeartbeatRow,
 )
 from birdbrain.web import auth as auth_mod
+from birdbrain.web import terminal
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
@@ -813,7 +823,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if is_public:
             path = request.url.path
             if path.startswith(_PUBLIC_BLOCKED_PREFIXES):
-                return Response(status_code=404)          # /admin → LAN only, always
+                # /admin over the tunnel is for admin-role accounts only. Note
+                # what this does NOT do: it is one factor (a password), so it is
+                # not on its own sufficient protection for a remotely reachable
+                # admin console — put an edge authenticator in front of /admin
+                # too. See docs/remote-admin.md. 404 rather than 403 for
+                # everyone else, so the tunnel doesn't confirm /admin exists.
+                if not auth_mod.is_admin(request.state.user):
+                    return Response(status_code=404)
             if any(path.startswith(p) for p in _PUBLIC_ALLOWED_PREFIXES):
                 pass                                       # TBB ingest/enroll (token/code-gated)
             elif path in _AUTH_ALLOWED_PATHS or path.startswith("/auth/"):
@@ -4216,6 +4233,109 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         """Fully re-enable a species: drop ALL its rules (all-sites + per-site)."""
         db.remove_species_everywhere(scientific_name.strip())
         return RedirectResponse("/admin/suppressions", status_code=303)
+
+    # ---------------------------------------------------------------- terminal
+    # An interactive shell in the browser, as the web service's own user. Three
+    # independent conditions must hold, and each is checked on BOTH routes
+    # because the WebSocket cannot rely on the middleware (see below):
+    #   1. cfg.terminal_enabled  — opt-in, off by default
+    #   2. terminal.available()  — a PTY exists on this platform (not Windows)
+    #   3. auth_mod.is_admin()   — the session belongs to an admin-role account
+    _terminal_sessions: set[terminal.TerminalSession] = set()
+
+    def _terminal_ready() -> bool:
+        return bool(cfg.terminal_enabled) and terminal.available()
+
+    @app.get("/admin/terminal", response_class=HTMLResponse)
+    def admin_terminal(request: Request) -> HTMLResponse:
+        """The terminal page. 404 (not 403) when unavailable or unauthorised, so
+        a probe can't distinguish 'disabled' from 'you aren't allowed' from
+        'no such route'."""
+        if not _terminal_ready() or not auth_mod.is_admin(request.state.user):
+            raise HTTPException(status_code=404)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "admin_terminal.html",
+            {"user": request.state.user},
+        )
+
+    @app.websocket("/admin/terminal/ws")
+    async def admin_terminal_ws(websocket: WebSocket) -> None:
+        """Shell I/O over a WebSocket.
+
+        This route authenticates itself rather than trusting the surrounding
+        middleware. Starlette's ``@app.middleware("http")`` — which is what the
+        public-tunnel gate is — only runs for scope type "http", so it never
+        sees a WebSocket handshake. Without the check below, /admin being
+        blocked over the tunnel would not have blocked this socket at all.
+        SessionMiddleware *does* cover the websocket scope, so the signed
+        session cookie is readable here.
+        """
+        uid = websocket.session.get("uid")
+        user = db.get_user_by_id(uid) if uid else None
+        if not _terminal_ready() or not auth_mod.is_admin(user):
+            await websocket.close(code=4403)
+            return
+        if len(_terminal_sessions) >= terminal.MAX_SESSIONS:
+            await websocket.close(code=4429)
+            return
+
+        await websocket.accept()
+        session = terminal.TerminalSession()
+        _terminal_sessions.add(session)
+        log.info(
+            "terminal.session_open",
+            user=getattr(user, "username", None),
+            active=len(_terminal_sessions),
+        )
+        try:
+            await session.start()
+        except OSError:
+            log.exception("terminal.start_failed")
+            _terminal_sessions.discard(session)
+            await websocket.close(code=4500)
+            return
+
+        async def pump_out() -> None:
+            """Shell → browser, until the shell exits."""
+            while True:
+                chunk = await session.read()
+                if chunk is None:
+                    break
+                await websocket.send_text(chunk.decode("utf-8", errors="replace"))
+
+        async def pump_in() -> None:
+            """Browser → shell. Text frames are JSON control/input messages."""
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    continue
+                if msg.get("t") == "i":
+                    session.write(str(msg.get("d", "")).encode("utf-8"))
+                elif msg.get("t") == "r":
+                    session.resize(msg.get("rows", 24), msg.get("cols", 80))
+
+        outbound = asyncio.create_task(pump_out())
+        inbound = asyncio.create_task(pump_in())
+        try:
+            # Either direction ending ends the session: the shell exited, or the
+            # browser went away. Whichever it was, the other pump is now moot.
+            await asyncio.wait(
+                {outbound, inbound}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except WebSocketDisconnect:  # pragma: no cover - client vanished
+            pass
+        finally:
+            for task in (outbound, inbound):
+                task.cancel()
+            await asyncio.gather(outbound, inbound, return_exceptions=True)
+            await session.close()
+            _terminal_sessions.discard(session)
+            with contextlib.suppress(RuntimeError):
+                await websocket.close()
+            log.info("terminal.session_closed", active=len(_terminal_sessions))
 
     @app.get("/admin/replays", response_class=HTMLResponse)
     def admin_replays(
