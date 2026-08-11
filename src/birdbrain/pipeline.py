@@ -611,11 +611,18 @@ def run_all(sources: Iterable[SourceConfig], app: AppConfig) -> None:
         UI, and let the next reconcile() launch a fresh worker. The wedged
         thread will eventually die when ffmpeg times out or the process is
         cleaned up.
+
+        The registry lookup below is load-bearing, not defensive tidying.
+        stale_workers() reports on heartbeat age alone and knows nothing about
+        whether we are running a source, so it will happily name long-retired
+        ones (and push-fed TBB units, which heartbeat over /ingest and never
+        have a worker here). Skipping anything we don't hold is what makes that
+        safe — don't "simplify" it away.
         """
         for name in db.stale_workers(STALE_HEARTBEAT_S):
             w = workers.get(name)
             if w is None:
-                continue
+                continue  # not ours to kick — retired source, or a TBB unit
             log.warning(
                 "supervisor.stalled",
                 source=name,

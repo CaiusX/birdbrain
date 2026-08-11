@@ -1289,15 +1289,29 @@ class Database:
             return list(s.scalars(select(WorkerHeartbeatRow)))
 
     def stale_workers(self, max_age_s: float) -> list[str]:
-        """Source names whose worker still claims to be running but hasn't
-        sent a heartbeat in ``max_age_s`` seconds. These are stuck —
-        typically blocked on an ffmpeg read against a frozen HLS stream.
-        The supervisor uses this to kick replacements."""
+        """Source names whose worker hasn't sent a heartbeat in ``max_age_s``
+        seconds. These are stuck — typically blocked on an ffmpeg read against
+        a frozen HLS stream. The supervisor uses this to kick replacements.
+
+        Deliberately ignores ``state``. It used to require ``state ==
+        'running'``, which opened a hole big enough to strand a source for good:
+        a worker that writes ``stopped`` on its way out can land *after* its
+        replacement has already started, leaving the row marked stopped while a
+        live thread holds the capture. The watchdog then couldn't see it (not
+        'running') and reconcile() wouldn't respawn it (thread still alive), so
+        the source stayed dark until the whole pipeline was restarted. JHB -
+        Hyde Park sat like that for 13 hours on 2026-08-10.
+
+        Judging on heartbeat age alone is safe because the caller only acts on
+        names it currently has a worker for — a genuinely stopped source has no
+        registry entry, so it is skipped there rather than filtered here. Which
+        is the right split: this table is what the *UI* reads, and using its
+        display state as supervisor control flow was the mistake.
+        """
         cutoff = datetime.now(UTC) - timedelta(seconds=max_age_s)
         with self._Session() as s:
             rows = s.scalars(
                 select(WorkerHeartbeatRow)
-                .where(WorkerHeartbeatRow.state == "running")
                 .where(WorkerHeartbeatRow.last_heartbeat_at < cutoff)
             )
             return [r.source_name for r in rows]
