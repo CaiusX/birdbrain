@@ -58,6 +58,13 @@ QUALITY_SAMPLE_S = 600.0    # trend point for the sparkline
 QUALITY_PRUNE_S = 3600.0    # drop samples older than a week
 QUALITY_SAMPLE_RETENTION_DAYS = 7
 
+# Floor for "the capture loop is alive". Lives here, next to the code that
+# writes the heartbeat, because three readers now depend on it: the unit's
+# /healthz "listening" flag, tbb-update.sh's rollback gate (which reads that
+# flag), and the sync agent's idle keep-alive. Defining "fresh" twice is how
+# two of them quietly end up disagreeing.
+HEARTBEAT_FRESH_FLOOR_S = 90.0
+
 
 def run_capture(
     cfg: SourceConfig,
@@ -100,6 +107,39 @@ def run_capture(
 
     slog.info("capture.stopped")
     _safely(slog, "worker.stopped_failed", db.worker_stopped, cfg.name)
+
+
+def heartbeat_fresh_s(cfg: UnitConfig) -> float:
+    """How stale a heartbeat may be before the capture loop stops reading as
+    alive.
+
+    Three beats of slack, never less than the 90 s floor: one missed beat is a
+    slow chunk, three is a stopped worker. Keep the floor above the beat
+    interval — tbb-update.sh gates its rollback on the ``listening`` flag
+    derived from this, so a tighter bound rolls back perfectly good updates.
+    """
+    return max(HEARTBEAT_FRESH_FLOOR_S, 3.0 * cfg.worker_heartbeat_seconds)
+
+
+def capture_is_live(db: Database, cfg: UnitConfig) -> bool:
+    """Is the capture loop actually still consuming audio?
+
+    Both conditions matter. ``state`` alone is not enough: the loop can wedge
+    inside ``_consume`` — blocked in a kernel read that never returns — leaving
+    the row saying "running" forever while the mic hears nothing. Freshness
+    alone is not enough either, because a cleanly stopped worker leaves its last
+    heartbeat behind. Neither is a hypothetical: central's supervisor lost a
+    source for 13 hours to exactly this shape on 2026-08-10.
+    """
+    row = db.get_worker_heartbeat(cfg.tbb_unit_id)
+    if row is None or row.state != "running":
+        return False
+    last = row.last_heartbeat_at
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)  # SQLite drops tz; we always write UTC
+    return (datetime.now(UTC) - last).total_seconds() < heartbeat_fresh_s(cfg)
 
 
 def _safely(slog, event: str, fn, *args) -> None:

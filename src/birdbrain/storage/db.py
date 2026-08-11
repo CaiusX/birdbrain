@@ -1284,6 +1284,17 @@ class Database:
             if row is not None:
                 row.state = "stopped"
 
+    def get_worker_heartbeat(self, source_name: str) -> WorkerHeartbeatRow | None:
+        """One worker's heartbeat row, or None if it has never run.
+
+        The row is detached — read its fields, don't expect it to refresh.
+        """
+        with self._Session() as s:
+            row = s.get(WorkerHeartbeatRow, source_name)
+            if row is not None:
+                s.expunge(row)
+            return row
+
     def list_worker_heartbeats(self) -> list[WorkerHeartbeatRow]:
         with self._Session() as s:
             return list(s.scalars(select(WorkerHeartbeatRow)))

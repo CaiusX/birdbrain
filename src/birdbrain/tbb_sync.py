@@ -37,6 +37,7 @@ from birdbrain.logging import get_logger
 from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
 from birdbrain.sync_status import STATUS, jittered
+from birdbrain.tbb_capture import capture_is_live
 from birdbrain.wire import SCHEMA_CONFLICT_STATUS, SCHEMA_VERSION
 
 log = get_logger(__name__)
@@ -257,11 +258,31 @@ def _sync_loop(db: Database, cfg: UnitConfig, stop_event: threading.Event) -> No
                 # On its own clock, though. Sending one every tick cost ~2MB/day
                 # on a metered link purely to say nothing had changed; 0 turns
                 # it off entirely for a unit that only reports when it has news.
+                #
+                # Only while the mic is actually being read. Central stamps a
+                # heartbeat on every ingest including empty ones, so a unit
+                # whose capture loop has wedged would keep posting "I'm here"
+                # and read as healthy on the dashboard while hearing nothing —
+                # the one failure the dashboard exists to surface, made
+                # invisible by the keep-alive that was meant to help. Staying
+                # quiet lets central's ordinary stale-heartbeat logic mark the
+                # unit offline, using machinery that already exists.
+                #
+                # Real detections are never gated on this: if there is backlog
+                # to flush it goes out regardless, because data that was
+                # captured before the wedge is still good.
                 now = time.monotonic()
                 due = cfg.tbb_sync_keepalive_seconds > 0 and (
                     last_keepalive is None
                     or now - last_keepalive >= cfg.tbb_sync_keepalive_seconds
                 )
+                if due and not capture_is_live(db, cfg):
+                    log.warning(
+                        "tbb_sync.keepalive_suppressed",
+                        unit=cfg.tbb_unit_id,
+                        reason="capture heartbeat is stale — letting central see us go offline",
+                    )
+                    due = False
                 if due and post_batch(
                     cfg.tbb_central_url,
                     cfg.tbb_device_token,

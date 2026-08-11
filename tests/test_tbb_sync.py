@@ -17,6 +17,18 @@ from birdbrain.tbb_sync import (
 )
 
 
+def _listening(db, unit="tbb-test"):
+    """Mark the capture loop alive.
+
+    The idle keep-alive is gated on it — a unit whose capture has wedged must
+    stop vouching for itself so central can see it go offline. Tests that are
+    about the keep-alive *clock* need this, or they pass for the wrong reason.
+    """
+    db.worker_started(unit)
+    db.worker_heartbeat(unit)
+    return db
+
+
 def _db_with(tmp_path, n):
     db = Database(f"sqlite:///{tmp_path / 'sync.sqlite'}")
     base = datetime.now(UTC)
@@ -237,7 +249,7 @@ def test_intervals_are_jittered_so_a_fleet_does_not_phase_lock(tmp_path):
 def test_keepalive_has_its_own_clock(tmp_path, monkeypatch):
     """Empty batches carry no data and cost ~2MB/day on a metered link. They
     should refresh central's liveness occasionally, not every tick."""
-    db = _db_with(tmp_path, 0)
+    db = _listening(_db_with(tmp_path, 0))
     cfg = _cfg(tmp_path, tbb_sync_interval_seconds=1, tbb_sync_keepalive_seconds=1800)
     monkeypatch.setattr(tbb_sync, "make_session", lambda tok: _DummySession())
     posts = []
@@ -260,7 +272,7 @@ def test_keepalive_has_its_own_clock(tmp_path, monkeypatch):
 
 def test_keepalive_can_be_turned_off_entirely(tmp_path, monkeypatch):
     """0 = a unit that only ever speaks when it has something to report."""
-    db = _db_with(tmp_path, 0)
+    db = _listening(_db_with(tmp_path, 0))
     cfg = _cfg(tmp_path, tbb_sync_interval_seconds=1, tbb_sync_keepalive_seconds=0)
     monkeypatch.setattr(tbb_sync, "make_session", lambda tok: _DummySession())
     posts = []
@@ -272,6 +284,49 @@ def test_keepalive_can_be_turned_off_entirely(tmp_path, monkeypatch):
     tbb_sync._sync_loop(db, cfg, stop)
 
     assert posts == [], "an idle unit with keep-alive off should send nothing"
+
+
+def test_keepalive_is_suppressed_when_capture_has_wedged(tmp_path, monkeypatch):
+    """A deaf unit must stop vouching for itself.
+
+    Central stamps a heartbeat on every ingest, empty ones included, so a unit
+    whose capture loop has wedged would keep posting "I'm here" and read as
+    healthy on the dashboard while hearing nothing — the keep-alive hiding
+    precisely the failure the dashboard exists to surface. Silence lets
+    central's ordinary stale-heartbeat logic mark it offline.
+    """
+    db = _db_with(tmp_path, 0)  # no worker heartbeat at all == not capturing
+    cfg = _cfg(tmp_path, tbb_sync_interval_seconds=1, tbb_sync_keepalive_seconds=1)
+    monkeypatch.setattr(tbb_sync, "make_session", lambda tok: _DummySession())
+    posts = []
+    monkeypatch.setattr(tbb_sync, "post_batch", lambda *a, **k: posts.append(1) or True)
+
+    stop = threading.Event()
+    ticks = {"n": 0}
+    stop.wait = lambda t: (ticks.__setitem__("n", ticks["n"] + 1), ticks["n"] >= 4)[1]
+    tbb_sync._sync_loop(db, cfg, stop)
+
+    assert posts == [], "a wedged unit must not keep central's heartbeat warm"
+
+
+def test_a_wedged_unit_still_flushes_real_detections(tmp_path, monkeypatch):
+    """Only the empty keep-alive is gated. Audio captured before the wedge is
+    still good data and must not be held hostage to the liveness check."""
+    db = _db_with(tmp_path, 3)  # backlog, but still no worker heartbeat
+    cfg = _cfg(tmp_path, tbb_sync_interval_seconds=1, tbb_sync_keepalive_seconds=1)
+    monkeypatch.setattr(tbb_sync, "make_session", lambda tok: _DummySession())
+    sent = []
+    monkeypatch.setattr(
+        tbb_sync, "post_batch",
+        lambda url, tok, payload, **k: sent.append(len(payload["detections"])) or True,
+    )
+
+    stop = threading.Event()
+    ticks = {"n": 0}
+    stop.wait = lambda t: (ticks.__setitem__("n", ticks["n"] + 1), ticks["n"] >= 2)[1]
+    tbb_sync._sync_loop(db, cfg, stop)
+
+    assert sum(sent) == 3, f"backlog must drain regardless of capture state, got {sent}"
 
 
 class _DummySession:

@@ -42,6 +42,7 @@ from birdbrain.config_core import UnitConfig
 from birdbrain.logging import get_logger
 from birdbrain.storage import Database, DetectionRow, WorkerHeartbeatRow
 from birdbrain.sync_status import STATUS
+from birdbrain.tbb_capture import heartbeat_fresh_s
 from birdbrain.tbb_sync import start_sync_agent
 
 log = get_logger(__name__)
@@ -57,19 +58,9 @@ TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 # The feed serves the audio itself instead; see _tbb_feed.html.
 
 FEED_LIMIT = 60
-# Floor for "listening". Derived from the configured heartbeat cadence below,
-# because tbb-update.sh gates its rollback on `"listening": true` — if this ever
-# falls under the beat interval, a perfectly good update rolls itself back.
-HEARTBEAT_FRESH_FLOOR_S = 90.0
-
-
-def heartbeat_fresh_s(cfg: UnitConfig) -> float:
-    """How stale a heartbeat may be before the unit stops reading as listening.
-
-    Three beats of slack, never less than the 90 s floor: one missed beat is a
-    slow chunk, three is a stopped worker.
-    """
-    return max(HEARTBEAT_FRESH_FLOOR_S, 3.0 * cfg.worker_heartbeat_seconds)
+# "Listening" is defined by the capture module that writes the heartbeat, not
+# here — the sync agent's idle keep-alive reads the same rule, and a second
+# definition in the web layer would be free to drift away from it.
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
