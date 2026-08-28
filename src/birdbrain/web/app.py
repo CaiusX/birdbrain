@@ -374,6 +374,17 @@ TEMPLATES.env.globals["site_color"] = _site_color
 
 _SPECIES_LINK_TTL = 300.0  # seconds; the detected-species set changes slowly
 
+# The front page's all-time and 30-day roll-ups: how many species each site has
+# ever logged, when each first came online, and the 30-day species overlap that
+# draws the map's connection web. Each is a full scan of `detections` (2.4s,
+# 0.4s and 1.4s respectively on 1.58M rows) and every one was recomputed on
+# every homepage load, which is most of why `/` took ~11s. They move on the
+# scale of days — a site's all-time species count changes when something new
+# turns up — so serving them a few minutes stale costs nothing a reader would
+# notice. Per worker, so the real recompute rate is this divided by the worker
+# count.
+_FRONT_SLOW_TTL = 300.0
+
 
 def _make_species_linkifier(db):
     """Build a Jinja filter that turns detected-species common names in note
@@ -885,6 +896,60 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             seen.add(src.name)
         return out
 
+    _front_slow_cache: dict = {"ts": 0.0, "val": None}
+    _front_slow_lock = threading.Lock()
+
+    def _front_slow_aggregates() -> tuple[dict, dict, list]:
+        """The three front-page roll-ups that scan the whole detections table.
+
+        Returns (species_all_by_src, first_seen_by_src, dpairs_30d). Cached for
+        ``_FRONT_SLOW_TTL`` because each is a full scan and none of them can
+        change visibly in five minutes: two are all-time figures over 1.58M
+        rows, the third a 30-day species overlap.
+
+        Double-checked under a lock so a burst of concurrent requests produces
+        one recompute rather than one each — this used to be ~4.2s of the
+        homepage, so the thundering herd is worth preventing.
+        """
+        now_m = time.monotonic()
+        if (_front_slow_cache["val"] is not None
+                and now_m - _front_slow_cache["ts"] <= _FRONT_SLOW_TTL):
+            return _front_slow_cache["val"]
+        with _front_slow_lock:
+            now_m = time.monotonic()
+            if (_front_slow_cache["val"] is not None
+                    and now_m - _front_slow_cache["ts"] <= _FRONT_SLOW_TTL):
+                return _front_slow_cache["val"]
+            thirty_d = datetime.now(UTC) - timedelta(days=30)
+            with db.session() as s:
+                # Per-site all-time figures for the map's site-summary popup:
+                # how many distinct species the site has ever logged, and when
+                # it first produced a detection ("online since").
+                species_all_by_src = dict(
+                    s.execute(
+                        select(
+                            DetectionRow.source_name,
+                            func.count(func.distinct(DetectionRow.scientific_name)),
+                        ).group_by(DetectionRow.source_name)
+                    ).all()
+                )
+                first_seen_by_src = dict(
+                    s.execute(
+                        select(
+                            DetectionRow.source_name,
+                            func.min(DetectionRow.started_at),
+                        ).group_by(DetectionRow.source_name)
+                    ).all()
+                )
+                dpairs = s.execute(
+                    select(DetectionRow.source_name, DetectionRow.scientific_name)
+                    .where(DetectionRow.started_at >= thirty_d)
+                    .distinct()
+                ).all()
+            val = (species_all_by_src, first_seen_by_src, dpairs)
+            _front_slow_cache.update(ts=time.monotonic(), val=val)
+            return val
+
     def _front_activity(
         sources_by_name: dict[str, SourceConfig],
     ) -> tuple[list[dict], dict, list[dict]]:
@@ -917,23 +982,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             species_all = s.execute(
                 select(func.count(func.distinct(DetectionRow.scientific_name)))
             ).scalar()
-            # Per-site all-time figures for the map's site-summary popup: how
-            # many distinct species the site has ever logged, and when it first
-            # produced a detection ("online since").
-            species_all_by_src = dict(
-                s.execute(
-                    select(
-                        DetectionRow.source_name,
-                        func.count(func.distinct(DetectionRow.scientific_name)),
-                    ).group_by(DetectionRow.source_name)
-                ).all()
-            )
-            first_seen_by_src = dict(
-                s.execute(
-                    select(DetectionRow.source_name, func.min(DetectionRow.started_at))
-                    .group_by(DetectionRow.source_name)
-                ).all()
-            )
+
+        # Per-site all-time figures for the map's site-summary popup, plus the
+        # 30-day overlap used further down. Full scans, so they come from the
+        # TTL cache rather than this request.
+        species_all_by_src, first_seen_by_src, dpairs = _front_slow_aggregates()
 
         # tz per source (cached) — drives source-local hour bucketing + bands.
         tz_cache: dict[str, ZoneInfo] = {}
@@ -1040,23 +1093,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "last_age_s": last_age,
         }
 
-        # Inter-site shared-species web. 30-day window so the lines reflect
-        # ecological / flyway overlap rather than 24h noise. We keep each
-        # site's two strongest links and let pairs dedupe — this caps the
-        # drawing at ~20 lines for an 11-site network, dense enough to read
-        # without smothering the map.
-        thirty_d = now - timedelta(days=30)
+        # Inter-site shared-species web, from the cached 30-day pairs above.
+        # 30 days so the lines reflect ecological / flyway overlap rather than
+        # 24h noise. We keep each site's two strongest links and let pairs
+        # dedupe — this caps the drawing at ~20 lines for an 11-site network,
+        # dense enough to read without smothering the map.
         coords_by_name = {
             e["name"]: (e["lat"], e["lon"])
             for e in activity
             if e["lat"] is not None and e["lon"] is not None
         }
-        with db.session() as s:
-            dpairs = s.execute(
-                select(DetectionRow.source_name, DetectionRow.scientific_name)
-                .where(DetectionRow.started_at >= thirty_d)
-                .distinct()
-            ).all()
         sp_by_src: dict[str, set[str]] = {}
         for src, sci in dpairs:
             if src in coords_by_name:
