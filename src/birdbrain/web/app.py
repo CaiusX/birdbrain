@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
@@ -108,7 +109,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Integer, and_, case, desc, exists, func, or_, select
+from sqlalchemy import Integer, and_, case, desc, exists, func, or_, select, text
 from starlette.middleware.sessions import SessionMiddleware
 
 from birdbrain import sandbox
@@ -384,6 +385,42 @@ _SPECIES_LINK_TTL = 300.0  # seconds; the detected-species set changes slowly
 # notice. Per worker, so the real recompute rate is this divided by the worker
 # count.
 _FRONT_SLOW_TTL = 300.0
+
+# "Running but deaf": a source whose worker is healthy and whose ffmpeg is
+# streaming, but which has stopped producing detections. JHB - Hyde Park sat
+# like that from 2026-08-25 to 08-28 — the USB mic stopped delivering samples,
+# PipeWire still reported the node "running", the supervisor kept dutifully
+# respawning a worker that had nothing to hear, and every panel stayed green.
+#
+# The threshold has to be per-source. Twin Pan's worst normal silence is ~34
+# minutes; Hyde Park's is ~6.6h of overnight quiet. Any single number either
+# cries wolf at every site each night or takes days to notice a dead one. So
+# each source is judged against its own habits.
+#
+# The statistic is the *median across days of that day's longest silence*. The
+# daily maximum absorbs the legitimate nightly lull; taking the median across
+# days stops an outage from teaching the alert that outages are normal. That
+# second half matters more than it sounds — Hyde Park's plain 14-day maximum
+# gap was 58.5h, which is just its own failure folded back into its baseline.
+_SILENCE_BASELINE_DAYS = 14
+_SILENCE_BASELINE_TTL = 3600.0    # habits move on the scale of days
+_SILENCE_WATCH_TTL = 60.0         # the live half; /admin re-polls every 30s
+# Tuned by replaying the fleet's last 14 days at 6-hourly checkpoints, scoring
+# how fast the real Hyde Park outage was caught against how often anything else
+# fired. The knee is at 2.5 — a third of the noise for six more hours of
+# latency, which is a good trade when the failure being caught lasts days:
+#
+#   factor   Hyde Park fires   other fires   caught the outage after
+#     1.5          7               10                14h
+#     2.0          7                6                14h
+#     2.5          6                2                20h   <- chosen
+#     3.0          5                2                26h
+#     4.0          4                1                32h
+#
+# The "other fires" at 2.0 were mostly long nights on YouTube sites, not faults.
+_SILENCE_FACTOR = 2.5             # multiple of a source's own worst normal day
+_SILENCE_FLOOR_S = 3 * 3600.0     # never cry wolf below this, however chatty
+_SILENCE_MIN_DAYS = 3             # too new to have habits worth judging
 
 
 def _make_species_linkifier(db):
@@ -3691,6 +3728,124 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "down_today_s": down_today_s,
         }
 
+    _silence_base_cache: dict = {"ts": 0.0, "val": None}
+    _silence_watch_cache: dict = {"ts": 0.0, "val": None}
+    _silence_lock = threading.Lock()
+
+    def _silence_baselines() -> dict[str, float]:
+        """Per source, the longest silence it normally goes through in a day.
+
+        Median over ``_SILENCE_BASELINE_DAYS`` of each day's largest gap between
+        consecutive detections. Sources with fewer than ``_SILENCE_MIN_DAYS`` of
+        history are left out — a source that has barely run has no habits to be
+        judged against, and guessing produces exactly the false alarm that makes
+        people stop reading alerts.
+
+        A window function over two weeks of rows, so it is cached for an hour.
+        """
+        rows = None
+        with db.session() as s:
+            rows = s.execute(
+                text(
+                    """
+                    WITH g AS (
+                      SELECT source_name, started_at,
+                             (julianday(started_at) - julianday(
+                                LAG(started_at) OVER (
+                                  PARTITION BY source_name ORDER BY started_at)
+                             )) * 86400.0 AS gap
+                      FROM detections
+                      WHERE started_at >= :since
+                    )
+                    SELECT source_name, date(started_at) AS d, MAX(gap) AS worst
+                    FROM g WHERE gap IS NOT NULL
+                    GROUP BY source_name, d
+                    """
+                ),
+                {
+                    "since": (
+                        datetime.now(UTC) - timedelta(days=_SILENCE_BASELINE_DAYS)
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+                },
+            ).all()
+        per_source: dict[str, list[float]] = {}
+        for src, _d, worst in rows:
+            if worst is not None:
+                per_source.setdefault(src, []).append(float(worst))
+        return {
+            src: statistics.median(v)
+            for src, v in per_source.items()
+            if len(v) >= _SILENCE_MIN_DAYS
+        }
+
+    def _silence_watch() -> dict[str, dict]:
+        """Per source: how long since its last detection, and how long it is
+        allowed to be quiet before that counts as deaf.
+
+        Returns ``{name: {"silent_s": float, "threshold_s": float}}``, only for
+        sources that have a baseline. The caller decides what to do with it —
+        this says nothing about whether the worker is running.
+        """
+        now_m = time.monotonic()
+        cached = _silence_watch_cache["val"]
+        if cached is not None and now_m - _silence_watch_cache["ts"] <= _SILENCE_WATCH_TTL:
+            return cached
+        with _silence_lock:
+            now_m = time.monotonic()
+            cached = _silence_watch_cache["val"]
+            if cached is not None and now_m - _silence_watch_cache["ts"] <= _SILENCE_WATCH_TTL:
+                return cached
+            base = _silence_base_cache["val"]
+            if base is None or now_m - _silence_base_cache["ts"] > _SILENCE_BASELINE_TTL:
+                base = _silence_baselines()
+                _silence_base_cache.update(ts=time.monotonic(), val=base)
+            now = datetime.now(UTC)
+            with db.session() as s:
+                last_by_src = dict(
+                    s.execute(
+                        select(
+                            DetectionRow.source_name,
+                            func.max(DetectionRow.started_at),
+                        ).group_by(DetectionRow.source_name)
+                    ).all()
+                )
+            out: dict[str, dict] = {}
+            for src, typical in base.items():
+                last = last_by_src.get(src)
+                if last is None:
+                    continue
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=UTC)
+                out[src] = {
+                    "silent_s": max(0.0, (now - last).total_seconds()),
+                    "threshold_s": max(_SILENCE_FLOOR_S, _SILENCE_FACTOR * typical),
+                }
+            _silence_watch_cache.update(ts=time.monotonic(), val=out)
+            return out
+
+    def _deaf_sources(running: list[str]) -> list[dict]:
+        """Of the sources whose worker claims to be running, the ones that have
+        gone quiet for far longer than they ever normally do.
+
+        Kept apart from the "not running" list on purpose. Those sources admit
+        they are down and show up on every other panel; this is the opposite
+        failure — a source insisting it is fine while producing nothing — and
+        folding the two together would bury the one you cannot see any other
+        way.
+        """
+        silence = _silence_watch()
+        out = [
+            {
+                "name": name,
+                "silent_s": int(q["silent_s"]),
+                "threshold_s": int(q["threshold_s"]),
+            }
+            for name in running
+            if (q := silence.get(name)) and q["silent_s"] > q["threshold_s"]
+        ]
+        out.sort(key=lambda d: -d["silent_s"])
+        return out
+
     def _health_view() -> dict:
         """Raspberry Pi host health for the admin page: CPU load, memory, SoC
         temperature, throttling/under-voltage, uptime and storage headroom —
@@ -3700,14 +3855,17 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
         workers_running = 0
         problems: list[dict] = []
+        running: list[str] = []
         for cfg_src in ordered:
             status, since_s, _, error = _hb_status(heartbeats.get(cfg_src.name), now)
             if status == "running":
                 workers_running += 1
+                running.append(cfg_src.name)
             else:
                 problems.append(
                     {"name": cfg_src.name, "status": status, "since_s": since_s, "error": error}
                 )
+        deaf = _deaf_sources(running)
 
         with db.session() as s:
             last_det = s.execute(select(func.max(DetectionRow.started_at))).scalar()
@@ -3780,6 +3938,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "workers_running": workers_running,
                 "workers_total": len(ordered),
                 "worker_problems": problems,
+                "deaf_sources": deaf,
                 "last_det_age_s": last_det_age_s,
                 "det_24h": det_24h,
                 "infer_pct": infer_pct,

@@ -30,6 +30,23 @@
     ⚠ Pi is {{ 'under-voltage' if thr.under_voltage_now else ('throttled' if thr.throttled_now else 'frequency-capped') }} right now — check the power supply.
   </div>
 {% endif %}
+{# Running but deaf — worker healthy, no detections for far longer than this
+   source normally goes quiet. Rose rather than amber, and above the "not
+   running" banner: a site that admits it is down is already visible on every
+   other panel, while this one looks green everywhere else. #}
+{% if h.deaf_sources %}
+  <div class="px-4 py-2 bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs rounded-lg mb-3">
+    ⚠ {{ h.deaf_sources | length }} site{{ '' if h.deaf_sources|length == 1 else 's' }}
+    running but silent — worker healthy, no detections:
+    {% for d in h.deaf_sources %}
+      <span class="inline-block ml-1"
+            title="normally quiet at most {{ dur(d.threshold_s) }} before this counts as deaf">
+        <a href="/site/{{ d.name | urlencode }}"
+           class="underline decoration-rose-500/40 hover:text-rose-200">{{ d.name }}</a>
+        <span class="text-rose-200/70">({{ dur(d.silent_s) }} silent)</span>{{ ',' if not loop.last }}</span>
+    {% endfor %}
+  </div>
+{% endif %}
 {% if h.worker_problems %}
   <div class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs rounded-lg mb-3">
     {{ h.worker_problems | length }} site{{ '' if h.worker_problems|length == 1 else 's' }} not running:
