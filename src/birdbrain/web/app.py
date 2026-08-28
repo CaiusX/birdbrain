@@ -402,6 +402,51 @@ _FRONT_SLOW_TTL = 300.0
 # days stops an outage from teaching the alert that outages are normal. That
 # second half matters more than it sounds — Hyde Park's plain 14-day maximum
 # gap was 58.5h, which is just its own failure folded back into its baseline.
+# Several pages are built from roll-ups that scan the whole detections table:
+# the confidence curves (two group-bys, ~5.5s each), /rare's newly-heard and
+# label tallies (~5.5s and ~2.5s), the detected-species list behind every
+# spectrogram palette (~1.8s). All were recomputed per page load on 1.58M rows
+# and all move on the scale of hours, not seconds.
+#
+# The key space is tiny — a `since` window, sometimes a site filter — so a small
+# bounded map keyed on the arguments is enough. Deliberately *not*
+# functools.lru_cache: that would pin the first result forever, and these must
+# eventually notice new detections.
+def _ttl_cache(ttl: float, maxsize: int = 32):
+    """Memoise a pure function on its arguments for ``ttl`` seconds.
+
+    The wrapped function must take only hashable arguments and must not depend
+    on request state — everything here is a read-only roll-up of the detections
+    table, which is exactly that.
+    """
+    def decorate(fn):
+        store: dict = {}
+        lock = threading.Lock()
+
+        @functools.wraps(fn)
+        def wrapper(*args):
+            now = time.monotonic()
+            hit = store.get(args)
+            if hit is not None and now - hit[0] <= ttl:
+                return hit[1]
+            with lock:
+                hit = store.get(args)
+                if hit is not None and time.monotonic() - hit[0] <= ttl:
+                    return hit[1]
+                val = fn(*args)
+                if len(store) >= maxsize:
+                    store.pop(min(store, key=lambda k: store[k][0]), None)
+                store[args] = (time.monotonic(), val)
+                return val
+
+        wrapper.cache_clear = store.clear      # type: ignore[attr-defined]
+        wrapper.cache_size = store.__len__     # type: ignore[attr-defined]
+        return wrapper
+    return decorate
+
+
+_PAGE_ROLLUP_TTL = 300.0   # page roll-ups; same reasoning as _FRONT_SLOW_TTL
+
 _SILENCE_BASELINE_DAYS = 14
 _SILENCE_BASELINE_TTL = 3600.0    # habits move on the scale of days
 _SILENCE_WATCH_TTL = 60.0         # the live half; /admin re-polls every 30s
@@ -1220,6 +1265,24 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     g["r"] = r
         return [groups[k] for k in order]
 
+    @_ttl_cache(_PAGE_ROLLUP_TTL)
+    def _detected_common_names() -> list[str]:
+        """Every common name we have ever detected, sorted.
+
+        A group-by over the whole table (~1.8s) for a list that grows by one
+        entry every few days. It is pulled in by every page that renders a
+        detection row, so it was quietly on the critical path of most of the
+        site — 21% of /rare, for one.
+        """
+        with db.session() as s:
+            return list(
+                s.scalars(
+                    select(DetectionRow.common_name)
+                    .group_by(DetectionRow.common_name)
+                    .order_by(DetectionRow.common_name)
+                )
+            )
+
     def _note_tag_context() -> dict:
         """Shared context for any page that renders detection rows with
         palette-aware spectrograms. Keeps the template-side lookup tidy."""
@@ -1231,13 +1294,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 for n in notes
                 if n.conservation_status
             }
-            all_species = list(
-                s.scalars(
-                    select(DetectionRow.common_name)
-                    .group_by(DetectionRow.common_name)
-                    .order_by(DetectionRow.common_name)
-                )
-            )
+        all_species = _detected_common_names()
         return {
             "note_tag_by_sci": tag_by_sci,
             "status_by_sci": status_by_sci,
@@ -2493,6 +2550,52 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 **_note_tag_context(),
             },
         )
+    @_ttl_cache(_PAGE_ROLLUP_TTL)
+    def _confidence_rollups(since: str) -> tuple[list, list]:
+        """The two group-bys behind the confidence curves, keyed by window.
+
+        Per-(source, species) best confidence, and per-(source, 1%-bucket)
+        detection counts. Both scan the whole table — ~5.5s each on 1.58M rows,
+        and together they were the entire cost of the page. Keyed by ``since``
+        because that is the only input: the cutoff slider is resolved
+        client-side against these same buckets.
+
+        Returns plain lists of Row tuples, which are immutable and safe to hand
+        to every caller; nothing downstream mutates them.
+        """
+        now = datetime.now(UTC)
+        if since == "24h":
+            start = now - timedelta(hours=24)
+        elif since == "7d":
+            start = now - timedelta(days=7)
+        else:
+            start = None
+
+        from sqlalchemy import Integer as _Int
+        from sqlalchemy import cast as _cast
+
+        stmt_max = select(
+            DetectionRow.source_name,
+            DetectionRow.scientific_name,
+            DetectionRow.common_name,
+            func.max(DetectionRow.confidence).label("max_conf"),
+        ).group_by(
+            DetectionRow.source_name,
+            DetectionRow.scientific_name,
+            DetectionRow.common_name,
+        )
+        bucket = _cast((DetectionRow.confidence - 0.10) * 100, _Int).label("bucket")
+        stmt_hist = (
+            select(DetectionRow.source_name, bucket, func.count().label("n"))
+            .where(DetectionRow.confidence >= 0.10)
+            .group_by(DetectionRow.source_name, bucket)
+        )
+        if start is not None:
+            stmt_max = stmt_max.where(DetectionRow.started_at >= start)
+            stmt_hist = stmt_hist.where(DetectionRow.started_at >= start)
+        with db.session() as s:
+            return list(s.execute(stmt_max)), list(s.execute(stmt_hist))
+
     @app.get("/confidence", response_class=HTMLResponse)
     def confidence_page(
         request: Request,
@@ -2504,56 +2607,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         species count and detection count over a 1%-wide bucket grid spanning
         0.10 → 0.99 (90 buckets). The slider is then a pure client-side index
         lookup — no server round-trip per drag tick."""
-        from sqlalchemy import Integer
-        from sqlalchemy import cast as sa_cast
-
-        now = datetime.now(UTC)
-        if since == "24h":
-            start = now - timedelta(hours=24)
-        elif since == "7d":
-            start = now - timedelta(days=7)
-        else:
-            start = None
-
         N_BUCKETS = 90
         CONF_MIN = 0.10  # bucket index = floor((conf - 0.10) * 100), clamped
 
-        # Per-(source, species) max confidence — drives the species curves.
-        # common_name comes along (1:1 with scientific in BirdNET labels, so
-        # grouping by it doesn't fragment counts) to label the drop-out roster.
-        stmt_max = (
-            select(
-                DetectionRow.source_name,
-                DetectionRow.scientific_name,
-                DetectionRow.common_name,
-                func.max(DetectionRow.confidence).label("max_conf"),
-            )
-            .group_by(
-                DetectionRow.source_name,
-                DetectionRow.scientific_name,
-                DetectionRow.common_name,
-            )
-        )
-        # Per-(source, bucket) detection counts — drives the detection curves.
-        bucket = sa_cast(
-            (DetectionRow.confidence - CONF_MIN) * 100, Integer
-        ).label("bucket")
-        stmt_hist = (
-            select(
-                DetectionRow.source_name,
-                bucket,
-                func.count().label("n"),
-            )
-            .where(DetectionRow.confidence >= CONF_MIN)
-            .group_by(DetectionRow.source_name, bucket)
-        )
-        if start is not None:
-            stmt_max = stmt_max.where(DetectionRow.started_at >= start)
-            stmt_hist = stmt_hist.where(DetectionRow.started_at >= start)
-
-        with db.session() as s:
-            rows_max = list(s.execute(stmt_max))
-            rows_hist = list(s.execute(stmt_hist))
+        # Both curves come from one cached pair of group-bys (see
+        # _confidence_rollups) — they scan the whole table and were the entire
+        # cost of this page.
+        rows_max, rows_hist = _confidence_rollups(since)
 
         per_source_maxconfs: dict[str, list[float]] = {}
         species_global_max: dict[str, float] = {}
@@ -3079,6 +3139,43 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         out.sort(key=lambda r: (r["severity"], -r["max_conf"]))
         return out[:20]
 
+    def _since_start(since: str) -> datetime | None:
+        """Window label -> lower bound, or None for all-time. One definition:
+        /rare, /confidence and the cached roll-ups behind them must agree, or a
+        cache keyed on the label would serve a differently-scoped result."""
+        now = datetime.now(UTC)
+        if since == "24h":
+            return now - timedelta(hours=24)
+        if since == "7d":
+            return now - timedelta(days=7)
+        return None
+
+    @_ttl_cache(_PAGE_ROLLUP_TTL)
+    def _rare_label_counts_cached(sources: tuple[str, ...]) -> dict[str, dict]:
+        """Per-species good/bad/unsure tallies. All-time by design, so a full
+        group-by; ~2.5s and read by two of /rare's sections.
+
+        Callers only read this — verified before caching it, since handing the
+        same dict to every request would otherwise let one page load corrupt
+        the next.
+        """
+        with db.session() as s:
+            return _rare_label_counts(s, list(sources))
+
+    @_ttl_cache(_PAGE_ROLLUP_TTL)
+    def _rare_newly_heard_cached(
+        since: str, sources: tuple[str, ...]
+    ) -> list[dict]:
+        """First-ever appearances inside the window — /rare's headline section
+        and its single biggest cost (~5.5s, half the page).
+
+        Keyed on the window *label* rather than the resolved timestamp: the
+        timestamp moves every request, so keying on it would mean never hitting
+        the cache at all.
+        """
+        with db.session() as s:
+            return _rare_newly_heard(s, _since_start(since), list(sources))
+
     @app.get("/rare", response_class=HTMLResponse)
     def rare_page(
         request: Request,
@@ -3117,7 +3214,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
             common_by_sci = {n.scientific_name: n.common_name for n in notes}
 
-            label_counts = _rare_label_counts(s, sources_filter)
+            label_counts = _rare_label_counts_cached(tuple(sources_filter))
             # Set of species whose every reviewed clip was 'bad' — excluded
             # from the long-tail surface so we don't promote known noise.
             all_bad = {
@@ -3125,7 +3222,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 if c["bad"] > 0 and c["good"] == 0 and c["unsure"] == 0
             }
 
-            newly_heard = _rare_newly_heard(s, start, sources_filter)
+            newly_heard = _rare_newly_heard_cached(since, tuple(sources_filter))
             long_tail = _rare_long_tail(s, start, sources_filter, all_bad)
             misclass_patterns, patterns_set = _rare_misclass_patterns(
                 s, label_counts, tag_by_sci, common_by_sci,
