@@ -108,7 +108,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import and_, case, desc, exists, func, or_, select
+from sqlalchemy import Integer, and_, case, desc, exists, func, or_, select
 from starlette.middleware.sessions import SessionMiddleware
 
 from birdbrain import sandbox
@@ -2171,112 +2171,191 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         source: str | None = Query(default=None),
         include_replays: bool = Query(default=False),
     ) -> HTMLResponse:
+        """Every figure here is an aggregate or a handful of clips, so the page
+        asks SQL for exactly that instead of reducing raw rows in Python.
+
+        It used to materialise every detection for the species as ORM objects:
+        167,606 of them for African Scops-Owl, roughly a gigabyte of a web
+        worker per request, with the session pinned long enough to drain the
+        connection pool (558 QueuePool timeouts between 2026-08-15 and 08-26,
+        every traceback rooted here). Python never hands that memory back, so
+        one visit permanently raised the worker's floor and the Pi eventually
+        swapped itself to a standstill.
+
+        The cost model is now the *number of times the replay predicate runs*,
+        not the number of rows returned. ``not_replay_predicate`` is a
+        correlated NOT EXISTS costing ~1.4s on a popular species, so the
+        histograms are collected as one grouped grid — every dimension the page
+        needs, in a single pass — and rolled up below. Splitting them back into
+        a query apiece costs a second each. The grid is deliberately *unscoped*:
+        the bubble map counts across all sites, and the site filter is a cheap
+        slice of a few thousand grouped rows.
+        """
         from collections import Counter
+
         _, sources_by_name, _ = _all_sources()
-        with db.session() as s:
-            stmt = (
-                select(DetectionRow)
-                .where(DetectionRow.scientific_name == scientific)
-                .order_by(desc(DetectionRow.started_at))
-            )
-            if not include_replays:
-                stmt = stmt.where(Database.not_replay_predicate())
-            all_rows = list(s.scalars(stmt))
-            note = s.get(SpeciesNoteRow, scientific)
-        if not all_rows and note is None:
-            raise HTTPException(404, f"No detections or note for {scientific!r}")
-
-        common_name = (
-            all_rows[0].common_name
-            if all_rows
-            else (note.common_name if note else scientific)
-        )
-
-        # Per-site detection counts for the bubble map — across ALL sources,
-        # independent of the active filter so the map always shows the full
-        # geographic distribution.
-        site_counts = Counter(r.source_name for r in all_rows)
-
-        # Optional site filter: scope every stat/chart/clip below to one source.
         active_source = source or None
-        if active_source:
-            all_rows = [r for r in all_rows if r.source_name == active_source]
 
-        # Per-source breakdown.
-        by_source: dict[str, list[DetectionRow]] = {}
-        for r in all_rows:
-            by_source.setdefault(r.source_name, []).append(r)
-        source_summary = []
-        for src in sorted(by_source, key=lambda x: -len(by_source[x])):
-            srows = by_source[src]
-            source_summary.append({
-                "source": src,
-                "count": len(srows),
-                "max_conf": max(r.confidence for r in srows),
-                "first_seen": min(r.started_at for r in srows),
-                "last_seen": max(r.started_at for r in srows),
-            })
+        def _where(scoped: bool) -> list:
+            w = [DetectionRow.scientific_name == scientific]
+            if not include_replays:
+                w.append(Database.not_replay_predicate())
+            if scoped and active_source:
+                w.append(DetectionRow.source_name == active_source)
+            return w
 
-        # Daily timeline (last DAYS_BACK days, oldest → newest).
+        # Hour buckets keep their date so the tz conversion below stays
+        # DST-correct rather than assuming a fixed offset per source.
+        hour_expr = func.strftime("%Y-%m-%d %H", DetectionRow.started_at)
+        bin_expr = func.cast(DetectionRow.confidence * 10, Integer)
+        has_clip_expr = DetectionRow.clip_path.is_not(None)
+
+        with db.session() as s:
+            note = s.get(SpeciesNoteRow, scientific)
+            grid = s.execute(
+                select(
+                    DetectionRow.source_name,
+                    hour_expr,
+                    DetectionRow.label,
+                    bin_expr,
+                    has_clip_expr,
+                    DetectionRow.suggested_species,
+                    func.count(),
+                    func.max(DetectionRow.confidence),
+                    func.min(DetectionRow.started_at),
+                    func.max(DetectionRow.started_at),
+                )
+                .where(*_where(False))
+                .group_by(
+                    DetectionRow.source_name, hour_expr, DetectionRow.label,
+                    bin_expr, has_clip_expr, DetectionRow.suggested_species,
+                )
+            ).all()
+
+            if not grid and note is None:
+                raise HTTPException(404, f"No detections or note for {scientific!r}")
+
+            common_name = s.execute(
+                select(DetectionRow.common_name)
+                .where(*_where(False))
+                .order_by(desc(DetectionRow.started_at))
+                .limit(1)
+            ).scalar() or (note.common_name if note else scientific)
+
+            # Sample clips — the only full rows the page loads, at most 8 each.
+            clip_where = [*_where(True), DetectionRow.clip_path.is_not(None)]
+            latest_clip = s.scalars(
+                select(DetectionRow).where(*clip_where)
+                .order_by(desc(DetectionRow.started_at)).limit(1)
+            ).first()
+            top_clips = list(s.scalars(
+                select(DetectionRow).where(*clip_where)
+                .order_by(desc(DetectionRow.confidence)).limit(5)
+            ))
+            good_clips = list(s.scalars(
+                select(DetectionRow)
+                .where(*clip_where, DetectionRow.label == "good")
+                .order_by(desc(DetectionRow.started_at)).limit(8)
+            ))
+
+            # Per-site totals for the bubble map: all sites, filter-independent.
+            site_counts = Counter()
+            for g in grid:
+                site_counts[g[0]] += g[6]
+
+            scoped = [g for g in grid if not active_source or g[0] == active_source]
+
+            # Six clips spread across the confidence range — the same selection
+            # the row-by-row version made (every step-th of the ascending list),
+            # done with a window function so the list stays inside SQLite.
+            n_clips = sum(g[6] for g in scoped if g[4])
+            spread_clips = []
+            if n_clips >= 6:
+                step = max(1, n_clips // 6)
+                ranked = (
+                    select(
+                        DetectionRow.id.label("id"),
+                        func.row_number().over(
+                            order_by=DetectionRow.confidence
+                        ).label("rn"),
+                    )
+                    .where(*clip_where)
+                    .subquery()
+                )
+                ids = [
+                    r[0] for r in s.execute(
+                        select(ranked.c.id)
+                        .where((ranked.c.rn - 1) % step == 0)
+                        .limit(6)
+                    ).all()
+                ]
+                if ids:
+                    by_id = {
+                        r.id: r for r in s.scalars(
+                            select(DetectionRow).where(DetectionRow.id.in_(ids))
+                        )
+                    }
+                    spread_clips = [by_id[i] for i in ids if i in by_id]
+
+        # ---- roll the grid up into the page's figures (all cheap, in memory) --
+        per_source: dict[str, dict] = {}
+        for src, _b, _l, _bin, _hc, _sg, n, mx, first, last in scoped:
+            e = per_source.setdefault(
+                src, {"count": 0, "max_conf": mx, "first_seen": first, "last_seen": last}
+            )
+            e["count"] += n
+            e["max_conf"] = max(e["max_conf"], mx)
+            e["first_seen"] = min(e["first_seen"], first)
+            e["last_seen"] = max(e["last_seen"], last)
+        # Count descending, ties broken by most-recently-heard. The row-by-row
+        # version got that tie-break for free — it bucketed rows already ordered
+        # started_at DESC and Python's sort is stable — so state it explicitly:
+        # three Majete cameras tie at one detection each for Otus senegalensis,
+        # and without this the table reshuffles between loads.
+        ordered = sorted(per_source.items(), key=lambda kv: kv[1]["last_seen"], reverse=True)
+        ordered.sort(key=lambda kv: -kv[1]["count"])
+        source_summary = [{"source": src, **e} for src, e in ordered]
+        total = sum(e["count"] for e in per_source.values())
+        max_conf = max((e["max_conf"] for e in per_source.values()), default=0)
+
         DAYS_BACK = 14
         today_utc = datetime.now(UTC).date()
-        day_counts = [0] * DAYS_BACK
-        for r in all_rows:
-            ts = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
-            delta = (today_utc - ts.date()).days
-            if 0 <= delta < DAYS_BACK:
-                day_counts[DAYS_BACK - 1 - delta] += 1
-        # Y-axis labels: dates from oldest to today.
+        oldest = today_utc - timedelta(days=DAYS_BACK - 1)
+        day_counts: dict[str, int] = {}
+        hours = [0] * 24
+        conf_bins = [0] * 10
+        label_counts_raw: Counter = Counter()
+        suggested_counter: Counter = Counter()
+        tz_cache: dict[str, object] = {}
+        for src, bucket, label, cbin, _hc, sugg, n, _mx, _first, _last in scoped:
+            if src not in tz_cache:
+                cfg_src = sources_by_name.get(src)
+                tz_cache[src] = _zone_info(cfg_src.timezone if cfg_src else "UTC")
+            ts = datetime.strptime(bucket, "%Y-%m-%d %H").replace(tzinfo=UTC)
+            hours[ts.astimezone(tz_cache[src]).hour] += n
+            day = bucket[:10]
+            if day >= oldest.isoformat():
+                day_counts[day] = day_counts.get(day, 0) + n
+            conf_bins[min(9, max(0, int(cbin)))] += n
+            label_counts_raw[label] += n
+            if sugg:
+                suggested_counter[sugg] += n
+        peak_hour = max(hours) or 1
+        peak_conf_bin = max(conf_bins) or 1
         daily = [
             {
-                "date": today_utc - timedelta(days=DAYS_BACK - 1 - i),
-                "count": c,
+                "date": oldest + timedelta(days=i),
+                "count": day_counts.get((oldest + timedelta(days=i)).isoformat(), 0),
             }
-            for i, c in enumerate(day_counts)
+            for i in range(DAYS_BACK)
         ]
-        peak_day = max(day_counts) or 1
-
-        # Hourly activity in each row's source-local tz.
-        hours = [0] * 24
-        for r in all_rows:
-            ts = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
-            cfg_src = sources_by_name.get(r.source_name)
-            tz = _zone_info(cfg_src.timezone if cfg_src else "UTC")
-            hours[ts.astimezone(tz).hour] += 1
-        peak_hour = max(hours) or 1
-
-        # Label and suggested-species tallies.
-        label_counts_raw = Counter(r.label for r in all_rows)
+        peak_day = max((d["count"] for d in daily), default=0) or 1
         label_counts = {
             "good": label_counts_raw.get("good", 0),
             "bad": label_counts_raw.get("bad", 0),
             "unsure": label_counts_raw.get("unsure", 0),
             "unreviewed": label_counts_raw.get(None, 0),
         }
-        suggested_counter = Counter(
-            r.suggested_species for r in all_rows if r.suggested_species
-        )
-
-        # Confidence histogram (10 buckets, 0.0..1.0).
-        conf_bins = [0] * 10
-        for r in all_rows:
-            i = min(9, int(r.confidence * 10))
-            conf_bins[i] += 1
-        peak_conf_bin = max(conf_bins) or 1
-
-        # Sample clips: top by max conf, plus a spread (low/mid/high), plus labeled good.
-        with_clips = [r for r in all_rows if r.clip_path]
-        # all_rows is ordered started_at DESC, so the first clip is the most
-        # recent capture — drives the "latest spectrogram" tile.
-        latest_clip = with_clips[0] if with_clips else None
-        top_clips = sorted(with_clips, key=lambda r: -r.confidence)[:5]
-        if len(with_clips) >= 6:
-            sorted_by_conf = sorted(with_clips, key=lambda r: r.confidence)
-            step = max(1, len(sorted_by_conf) // 6)
-            spread_clips = sorted_by_conf[::step][:6]
-        else:
-            spread_clips = []
-        good_clips = [r for r in all_rows if r.label == "good" and r.clip_path][:8]
 
         # Map of every site this species HAS been heard at, coloured by the
         # site's biome palette (see SOURCE_COLORS). Sites that have never
@@ -2310,8 +2389,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "sites_for_map": sites_for_map,
                 "source_colors": SOURCE_COLORS,
                 "all_sources": all_sources,
-                "total": len(all_rows),
-                "max_conf": max((r.confidence for r in all_rows), default=0),
+                "total": total,
+                "max_conf": max_conf,
                 "source_summary": source_summary,
                 "daily": daily,
                 "peak_day": peak_day,
@@ -2331,7 +2410,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 **_note_tag_context(),
             },
         )
-
     @app.get("/confidence", response_class=HTMLResponse)
     def confidence_page(
         request: Request,
