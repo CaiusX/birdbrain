@@ -45,6 +45,26 @@ _UNSET: Any = object()
 
 # app_settings key for the site-wide detection floor (see AppSettingRow).
 GLOBAL_MIN_CONFIDENCE_KEY = "global_min_confidence"
+
+# The floor applied when *showing* detections, as opposed to
+# GLOBAL_MIN_CONFIDENCE_KEY which decides what gets recorded at all. Two
+# separate things that are easy to confuse:
+#
+#   global_min_confidence     — detector floor. Raising it throws data away
+#                               permanently; nothing below it is ever written.
+#   reporting_min_confidence  — display floor. Everything is still recorded;
+#                               low-confidence rows are simply not shown.
+#
+# The display floor exists because a public audience reads a listed species as
+# a claim, while the project's own value is in the marginal calls: at 0.70,
+# 56% of rows and 209 of 679 species drop out of view — including 98
+# detections a human had already confirmed correct. Hiding those is fine.
+# Deleting them would not be.
+REPORTING_MIN_CONFIDENCE_KEY = "reporting_min_confidence"
+
+# What a fresh install shows. Chosen for a public launch, where a wrong species
+# costs more credibility than a missing one costs completeness.
+REPORTING_MIN_CONFIDENCE_DEFAULT = 0.70
 # app_settings key prefix for per-source detection-floor overrides. The full
 # key is this prefix + the source name, so each source's override is its own
 # row, polled by that source's worker. Applies to both file (sources.toml) and
@@ -1544,6 +1564,48 @@ class Database:
             GLOBAL_MIN_CONFIDENCE_KEY,
             None if value is None else repr(float(value)),
         )
+
+    def reporting_min_confidence(self) -> float:
+        """The floor applied when showing detections to a reader.
+
+        Always returns a number — unlike the detector floor, "unset" is not a
+        meaningful state for a display cutoff, so an absent or unparseable row
+        falls back to the default rather than to "show everything". A public
+        page defaulting open on a malformed setting is the wrong failure.
+        """
+        raw = self.get_setting(REPORTING_MIN_CONFIDENCE_KEY)
+        if raw is None:
+            return REPORTING_MIN_CONFIDENCE_DEFAULT
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            return REPORTING_MIN_CONFIDENCE_DEFAULT
+        return v if 0.0 <= v <= 1.0 else REPORTING_MIN_CONFIDENCE_DEFAULT
+
+    def set_reporting_min_confidence(self, value: float) -> None:
+        """Set the display floor. 0.0 shows everything; there is no None."""
+        if not (0.0 <= value <= 1.0):
+            raise ValueError("reporting_min_confidence must be in [0, 1]")
+        self.set_setting(REPORTING_MIN_CONFIDENCE_KEY, repr(float(value)))
+
+    def reporting_floor_predicate(self, floor: float | None = None):
+        """Predicate for "this detection is confident enough to show".
+
+        Compose into any query whose rows or counts a reader will see::
+
+            stmt = select(DetectionRow).where(db.reporting_floor_predicate())
+
+        Pass ``floor`` to reuse one value across several queries in a request
+        rather than re-reading the setting each time.
+
+        Deliberately NOT applied on /confidence (whose whole subject is what
+        different floors do), /review and /admin (working surfaces, where the
+        marginal calls are the point). Those exemptions are the reason this is
+        an explicit predicate rather than something applied globally to every
+        query — a filter you cannot see is a filter you cannot except.
+        """
+        f = self.reporting_min_confidence() if floor is None else floor
+        return DetectionRow.confidence >= f
 
     def source_min_confidence(self, source_name: str) -> float | None:
         """Per-source detection-floor override for one source, or None when

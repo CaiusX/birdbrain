@@ -113,6 +113,24 @@
   </div>
 </dialog>
 
+{# Two different cutoffs live on this page and they are easy to confuse, so
+   they get separate panels rather than adjacent fields: this one changes what
+   visitors see and is reversible, the one below changes what is recorded and
+   is not. #}
+<section class="bg-zinc-900 border border-emerald-900/50 rounded-xl mb-6">
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm uppercase tracking-wider text-emerald-400">Public display cutoff</h2>
+    <p class="text-xs text-zinc-500 mt-0.5">
+      What visitors see. Raises the bar for the dashboard, species and site
+      pages without changing what the detector records — safe to move in either
+      direction.
+    </p>
+  </div>
+  <div class="p-4">
+    {% include "_reporting_min_conf.html" %}
+  </div>
+</section>
+
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl mb-6">
   <div class="px-5 py-3 border-b border-zinc-800">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">Detection cutoffs</h2>

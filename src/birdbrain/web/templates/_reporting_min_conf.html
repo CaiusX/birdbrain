@@ -1,0 +1,27 @@
+{# The floor applied when SHOWING detections. Sibling of _global_min_conf.html,
+   which is the detector floor — the two are easy to mistake for each other, so
+   the copy here leads with the difference. #}
+<form id="reporting-conf-form"
+      hx-post="/api/settings/reporting-min-confidence"
+      hx-target="#reporting-conf-form" hx-swap="outerHTML"
+      class="flex items-end gap-3 flex-wrap">
+  <label class="block">
+    <span class="text-[10px] uppercase tracking-wider text-zinc-500">Public display cutoff</span>
+    <input name="value" type="number" step="0.05" min="0" max="1"
+           value="{{ '%.2f'|format(reporting_min_confidence) }}"
+           class="mt-1 w-32 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-sm text-zinc-100 tabular-nums">
+  </label>
+  <button type="submit"
+          class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium">
+    save
+  </button>
+  <span class="text-xs text-zinc-500">
+    Detections below {{ '%.2f'|format(reporting_min_confidence) }} are hidden from the
+    dashboard, species and site pages.
+    <span class="text-zinc-400">Nothing is deleted</span> — everything is still recorded,
+    and lowering this brings it straight back.
+    {# /confidence and the review pages deliberately ignore this: one exists to
+       show what different cutoffs do, the other to judge the marginal calls. #}
+    <span class="text-zinc-600">/confidence and review still show everything.</span>
+  </span>
+</form>

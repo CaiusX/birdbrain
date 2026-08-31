@@ -128,7 +128,7 @@ from birdbrain.ingest import (
 )
 from birdbrain.site_resolver import state_to_resolved
 from birdbrain.sites import Site, load_sites
-from birdbrain.storage.db import ALL_SITES_SENTINEL
+from birdbrain.storage.db import ALL_SITES_SENTINEL, REPORTING_MIN_CONFIDENCE_DEFAULT
 from birdbrain.storage import (
     DailyBriefRow,
     Database,
@@ -979,10 +979,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             seen.add(src.name)
         return out
 
-    _front_slow_cache: dict = {"ts": 0.0, "val": None}
+    _front_slow_cache: dict = {"ts": 0.0, "val": None, "floor": None}
     _front_slow_lock = threading.Lock()
 
-    def _front_slow_aggregates() -> tuple[dict, dict, list]:
+    def _front_slow_aggregates(floor_v: float) -> tuple[dict, dict, list]:
         """The three front-page roll-ups that scan the whole detections table.
 
         Returns (species_all_by_src, first_seen_by_src, dpairs_30d). Cached for
@@ -990,19 +990,28 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         change visibly in five minutes: two are all-time figures over 1.58M
         rows, the third a 30-day species overlap.
 
+        Keyed on the display floor as well as on time. Without that, moving the
+        cutoff in /admin would leave the page showing a mix — the uncached
+        numbers at the new floor and these three at the old one — for up to five
+        minutes, which reads as a bug rather than as caching.
+
         Double-checked under a lock so a burst of concurrent requests produces
         one recompute rather than one each — this used to be ~4.2s of the
         homepage, so the thundering herd is worth preventing.
         """
-        now_m = time.monotonic()
-        if (_front_slow_cache["val"] is not None
-                and now_m - _front_slow_cache["ts"] <= _FRONT_SLOW_TTL):
+        def _fresh() -> bool:
+            return (
+                _front_slow_cache["val"] is not None
+                and _front_slow_cache["floor"] == floor_v
+                and time.monotonic() - _front_slow_cache["ts"] <= _FRONT_SLOW_TTL
+            )
+
+        if _fresh():
             return _front_slow_cache["val"]
         with _front_slow_lock:
-            now_m = time.monotonic()
-            if (_front_slow_cache["val"] is not None
-                    and now_m - _front_slow_cache["ts"] <= _FRONT_SLOW_TTL):
+            if _fresh():
                 return _front_slow_cache["val"]
+            floor = DetectionRow.confidence >= floor_v
             thirty_d = datetime.now(UTC) - timedelta(days=30)
             with db.session() as s:
                 # Per-site all-time figures for the map's site-summary popup:
@@ -1013,7 +1022,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         select(
                             DetectionRow.source_name,
                             func.count(func.distinct(DetectionRow.scientific_name)),
-                        ).group_by(DetectionRow.source_name)
+                        ).where(floor).group_by(DetectionRow.source_name)
                     ).all()
                 )
                 first_seen_by_src = dict(
@@ -1021,16 +1030,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         select(
                             DetectionRow.source_name,
                             func.min(DetectionRow.started_at),
-                        ).group_by(DetectionRow.source_name)
+                        ).where(floor).group_by(DetectionRow.source_name)
                     ).all()
                 )
                 dpairs = s.execute(
                     select(DetectionRow.source_name, DetectionRow.scientific_name)
-                    .where(DetectionRow.started_at >= thirty_d)
+                    .where(DetectionRow.started_at >= thirty_d, floor)
                     .distinct()
                 ).all()
             val = (species_all_by_src, first_seen_by_src, dpairs)
-            _front_slow_cache.update(ts=time.monotonic(), val=val)
+            _front_slow_cache.update(ts=time.monotonic(), val=val, floor=floor_v)
             return val
 
     def _front_activity(
@@ -1045,6 +1054,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         since = now - timedelta(hours=24)
         recent_n = 6
         with db.session() as s:
+            # Every number on the front page is shown to a reader, so it all
+            # sits behind the display floor. Read once and threaded through
+            # rather than re-read per query.
+            floor = db.reporting_floor_predicate()
             grouped = s.execute(
                 select(
                     DetectionRow.source_name,
@@ -1052,24 +1065,29 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     func.max(DetectionRow.common_name),
                     func.max(DetectionRow.started_at),
                 )
-                .where(DetectionRow.started_at >= since)
+                .where(DetectionRow.started_at >= since, floor)
                 .group_by(DetectionRow.source_name, DetectionRow.scientific_name)
             ).all()
             ts_rows = s.execute(
                 select(DetectionRow.source_name, DetectionRow.started_at)
-                .where(DetectionRow.started_at >= since)
+                .where(DetectionRow.started_at >= since, floor)
             ).all()
-            last_det = s.execute(select(func.max(DetectionRow.started_at))).scalar()
+            last_det = s.execute(
+                select(func.max(DetectionRow.started_at)).where(floor)
+            ).scalar()
             # Distinct species ever recorded (matches the 24h metric's counting
             # — no replay filter — so the two species numbers are comparable).
             species_all = s.execute(
                 select(func.count(func.distinct(DetectionRow.scientific_name)))
+                .where(floor)
             ).scalar()
 
         # Per-site all-time figures for the map's site-summary popup, plus the
         # 30-day overlap used further down. Full scans, so they come from the
         # TTL cache rather than this request.
-        species_all_by_src, first_seen_by_src, dpairs = _front_slow_aggregates()
+        species_all_by_src, first_seen_by_src, dpairs = _front_slow_aggregates(
+            db.reporting_min_confidence()
+        )
 
         # tz per source (cached) — drives source-local hour bucketing + bands.
         tz_cache: dict[str, ZoneInfo] = {}
@@ -1267,18 +1285,27 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return [groups[k] for k in order]
 
     @_ttl_cache(_PAGE_ROLLUP_TTL)
-    def _detected_common_names() -> list[str]:
-        """Every common name we have ever detected, sorted.
+    def _detected_common_names(floor_v: float) -> list[str]:
+        """Common names we have detected at or above the display floor, sorted.
+
+        Feeds the species autocomplete in the spectrogram modal, which renders
+        on public pages — so an unfiltered list would put all 209 sub-cutoff
+        species into the page source of a site that shows none of them. /admin
+        and /review have their own picker (``list_detected_species``) and are
+        unaffected.
+
+        Keyed on the floor: it is cached, and a stale list after a cutoff change
+        would quietly contradict the pages around it.
 
         A group-by over the whole table (~1.8s) for a list that grows by one
-        entry every few days. It is pulled in by every page that renders a
-        detection row, so it was quietly on the critical path of most of the
-        site — 21% of /rare, for one.
+        entry every few days, pulled in by every page that renders a detection
+        row — 21% of /rare before it was cached.
         """
         with db.session() as s:
             return list(
                 s.scalars(
                     select(DetectionRow.common_name)
+                    .where(DetectionRow.confidence >= floor_v)
                     .group_by(DetectionRow.common_name)
                     .order_by(DetectionRow.common_name)
                 )
@@ -1295,7 +1322,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 for n in notes
                 if n.conservation_status
             }
-        all_species = _detected_common_names()
+        all_species = _detected_common_names(db.reporting_min_confidence())
         return {
             "note_tag_by_sci": tag_by_sci,
             "status_by_sci": status_by_sci,
@@ -1410,6 +1437,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             stmt = (
                 select(DetectionRow)
                 .where(Database.not_replay_predicate())
+                .where(db.reporting_floor_predicate())
                 .order_by(desc(DetectionRow.started_at))
                 .limit(500)
             )
@@ -1733,6 +1761,42 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 {"global_min_confidence": db.global_min_confidence()},
             )
         return JSONResponse({"ok": True, "global_min_confidence": db.global_min_confidence()})
+
+    @app.post("/api/settings/reporting-min-confidence")
+    def update_reporting_min_confidence(
+        request: Request, value: str = Form(default="")
+    ) -> Response:
+        """Set the floor applied when *showing* detections.
+
+        Distinct from the detection floor above, and the distinction is the
+        whole point: this one changes what a reader sees and can be moved back
+        and forth freely, because every detection is still recorded. Nothing is
+        lost by raising it. An empty value restores the default rather than
+        clearing to zero — a public page with no floor is not a state worth
+        making one keystroke away.
+        """
+        raw = value.strip()
+        if raw == "":
+            db.set_reporting_min_confidence(REPORTING_MIN_CONFIDENCE_DEFAULT)
+        else:
+            try:
+                parsed = float(raw)
+            except ValueError as e:
+                raise HTTPException(400, "cutoff must be a number") from e
+            if not (0.0 <= parsed <= 1.0):
+                raise HTTPException(400, "cutoff must be between 0 and 1")
+            db.set_reporting_min_confidence(parsed)
+        # The cached front-page roll-ups are keyed on the floor, so they pick
+        # the new value up on the next request without an explicit bust.
+        if request.headers.get("hx-request"):
+            return TEMPLATES.TemplateResponse(
+                request,
+                "_reporting_min_conf.html",
+                {"reporting_min_confidence": db.reporting_min_confidence()},
+            )
+        return JSONResponse(
+            {"ok": True, "reporting_min_confidence": db.reporting_min_confidence()}
+        )
 
     def _parse_cutoff(value: str) -> float | None:
         """Parse a cutoff form value: empty string → None (clear the override),
@@ -2072,6 +2136,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             start = None
 
         # One GROUP BY query covers everything we need for the treemap.
+        # Behind the display floor: the treemap is a species catalogue, and a
+        # rectangle here reads as "this site has this bird".
         stmt = (
             select(
                 DetectionRow.source_name,
@@ -2081,6 +2147,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 func.max(DetectionRow.confidence).label("max_conf"),
                 func.max(DetectionRow.started_at).label("last_seen"),
             )
+            .where(db.reporting_floor_predicate())
             .group_by(
                 DetectionRow.source_name,
                 DetectionRow.scientific_name,
@@ -2341,6 +2408,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             w = [DetectionRow.scientific_name == scientific]
             if not include_replays:
                 w.append(Database.not_replay_predicate())
+            # Display floor, alongside the replay filter: this page is the one a
+            # reader lands on from a species name, so a low-confidence tail here
+            # is exactly the false-positive impression the cutoff exists to
+            # avoid. Every query on the page composes _where(), so adding it
+            # once covers the histograms and the sample clips together.
+            w.append(db.reporting_floor_predicate())
             if scoped and active_source:
                 w.append(DetectionRow.source_name == active_source)
             return w
@@ -3274,7 +3347,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         with db.session() as s:
             total = s.execute(
                 select(func.count(DetectionRow.id))
-                .where(DetectionRow.source_name == name)
+                .where(DetectionRow.source_name == name, db.reporting_floor_predicate())
             ).scalar() or 0
 
             if total == 0 and site_note is None and src_cfg is None:
@@ -3288,7 +3361,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     func.max(DetectionRow.confidence).label("max_conf"),
                     func.max(DetectionRow.started_at).label("last_seen"),
                 )
-                .where(DetectionRow.source_name == name)
+                .where(DetectionRow.source_name == name, db.reporting_floor_predicate())
                 .group_by(DetectionRow.scientific_name, DetectionRow.common_name)
                 .order_by(desc("n"))
                 .limit(20)
@@ -3316,7 +3389,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         order_by=desc(DetectionRow.started_at),
                     ).label("rn"),
                 )
-                .where(DetectionRow.source_name == name)
+                .where(DetectionRow.source_name == name, db.reporting_floor_predicate())
                 .subquery()
             )
             recent_unique = list(s.execute(
@@ -3328,7 +3401,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
             recent = list(s.scalars(
                 select(DetectionRow)
-                .where(DetectionRow.source_name == name)
+                .where(DetectionRow.source_name == name, db.reporting_floor_predicate())
                 .where(Database.not_replay_predicate())
                 .order_by(desc(DetectionRow.started_at))
                 .limit(25)
@@ -3339,7 +3412,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     func.strftime("%H", DetectionRow.started_at),
                     func.count(DetectionRow.id),
                 )
-                .where(DetectionRow.source_name == name)
+                .where(DetectionRow.source_name == name, db.reporting_floor_predicate())
                 .group_by(func.strftime("%H", DetectionRow.started_at))
             ).all())
 
@@ -3348,7 +3421,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     func.min(DetectionRow.started_at),
                     func.max(DetectionRow.started_at),
                     func.count(func.distinct(DetectionRow.scientific_name)),
-                ).where(DetectionRow.source_name == name)
+                ).where(DetectionRow.source_name == name, db.reporting_floor_predicate())
             ).one()
 
         # Render the hourly histogram in the source's local timezone so the
@@ -4064,6 +4137,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             "admin.html",
             {
                 **_admin_view(), **_species_cutoffs_ctx(), **_health_view(),
+                "reporting_min_confidence": db.reporting_min_confidence(),
                 "visitors": db.pageview_stats(),
             },
         )
@@ -4307,9 +4381,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         now = datetime.now(UTC)
         # Inline sparkline: fixed 40 bars across whatever window is selected.
         n_spark = 40
+        # Every figure on this index is shown to a reader: counts, species
+        # tallies, sparklines. One floor for the request.
+        floor = db.reporting_floor_predicate()
         with db.session() as s:
             if hours <= 0:  # all-time → back to the first detection on record
-                first = s.scalar(select(func.min(DetectionRow.started_at)))
+                first = s.scalar(select(func.min(DetectionRow.started_at)).where(floor))
                 since = (
                     (first.replace(tzinfo=UTC) if first.tzinfo is None else first)
                     if first is not None else now
@@ -4330,7 +4407,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         func.count(func.distinct(DetectionRow.scientific_name)),
                         func.max(DetectionRow.started_at),
                     )
-                    .where(DetectionRow.started_at >= since)
+                    .where(DetectionRow.started_at >= since, floor)
                     .group_by(DetectionRow.source_name)
                 ).all()
             }
@@ -4349,7 +4426,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     func.count(),
                     func.count(func.distinct(DetectionRow.scientific_name)),
                 )
-                .where(DetectionRow.started_at >= since)
+                .where(DetectionRow.started_at >= since, floor)
                 .group_by(DetectionRow.source_name, bucket_col)
             ).all():
                 if bk is None or bk < 0:
@@ -4453,7 +4530,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             with db.session() as s:
                 first = s.scalar(
                     select(func.min(DetectionRow.started_at))
-                    .where(DetectionRow.source_name == name)
+                    .where(DetectionRow.source_name == name, db.reporting_floor_predicate())
                 )
             if first is None:
                 return {"hours": 0, "metric": metric, "buckets": [], "total": 0,
@@ -4466,7 +4543,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         with db.session() as s:
             rows = s.execute(
                 select(DetectionRow.started_at, DetectionRow.scientific_name)
-                .where(DetectionRow.source_name == name)
+                .where(DetectionRow.source_name == name, db.reporting_floor_predicate())
                 .where(DetectionRow.started_at >= since)
             ).all()
         n = 120 if hours <= 0 else min(120, max(12, hours))
