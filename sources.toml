@@ -85,12 +85,17 @@ timezone = "Africa/Nairobi"
 [[source]]
 name = "Djuma"
 kind = "rtsp"
-url = "rtsp://34.35.162.163:8554/djuma-audio"
+url = "rtsp://127.0.0.1:8554/djuma"
 lat = -24.787
 lon = 31.470
-# South Africa — Djuma, Sabi Sand. Audio-only RTSP (AAC 48 kHz stereo), so
-# unlike the YouTube sources there is no yt-dlp resolve step and no cookie to
-# expire — ffmpeg dials the address directly over TCP. Coordinates are the
-# Gowrie Dam waterhole, matching the Djuma entry in sites.example.toml.
+# South Africa — Djuma, Sabi Sand. Audio-only RTSP (AAC 48 kHz stereo): no
+# yt-dlp resolve, no cookie to expire. Coordinates are the Gowrie Dam
+# waterhole, matching the Djuma entry in sites.example.toml.
+#
+# Read through the local relay, not the camera. The camera serves exactly one
+# client, so whoever connects first locks everyone else out — which meant
+# /admin could never audition it. birdbrain-relay holds that single upstream
+# connection and re-serves it on loopback; see deploy/relay/. The upstream
+# address lives in deploy/relay/mediamtx.yml now.
 min_confidence = 0.3
 timezone = "Africa/Johannesburg"

@@ -1,0 +1,44 @@
+# Local RTSP relay.
+#
+# Some cameras serve exactly one client at a time. Djuma is one: while the
+# detection worker holds the stream, every other connection is refused with
+# "400 Bad Request", which means /admin could never audition it. This relay
+# holds that single upstream connection itself and re-serves it locally to as
+# many readers as we like — the detector and the audition endpoint both read
+# from 127.0.0.1 instead of the camera.
+#
+# The trade is that the relay becomes a single point of failure for any source
+# routed through it: if it stops, the source stops. Hence Restart=always in the
+# unit file, and sourceOnDemand disabled below so the upstream connection is
+# held continuously rather than dropped whenever the last reader leaves (a
+# reconnect storm against a one-client server is exactly what we're avoiding).
+
+logLevel: info
+
+# Loopback only. This re-serves a third party's stream; it is not ours to
+# rebroadcast to the LAN, let alone further.
+rtspAddress: 127.0.0.1:8554
+
+# TCP only, matching how we dial the upstream and how the readers connect.
+rtspTransports: [tcp]
+
+# Everything we don't use, off — each of these is another listener and another
+# thing to keep patched.
+rtmp: false
+hls: false
+webrtc: false
+srt: false
+moq: false      # defaults ON and binds :8892/:8893 on *all* interfaces
+api: false
+metrics: false
+pprof: false
+playback: false
+
+paths:
+  djuma:
+    source: rtsp://34.35.162.163:8554/djuma-audio
+    rtspTransport: tcp
+    # Hold the upstream open even with no readers: the detector is effectively
+    # always reading anyway, and on-demand would mean re-dialling a
+    # single-client server on every gap.
+    sourceOnDemand: false

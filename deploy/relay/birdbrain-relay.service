@@ -1,0 +1,33 @@
+# Local RTSP relay for single-client cameras — systemd USER unit.
+#
+# Install:
+#   cp deploy/relay/birdbrain-relay.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now birdbrain-relay
+#   loginctl enable-linger "$USER"    # so it runs without an active login
+#
+# Ordering note: the pipeline is NOT ordered after this. A camera that serves
+# one client at a time can only be held by one process, so whichever starts
+# first wins the upstream — and if the worker wins, the relay sits retrying
+# every 5s and the worker never reaches the relay. The worker's own backoff
+# recovers from that within a minute or two, which is cheaper than coupling two
+# services. But if you restart both, stop the pipeline first and let the relay
+# take the upstream before starting it again.
+[Unit]
+Description=BirdBrain RTSP relay (re-serves single-client cameras to many readers)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/birdbrain
+ExecStart=%h/.local/bin/mediamtx %h/Projects/birdbrain/deploy/relay/mediamtx.yml
+Restart=always
+RestartSec=5
+# It only ever re-serves a stream on loopback; give it nothing it doesn't need.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+
+[Install]
+WantedBy=default.target
