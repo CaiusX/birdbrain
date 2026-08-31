@@ -9,6 +9,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -6766,6 +6767,27 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "-reconnect", "1", "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "5", "-i", live_url,
             ]
+        elif cfg_src.kind == "rtsp":
+            # Straight to the camera. Whether this works depends entirely on the
+            # far end: plenty of RTSP servers happily serve several clients, but
+            # plenty serve exactly one — and for those the detection worker is
+            # already holding the only slot, so audition can never get in. The
+            # failure is surfaced below rather than left as a silent empty
+            # stream. Djuma (added 2026-08-30) is one of the single-client kind.
+            input_args = [
+                "-rtsp_transport", "tcp",
+                "-i", cfg_src.url,
+            ]
+        elif cfg_src.kind == "mic":
+            # MicSource opens its ALSA device directly, which is exclusive — the
+            # detection worker holds it and a second reader cannot have it. The
+            # admin table already offers a button for this kind, so answer with
+            # the reason rather than a bare 404. Route the mic through PipeWire
+            # ("pulse:…", the device kind) if you want to audition it.
+            raise HTTPException(
+                409,
+                "mic sources open ALSA exclusively — route it via pulse: to audition",
+            )
         else:
             raise HTTPException(404, "No live audio for this source")
 
@@ -6785,6 +6807,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # off the event loop via to_thread so the request can still be cancelled
         # on disconnect. The finally kills ffmpeg, which closes the pipe and
         # unblocks the reader thread — no orphaned ffmpeg.
+        # stderr goes to a file rather than a pipe: we want ffmpeg's own reason
+        # when it refuses to start, and an unread pipe would deadlock a stream
+        # that logs steadily for ten minutes.
+        err_file = tempfile.NamedTemporaryFile(  # noqa: SIM115 - closed in _pump
+            prefix="live-audio-", suffix=".err", delete=False
+        )
         proc = subprocess.Popen(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -6795,11 +6823,45 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "-f", "mp3", "-",
             ],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=err_file,
         )
+
+        def _cleanup() -> str:
+            """Kill ffmpeg if it's still up, and hand back whatever it said."""
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            try:
+                err_file.close()
+                msg = Path(err_file.name).read_text(errors="replace").strip()
+            except OSError:
+                msg = ""
+            Path(err_file.name).unlink(missing_ok=True)
+            return msg
+
+        # Pull the first chunk here rather than inside the generator. Once a
+        # StreamingResponse is returned the status is already 200, so an ffmpeg
+        # that dies on startup would show up as a silent, empty, apparently-fine
+        # audio element. Reading one chunk first turns that into a real error.
+        # No timeout: a healthy read blocks until data, and a failed one hits EOF
+        # as soon as ffmpeg closes stdout.
+        first = await asyncio.to_thread(proc.stdout.read, 8192)
+        if not first:
+            detail = _cleanup() or "ffmpeg produced no audio"
+            last_line = detail.splitlines()[-1] if detail.splitlines() else detail
+            if cfg_src.kind == "rtsp":
+                last_line += (
+                    " — many RTSP servers allow only one client at a time, and"
+                    " the detection worker holds that connection"
+                )
+            raise HTTPException(502, last_line[:300])
 
         async def _pump():
             try:
+                yield first
                 while True:
                     # Explicit disconnect check each loop — deterministic
                     # cleanup rather than relying on cancellation propagating
@@ -6811,12 +6873,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         break
                     yield chunk
             finally:
-                if proc.poll() is None:
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=5)
-                    except Exception:
-                        pass
+                _cleanup()
 
         return StreamingResponse(
             _pump(),
