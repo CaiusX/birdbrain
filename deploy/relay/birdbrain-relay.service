@@ -19,7 +19,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Projects/birdbrain
+# Not the repo: mediamtx writes auto.crt/auto.key into its working directory
+# for the TLS-capable protocols, and a server has no business scribbling in a
+# git checkout.
+WorkingDirectory=%h/.local/state/birdbrain-relay
 ExecStart=%h/.local/bin/mediamtx %h/Projects/birdbrain/deploy/relay/mediamtx.yml
 Restart=always
 RestartSec=5
