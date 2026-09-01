@@ -24,7 +24,6 @@ from sqlalchemy import desc, select
 from birdbrain.config import AppConfig, load_sources
 from birdbrain.cookies import refresh as refresh_cookies_impl
 from birdbrain.logging import configure as configure_logging
-from birdbrain.pipeline import run_all
 from birdbrain.storage import Database, DetectionRow, RuntimeSourceRow
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -47,6 +46,12 @@ def run(
     if not sources:
         console.print("[red]No sources configured.[/red]")
         raise typer.Exit(code=1)
+    # Imported here, not at module scope: it pulls in the detector and with it
+    # TensorFlow (~250MB resident). Every subcommand pays that on a module-level
+    # import — including `birdbrain web`, which never runs inference. Only this
+    # one actually needs it.
+    from birdbrain.pipeline import run_all
+
     run_all(sources, cfg)
 
 

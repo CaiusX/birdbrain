@@ -4,14 +4,24 @@ from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import Integer, create_engine, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
-from birdbrain.detector.birdnet import Detection
+# Type-only. Importing this for real would drag birdnetlib -> TensorFlow into
+# every process that touches storage — including the web app, which never runs
+# inference and was paying ~1.3GB for the privilege across its workers. The
+# annotation below is a string (see `from __future__ import annotations`), so
+# nothing needs the class at runtime.
+#
+# Keep it this way: `tests/test_web_no_tensorflow.py` fails if the web app
+# starts importing TensorFlow again, which is easy to do by accident from any
+# module in the storage or config chain.
+if TYPE_CHECKING:
+    from birdbrain.detector.birdnet import Detection
 from birdbrain.storage.models import (
     AnomalyEventRow,
     AppSettingRow,
