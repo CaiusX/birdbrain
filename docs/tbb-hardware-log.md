@@ -110,9 +110,16 @@ artifact: median per-species ratio 1.40, tbb ahead on 16 of 17 species with ≥2
 combined detections, 1.47× with the dominant Cape Robin-Chat (65–67% of both
 totals) removed, and a flat 1.2–1.9× lead across every hour of the day.
 
-**Do not read that as a sensor verdict.** The two mics sit ~550 m apart
-(-26.124 vs -26.129) in different micro-locations, so this is a site comparison
-as much as a hardware one. What it does establish is that the Pi Zero is not
+**Corrected 2026-09-02.** An earlier version of this paragraph said the two
+mics sit ~550 m apart "in different micro-locations", and discounted the result
+as a site comparison on that basis. That was wrong. They are co-located, as the
+header of this file and `scripts/mic-ab-report.py` both already said; the ~550 m
+was derived from the two sources' stored lat/lon (-26.124 vs -26.129), which are
+approximate and differ by 0.005° of latitude. The coordinates are wrong, not the
+mics. So the comparison is *better* controlled than that paragraph claimed —
+same acoustic scene, same weather, differing only in capture hardware.
+
+What it establishes is that the Pi Zero is not
 compute-limited: both analyse identical 3.0 s windows at the same cadence, and
 central's serialized detector sits at ~60% capacity (18 workers × ~100 ms /
 3000 ms), so neither side is dropping chunks. Level and noise plausibly explain

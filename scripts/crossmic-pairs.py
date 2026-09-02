@@ -1,45 +1,59 @@
 #!/usr/bin/env python3
-"""Does a bird's voice survive two microphones? Cross-mic pair analysis.
+"""Cross-mic pair analysis: how stable are clip features across two capture chains?
 
-tbb-test and JHB - Hyde Park sit 550m apart on matched hardware and frequently
-hear the same call. Each such co-detection is one individual recorded
-simultaneously down two different acoustic paths — which is the only reason any
-of this works, because it is a same-individual pair whose *recording
-conditions differ*. Same-microphone pairs cannot do that job: an embedding
-trained on them learns wind and distance and looks excellent doing it.
+tbb-test and JHB - Hyde Park are **co-located** — same place, same acoustic
+scene, differing only in capture hardware. When both fire within a few seconds
+they have recorded the same call through two independent chains: different USB
+microphone, different ADC, different Pi, and for the unit an ogg encode and a
+network hop on top.
 
     scripts/crossmic-pairs.py --species 'Hadada Ibis'
     scripts/crossmic-pairs.py --species 'Cape Robin-Chat' --cache crc.npz
 
-Results as of 2026-09-02, 24 log-spectral bands and no model at all:
+Measured 2026-09-02 on 24 log-spectral bands, matched pairs vs unrelated calls
+of the same species (tightest null):
 
-    Hadada Ibis       603 pairs   AUC 0.885  (null: within 1 hour)
-    Cape Robin-Chat  3156 pairs   AUC 0.718  (null: within 10 minutes)
+    Hadada Ibis       603 pairs   AUC 0.885
+    Cape White-eye    171 pairs   AUC 0.770
+    Cape Robin-Chat  3156 pairs   AUC 0.718
 
-FOUR THINGS THIS GETS WRONG IF YOU CHANGE THEM CARELESSLY.
+READ THAT AS FEATURE ROBUSTNESS, NOT INDIVIDUAL IDENTIFICATION.
 
-Normalise per clip. The two mics are at different distances, so loudness and
-SNR differ systematically. Un-normalised spectra separate the *microphones*
-beautifully and mean nothing.
+This was originally written to test whether a bird's individual voice survives
+two microphones, on the belief that the mics were ~550 m apart and therefore
+sampling genuinely different acoustic paths. They are not; that figure came
+from the sources' stored lat/lon, which are approximate. The mics sit together.
 
-Keep the null same-species and cross-mic. Comparing matched pairs against other
-species measures species; against same-mic clips it measures conditions. Both
-flatter the result enormously.
+Which breaks the inference. Every matched pair is the *same call instance*
+recorded twice, so "matched closer than unmatched" conflates two things:
 
-Constrain the null in time. Matched pairs are simultaneous, so they share wind,
-traffic and the same dawn chorus. The --near control draws the null from events
-minutes away instead, holding ambient roughly constant. For Cape Robin-Chat
-this moved AUC 0.769 -> 0.718; the difference was the afternoon, not the bird.
+    same bird vs different bird        <- what individual ID needs
+    same instant vs different instant  <- true almost by construction
+
+Co-located mics cannot separate those. What the numbers do show is that the
+feature representation survives two independent capture chains — the spectra
+are dominated by the call rather than by microphone, codec or transport
+artifacts. That is worth knowing before building anything on these features,
+and it is all this design can support.
+
+Testing individual identity needs same-bird-at-different-times pairs, which
+needs identity labels this project does not have: ringed birds, or mics far
+enough apart to resolve separate territories.
+
+CONTROLS THAT STILL MATTER IF YOU EDIT THIS.
+
+Normalise per clip. The two chains differ in gain; un-normalised spectra
+separate the microphones and look like a triumph.
+
+Keep the null same-species and cross-mic. Against other species it measures
+species; against same-mic clips it measures conditions.
+
+Constrain the null in time. Matched pairs are simultaneous and share the
+ambient scene. --near draws the null from events minutes away instead; for Cape
+Robin-Chat that moved AUC 0.769 -> 0.718, and the difference was the afternoon.
 
 Co-detection is not ground truth. It says one acoustic event reached both mics,
-not that one bird made it — Hadadas are gregarious and often call in groups.
-Nothing here involves a ringed bird.
-
-AND THE CONFOUND STILL STANDING: both mics are fixed, so a bird on a fixed
-perch gives a fixed acoustic path every time, and some of the separation may be
-"same place" rather than "same bird". Cape Robin-Chat is the partial answer —
-it is mobile and still scores 0.718 — but settling it needs a third microphone
-at a different bearing, or ringed birds.
+not that one bird made it — Hadadas in particular often call in groups.
 """
 from __future__ import annotations
 
@@ -181,7 +195,8 @@ def main() -> int:
     ap.add_argument("--unit", default="tbb-test")
     ap.add_argument("--other", default="JHB - Hyde Park")
     ap.add_argument("--window", type=float, default=6.0,
-                    help="co-detection window, seconds (550m is ~1.6s of flight)")
+                    help="co-detection window, seconds; mics are co-located so this is "
+                         "detector jitter and 3s chunk quantisation, not flight time")
     ap.add_argument("--near", type=float, default=600.0,
                     help="tight null: draw unrelated events within this many seconds")
     ap.add_argument("--samples", type=int, default=60000)
