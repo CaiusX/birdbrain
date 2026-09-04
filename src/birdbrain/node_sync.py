@@ -102,14 +102,26 @@ class NodeSyncConfig(BaseModel):
     # batches stay off the Cloudflare tunnel and skip TLS on a link that is
     # already trusted.
     central_url: str
-    interval_seconds: int = Field(default=45, ge=5)
+    interval_seconds: int = Field(default=25, ge=5)
     # Rows per POST. Central caps a body at 2000 detections (wire.WireBatch), so
     # anything above that is rejected wholesale rather than truncated.
     batch_size: int = Field(default=200, ge=1, le=2000)
     # Seconds between empty keep-alive posts for an idle-but-healthy source.
-    # 0 disables them, and a source then reads "stale" on central whenever it
+    # 0 disables them, and the source then reads "stale" on central whenever it
     # goes a while without hearing a bird.
-    keepalive_seconds: int = Field(default=300, ge=0)
+    #
+    # Must stay comfortably under central's 60s staleness cutoff
+    # (`web/app.py::_hb_status`: "running" requires a heartbeat inside 60s), or
+    # every quiet cam flaps to stale between birds — which destroys the signal
+    # the dashboard exists to give, since a genuinely dead cam then looks
+    # exactly like a healthy one at a waterhole where nothing is calling.
+    # 20s against a 25s tick (±15% jitter, so ≤29s worst case) heartbeats on
+    # every pass with room to spare.
+    #
+    # tbb_sync defaults to 300 for the opposite reason — a Pi Zero on a metered
+    # link, where empty batches cost ~2MB/day of real money. A node talks to
+    # central over the LAN, where they cost nothing.
+    keepalive_seconds: int = Field(default=20, ge=0)
     # A source whose local worker has not touched its heartbeat within this many
     # seconds is treated as wedged: real backlog still flushes, keep-alives do
     # not. See _worker_is_live.

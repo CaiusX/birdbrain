@@ -26,7 +26,7 @@
 central_url = "http://192.168.3.59:8765"
 
 # Seconds between passes over the roster.
-interval_seconds = 45
+interval_seconds = 25
 
 # Rows per POST. Central rejects a body above 2000 detections outright.
 batch_size = 200
@@ -35,7 +35,11 @@ batch_size = 200
 # rather than decaying to "stale" between birds. 0 turns them off. Suppressed
 # automatically while a cam's local worker heartbeat is stale — a wedged worker
 # must not be able to report itself healthy.
-keepalive_seconds = 300
+#
+# Keep this under central's 60s staleness cutoff (web/app.py::_hb_status) or
+# every quiet cam flaps to stale between birds, and a dead cam becomes
+# indistinguishable from a healthy one at a silent waterhole.
+keepalive_seconds = 20
 
 # How long a worker heartbeat may go untouched before that cam is treated as
 # wedged for the purpose above.
