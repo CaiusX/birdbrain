@@ -6,8 +6,11 @@
 #
 # Only for an ingest NODE — a Pi running its own pipeline over cams that central
 # does not analyse. Central itself never runs this. Pair it with
-# birdbrain-pipeline.service on the same host and a node.toml beside
-# sources.toml (see node.example.toml).
+# birdbrain-pipeline.service on the same host, a node.toml (see
+# node.example.toml) and a sources.node.toml holding the node's own cams.
+# Set BIRDBRAIN_SOURCES_FILE=sources.node.toml in the node's .env so both
+# services read that roster rather than central's tracked sources.toml.
+# See docs/ingest-node.md.
 #
 # Its own unit rather than a thread inside the pipeline: a node runs no web
 # service to host one, and this way a crash-looping sync agent can never take
