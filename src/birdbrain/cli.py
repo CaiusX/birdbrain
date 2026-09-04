@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
@@ -53,6 +54,74 @@ def run(
     from birdbrain.pipeline import run_all
 
     run_all(sources, cfg)
+
+
+@app.command(name="node-sync")
+def node_sync(
+    config_file: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Path to this node's node.toml."),
+    ] = Path("node.toml"),
+    sources_file: Annotated[
+        Path | None,
+        typer.Option("--sources", "-s", help="Path to a sources.toml file."),
+    ] = None,
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Run a single pass and exit (for a cron/smoke test)."),
+    ] = False,
+) -> None:
+    """Report this ingest node's detections to a central birdbrain.
+
+    Runs beside `birdbrain run` on a node whose sources.toml holds cams that
+    central itself does not analyse. Each link in node.toml maps one local
+    source to one device enrolled on central, so every cam arrives as its own
+    site at its own coordinates. Central needs no changes to accept them — see
+    birdbrain.node_sync.
+    """
+    # Imported here for the same reason `run` defers the pipeline: this pulls in
+    # requests and a socket stack that no other subcommand touches, and only
+    # a node ever runs this one.
+    from birdbrain.node_sync import MarkStore, load_node_config, run_node_sync, sync_once
+
+    cfg = AppConfig()
+    if sources_file is not None:
+        cfg.sources_file = sources_file
+    configure_logging(cfg.log_level)
+    node_cfg = load_node_config(config_file)
+    if not node_cfg.links:
+        console.print(f"[red]No [[link]] entries in {config_file}.[/red]")
+        raise typer.Exit(code=1)
+
+    # Fail on a typo'd source name here rather than syncing an empty backlog
+    # forever: a link whose source matches nothing in sources.toml always finds
+    # zero rows, which is indistinguishable from a quiet cam in the logs.
+    sources = load_sources(cfg.sources_file)
+    known = {s.name for s in sources}
+    unknown = [ln.source for ln in node_cfg.links if ln.source not in known]
+    if unknown:
+        console.print(
+            f"[red]node.toml links reference sources not in {cfg.sources_file}:[/red] "
+            + ", ".join(repr(u) for u in unknown)
+        )
+        raise typer.Exit(code=1)
+    timezones = {s.name: s.timezone for s in sources}
+
+    db = Database(cfg.db_url)
+    if once:
+        marks = MarkStore.load(node_cfg.state_file)
+        results = sync_once(db, node_cfg, marks, timezones)
+        for name, sent in sorted(results.items()):
+            console.print(f"  {name}: {sent} sent")
+        console.print(f"[green]Synced {sum(results.values())} detections.[/green]")
+        return
+
+    stop = threading.Event()
+    try:
+        run_node_sync(db, node_cfg, stop, timezones)
+    except KeyboardInterrupt:
+        stop.set()
+        console.print("Stopped.")
 
 
 @app.command(name="refresh-cookies")

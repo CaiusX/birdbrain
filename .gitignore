@@ -27,6 +27,8 @@ Thumbs.db
 
 # Local config
 sources.toml
+# Ingest-node link roster — holds per-device bearer tokens.
+node.toml
 sites.toml
 .env
 .env.local
