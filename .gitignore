@@ -27,6 +27,10 @@ Thumbs.db
 
 # Local config
 sources.toml
+# Ingest-node config: link roster (holds per-device bearer tokens) and the
+# node's own cam list, which must never be confused with central's sources.toml.
+node.toml
+sources.node.toml
 sites.toml
 .env
 .env.local

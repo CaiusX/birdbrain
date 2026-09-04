@@ -1,0 +1,63 @@
+# node.toml — stream-ingest node → central reporting.
+#
+# Copy to node.toml (gitignored: this file holds bearer tokens) on a Pi that
+# runs its own `birdbrain run` over a sources.toml of cams central does not
+# analyse itself. The node keeps the audio and the inference; only detection
+# rows go up.
+#
+# Each [[link]] pairs one local source with one device enrolled on central.
+# One device per cam is not a workaround — it is central's model: a token
+# authorises exactly one source_name at exactly one lat/lon, which is what
+# makes each cam land on the map in the right place. See src/birdbrain/
+# node_sync.py for why this agent exists alongside tbb_sync.
+#
+# To mint the devices, on CENTRAL, once per cam:
+#
+#   birdbrain tbb-device-add --unit-id "Nkorho Bush Lodge" \
+#       --lat -24.7833 --lon 31.4333 --public
+#
+# It prints the token exactly once (central stores only a SHA-256), so paste it
+# straight into the matching [[link]] below. `--unit-id` becomes the source name
+# shown on the dashboard, so give it the human name you want to read there —
+# unlike the /enroll flow, which slugifies it.
+
+# Central's base URL. On a LAN node prefer the private address: same endpoint,
+# but batches stay off the public tunnel and skip TLS on a trusted link.
+central_url = "http://192.168.3.59:8765"
+
+# Seconds between passes over the roster.
+interval_seconds = 25
+
+# Rows per POST. Central rejects a body above 2000 detections outright.
+batch_size = 200
+
+# Empty keep-alive posts for a healthy-but-quiet cam, so it reads "running"
+# rather than decaying to "stale" between birds. 0 turns them off. Suppressed
+# automatically while a cam's local worker heartbeat is stale — a wedged worker
+# must not be able to report itself healthy.
+#
+# Keep this under central's 60s staleness cutoff (web/app.py::_hb_status) or
+# every quiet cam flaps to stale between birds, and a dead cam becomes
+# indistinguishable from a healthy one at a silent waterhole.
+keepalive_seconds = 20
+
+# How long a worker heartbeat may go untouched before that cam is treated as
+# wedged for the purpose above.
+worker_stale_seconds = 90.0
+
+# Per-source high-water marks. A plain JSON file, so the node's DB schema stays
+# identical to central's.
+state_file = "data/node_sync_state.json"
+
+
+[[link]]
+# `source` must match a [[source]] name in this node's sources.toml.
+source = "Nkorho Bush Lodge"
+# `unit` is central's devices.unit_id — also the source name shown there.
+unit = "Nkorho Bush Lodge"
+token = "PASTE-THE-TOKEN-tbb-device-add-PRINTED"
+
+[[link]]
+source = "Deteema Springs"
+unit = "Deteema Springs"
+token = "PASTE-THE-TOKEN-tbb-device-add-PRINTED"

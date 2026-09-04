@@ -1,0 +1,34 @@
+# TEMPLATE — BirdBrain ingest-node → central sync (systemd --user service).
+# Replace the <PLACEHOLDERS>, then:
+#   cp this file to ~/.config/systemd/user/birdbrain-node-sync.service
+#   systemctl --user daemon-reload && systemctl --user enable --now birdbrain-node-sync
+# Find your uv path with `command -v uv` (often ~/.local/bin/uv).
+#
+# Only for an ingest NODE — a Pi running its own pipeline over cams that central
+# does not analyse. Central itself never runs this. Pair it with
+# birdbrain-pipeline.service on the same host, a node.toml (see
+# node.example.toml) and a sources.node.toml holding the node's own cams.
+# Set BIRDBRAIN_SOURCES_FILE=sources.node.toml in the node's .env so both
+# services read that roster rather than central's tracked sources.toml.
+# See docs/ingest-node.md.
+#
+# Its own unit rather than a thread inside the pipeline: a node runs no web
+# service to host one, and this way a crash-looping sync agent can never take
+# the capture workers down with it.
+# NB: <...> placeholders will NOT pass `systemd-analyze verify` until substituted.
+[Unit]
+Description=BirdBrain node sync (report this node's detections to central)
+After=network-online.target birdbrain-pipeline.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=<REPO>
+ExecStart=<UV> run birdbrain node-sync
+# Backlog is never lost when this dies: the per-source high-water marks only
+# advance on a 2xx from central, so a restart resumes from the last acked batch.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
