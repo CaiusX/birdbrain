@@ -30,11 +30,18 @@ log = get_logger(__name__)
 SUPERVISOR_INTERVAL = 15.0
 
 # Spacing between worker starts within a single reconcile pass. On a full
-# restart all ~11 YouTube workers become desired at once; starting them
+# restart every YouTube worker becomes desired at once; starting them
 # simultaneously fires a burst of yt-dlp resolves from one IP, which trips
 # YouTube's "confirm you're not a bot" block and takes every source down.
 # Each worker waits start_delay = (its index in the batch) * this, so the
 # resolves spread out. Steady-state (0–1 new workers/tick) is unaffected.
+#
+# The spread deliberately has no cap: the bigger the roster, the more a
+# simultaneous cold start needs spacing, so compressing it for large fleets
+# would remove the protection exactly where it matters most. That means the
+# last worker's delay grows past STALE_HEARTBEAT_S on a large roster, which is
+# safe only because a waiting worker keeps heartbeating — see
+# _wait_out_start_delay.
 WORKER_START_STAGGER_S = 6.0
 
 # A worker that hasn't heartbeat in this long is presumed stuck (e.g. ffmpeg
@@ -142,6 +149,51 @@ def _build_resolver(
     return SiteResolver(source=cfg, sites=sites, db=db, ocr=ocr)
 
 
+def _wait_out_start_delay(
+    db: Database,
+    app: AppConfig,
+    source_name: str,
+    stop_event: threading.Event,
+    delay: float,
+    slog,
+) -> bool:
+    """Sleep off a worker's start stagger, heartbeating while it waits.
+
+    Returns True if ``stop_event`` fired (caller should exit), False when the
+    delay is served.
+
+    A plain ``stop_event.wait(delay)`` was silently correct only while the
+    fleet was small. ``worker_started`` stamps a heartbeat, then nothing
+    touches it again until the first chunk arrives — so a worker's heartbeat
+    age during startup is its stagger *plus* the yt-dlp resolve and first
+    read. At 11 sources the last slot waited 60s and that was comfortably
+    inside STALE_HEARTBEAT_S; at 20 it waits 114s, and the resolve pushes it
+    to the edge. Past the line the watchdog kicks a worker that was merely
+    waiting its turn, reconcile() respawns it at a fresh index, and the
+    respawn issues another resolve — so the mechanism that exists to spread
+    resolves out starts generating extra ones, in a loop, precisely during
+    the cold start it was protecting. Observed on a 20-cam node: the five
+    highest-index sources were kicked, in order, while central was already
+    bot-gated.
+
+    Heartbeating here removes the coupling rather than re-tuning around it.
+    The claim a heartbeat makes is "this thread is alive", which is true of a
+    worker serving its stagger, so the watchdog keeps its meaning: it fires
+    for a worker wedged in a read, never for one that hasn't started yet.
+    """
+    interval = max(1.0, app.worker_heartbeat_seconds)
+    remaining = delay
+    while remaining > 0:
+        if stop_event.wait(min(interval, remaining)):
+            return True
+        remaining -= interval
+        try:
+            db.worker_heartbeat(source_name)
+        except Exception:
+            slog.exception("worker.heartbeat_update_failed")
+    return False
+
+
 def run_source(
     cfg: SourceConfig,
     app: AppConfig,
@@ -167,9 +219,9 @@ def run_source(
     except Exception:
         slog.exception("worker.heartbeat_started_failed")
     # Stagger the first resolve. Interruptible so a stop during startup exits
-    # promptly; the delay (≤ ~1 min across the fleet) stays well under
-    # STALE_HEARTBEAT_S so the worker isn't kicked while waiting.
-    if start_delay and stop_event.wait(start_delay):
+    # promptly, and heartbeating throughout so the watchdog can't kick a worker
+    # for doing exactly what it was told to do — see _wait_out_start_delay.
+    if start_delay and _wait_out_start_delay(db, app, cfg.name, stop_event, start_delay, slog):
         slog.info("pipeline.stopped")
         try:
             db.worker_stopped(cfg.name)
