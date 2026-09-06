@@ -118,10 +118,10 @@ def refresh(
         return {"action": "skip", "reason": "no youtube source with a cookies file"}
 
     gated = bot_gated_sources(db)
+    stamp = cookies_file.with_suffix(cookies_file.suffix + ".refreshed")
     if not force:
         if not gated:
             return {"action": "skip", "reason": "no bot-gated cams"}
-        stamp = cookies_file.with_suffix(cookies_file.suffix + ".refreshed")
         if stamp.exists() and (time.time() - stamp.stat().st_mtime) < min_interval_h * 3600:
             return {"action": "skip", "reason": "debounced", "gated": gated}
 
@@ -165,10 +165,18 @@ def refresh(
         reason = str(e)[:200]
     if not ok:
         Path(tmp).unlink(missing_ok=True)
+        # Stamp on failure too: the debounce is a budget on *attempts*, not on
+        # successes. Stamping only the success path meant a refresh that kept
+        # failing was never debounced at all, so the 5-minute timer re-exported
+        # and re-probed forever. When the failure is an IP-level bot-gate that
+        # is worse than useless — fresh cookies cannot answer a block aimed at
+        # the IP, and each re-export makes YouTube rotate the session for
+        # nothing while the probe itself feeds the block.
+        stamp.touch()
         log.warning("cookies.refresh_failed", err=reason)
         return {"action": "failed", "reason": reason, "gated": gated}
 
     os.replace(tmp, cookies_file)
-    cookies_file.with_suffix(cookies_file.suffix + ".refreshed").touch()
+    stamp.touch()
     log.info("cookies.refreshed", gated=gated, profile=str(prof), file=str(cookies_file))
     return {"action": "refreshed", "gated": gated, "cookies_file": str(cookies_file)}

@@ -75,6 +75,37 @@ def _is_auth_error(err: str) -> bool:
     return any(m in err for m in _AUTH_ERR_MARKERS)
 
 
+# A run at least this long counts as a healthy stretch worth resetting for.
+HEALTHY_RUN_S = 60.0
+
+
+def _next_backoff(backoff: float, last_err: str, ran_for: float) -> float:
+    """Pick the wait before the next reconnect attempt.
+
+    The auth check comes FIRST and must stay that way. A bot-gate is a verdict
+    on the IP, not on this attempt, so how long the attempt ran says nothing
+    about health — and a blocked yt-dlp resolve takes ~3 min to fail, sailing
+    past the healthy-stretch mark. With the ``ran_for`` reset tested first,
+    every auth failure dropped straight back to the 5 s schedule and the
+    retries themselves kept the block alive. That shipped: when a block set in
+    on 2026-09-05, 18 cams held ~320 requests/hour against it for 20 hours and
+    the auth schedule never engaged once (1914 of 1914 reconnects in one 6 h
+    window waited 5 s).
+    """
+    if _is_auth_error(last_err):
+        # YouTube rate-limits aggressively when many yt-dlp calls come from one
+        # IP. Back off hard so a single failing source can't poison auth for the
+        # rest, and so the IP gets quiet time in which to un-block.
+        if backoff < AUTH_BACKOFF_INITIAL:
+            return AUTH_BACKOFF_INITIAL
+        return min(backoff * 2, AUTH_BACKOFF_MAX)
+    if ran_for > HEALTHY_RUN_S:
+        # Successful stretch — reset to fast retries.
+        return NORMAL_BACKOFF_INITIAL
+    # Transient (ffmpeg blip, brief network drop) — keep the fast schedule.
+    return min(backoff * 2, NORMAL_BACKOFF_MAX)
+
+
 def build_source(cfg: SourceConfig, app: AppConfig) -> AudioSource:
     common = {
         "name": cfg.name,
@@ -250,6 +281,7 @@ def run_source(
     while not stop_event.is_set():
         started = time.monotonic()
         last_err = ""
+        eof = False
         # Apply the current high-pass cutoff before (re)launching capture. A
         # change in /admin makes _consume_stream return so we relaunch here with
         # the new value (ffmpeg filters are fixed for the process's lifetime).
@@ -262,36 +294,28 @@ def run_source(
             )
             if stop_event.is_set():
                 break
-            slog.warning("source.eof_reconnect", sleep_s=backoff)
+            eof = True
             last_err = "stream EOF / reconnect"
         except Exception as e:
             last_err = str(e)
-            slog.warning(
-                "source.error_reconnect",
-                error=last_err[:300],
-                sleep_s=backoff,
-                auth=_is_auth_error(last_err),
-            )
         try:
             db.worker_backoff(cfg.name, last_err)
         except Exception:
             slog.exception("worker.heartbeat_backoff_failed")
 
         ran_for = time.monotonic() - started
-        if ran_for > 60:
-            # Successful stretch — reset to fast retries.
-            backoff = NORMAL_BACKOFF_INITIAL
-        elif _is_auth_error(last_err):
-            # YouTube rate-limits aggressively when many yt-dlp calls come from
-            # one IP. Back off hard so a single failing source can't poison auth
-            # for other workers; gives the IP cooldown time to lift.
-            if backoff < AUTH_BACKOFF_INITIAL:
-                backoff = AUTH_BACKOFF_INITIAL
-            else:
-                backoff = min(backoff * 2, AUTH_BACKOFF_MAX)
-        else:
-            # Transient (ffmpeg blip, brief network drop) — keep the fast schedule.
-            backoff = min(backoff * 2, NORMAL_BACKOFF_MAX)
+        backoff = _next_backoff(backoff, last_err, ran_for)
+
+        # Logged after the schedule is picked so sleep_s is the wait we actually
+        # take. It used to be logged before, which meant every bot-gate line
+        # read "sleep_s=5.0" no matter what — the stale number that hid the
+        # backoff bug for a week.
+        slog.warning(
+            "source.eof_reconnect" if eof else "source.error_reconnect",
+            error=last_err[:300],
+            sleep_s=backoff,
+            auth=_is_auth_error(last_err),
+        )
 
         # Use the event so the worker wakes immediately on stop_event rather than sleeping it out.
         if stop_event.wait(backoff):
