@@ -29,6 +29,7 @@ a killed run resume where it stopped.
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -180,15 +181,46 @@ def _expired_rows_on(
         return [(i, p, src) for i, p, src in s.execute(stmt)]
 
 
-def _remove_clip(path: Path, stats: PruneStats, dry_run: bool) -> None:
+class _DirIndex:
+    """Per-directory listing, read once, keyed by clip stem.
+
+    A day directory holds thousands of files, and a sweep touches most of
+    them. Globbing the directory once per clip made the first dry-run
+    quadratic — a million clips times a two-thousand-entry listing. One
+    ``scandir`` per directory, grouped by the part of the name before the
+    first dot, answers every sibling lookup for that directory.
+    """
+
+    def __init__(self) -> None:
+        self._dirs: dict[Path, dict[str, list[Path]]] = {}
+
+    def siblings(self, clip: Path) -> list[Path]:
+        """Cached files next to ``clip`` sharing its stem: the on-demand MP3
+        and every spectrogram palette/size. Stems are timestamps, unique
+        within a day directory."""
+        listing = self._dirs.get(clip.parent)
+        if listing is None:
+            listing = {}
+            try:
+                with os.scandir(clip.parent) as it:
+                    for entry in it:
+                        listing.setdefault(entry.name.split(".", 1)[0], []).append(
+                            clip.parent / entry.name
+                        )
+            except OSError:
+                pass
+            self._dirs[clip.parent] = listing
+        key = clip.name.split(".", 1)[0]
+        return [p for p in listing.get(key, []) if p != clip]
+
+
+def _remove_clip(path: Path, stats: PruneStats, dry_run: bool, index: _DirIndex) -> None:
     try:
         size = path.stat().st_size
     except FileNotFoundError:
         stats.files_missing += 1
         size = 0
-    # Cached siblings: the on-demand MP3 and every spectrogram palette/size.
-    # Stems are timestamps, unique within a day directory.
-    siblings = [p for p in path.parent.glob(path.stem + ".*") if p != path]
+    siblings = index.siblings(path)
     if not dry_run:
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
@@ -246,8 +278,9 @@ def prune_clips(
             stats.by_source[source] = stats.by_source.get(source, 0) + 1
 
         to_null: list[int] = []
+        index = _DirIndex()  # one listing per day directory, dropped with the day
         for path, ids in by_file.items():
-            _remove_clip(Path(path), stats, dry_run)
+            _remove_clip(Path(path), stats, dry_run, index)
             to_null.extend(ids)
         if not dry_run:
             for i in range(0, len(to_null), _UPDATE_CHUNK):
