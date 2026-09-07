@@ -78,7 +78,7 @@
   {% set ip = h.infer_pct %}
   {% set ic = 'text-emerald-300' if ip < 55 else ('text-amber-300' if ip < 80 else 'text-rose-300') %}
   {{ card('Inference', ip ~ '%', ic,
-          h.workers_running ~ ' / ~' ~ h.infer_max ~ ' cams max · est ' ~ h.infer_ms ~ 'ms/chunk') }}
+          h.workers_local_running ~ ' / ~' ~ h.infer_max ~ ' cams max · est ' ~ h.infer_ms ~ 'ms/chunk') }}
 
   {# Memory #}
   {% if ht.mem_total and ht.mem_available is not none %}
@@ -127,7 +127,9 @@
   {# Workers #}
   {% set wc = 'text-emerald-300' if h.workers_running == h.workers_total and h.workers_total > 0
               else ('text-rose-300' if h.workers_running == 0 else 'text-amber-300') %}
-  {{ card('Workers', h.workers_running ~ '/' ~ h.workers_total, wc, 'sites running') }}
+  {{ card('Workers', h.workers_running ~ '/' ~ h.workers_total, wc,
+          'sites running' if not h.workers_external
+          else 'sites running · ' ~ h.workers_external ~ ' push-fed') }}
 
   {# Last detection (data flowing?) #}
   {% set a = h.last_det_age_s %}

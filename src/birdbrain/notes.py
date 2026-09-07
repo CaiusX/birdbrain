@@ -1147,6 +1147,18 @@ NOTES_HEALTH_OK_KEY = "notes_worker_last_ok"
 NOTES_HEALTH_ERROR_KEY = "notes_worker_last_error"
 
 
+def _stamp_health(db: Database, key: str, value: str | None) -> None:
+    """Write a worker-liveness key, swallowing any error. These writes are
+    pure bookkeeping and must never be able to kill the loop: the same
+    ``database is locked`` contention that makes a tick fail can just as
+    easily hit the error-stamping write in the handler, and an exception
+    raised there escapes ``while True`` and silently kills the thread."""
+    try:
+        db.set_setting(key, value)
+    except Exception as e:  # liveness bookkeeping is best-effort
+        log.warning("notes.health_stamp_failed", key=key, error=str(e)[:200])
+
+
 def _worker_loop(
     db: Database, cfg: AppConfig, sources: list[SourceConfig]
 ) -> None:
@@ -1209,15 +1221,40 @@ def _worker_loop(
             # A tick that completed without raising means the worker is alive
             # and (if it did any work) the API is reachable — clear any stale
             # error so a recovery shows up on the health panel immediately.
-            db.set_setting(NOTES_HEALTH_OK_KEY, datetime.now(UTC).isoformat())
-            db.set_setting(NOTES_HEALTH_ERROR_KEY, None)
+            _stamp_health(db, NOTES_HEALTH_OK_KEY, datetime.now(UTC).isoformat())
+            _stamp_health(db, NOTES_HEALTH_ERROR_KEY, None)
         except Exception as e:
             log.warning("notes.tick_failed", error=str(e)[:300])
-            db.set_setting(
+            _stamp_health(
+                db,
                 NOTES_HEALTH_ERROR_KEY,
                 f"{datetime.now(UTC).isoformat()}|{str(e)[:300]}",
             )
         time.sleep(cfg.notes_tick_seconds)
+
+
+def _supervised_worker_loop(
+    db: Database, cfg: AppConfig, sources: list[SourceConfig]
+) -> None:
+    """Run ``_worker_loop``, restarting it if it ever escapes its own
+    try/except. A bare daemon thread that raises just disappears — no log
+    line, no health stamp, and the dashboard keeps showing the *last* tick
+    error as though the worker were merely unhappy rather than gone. That
+    exact failure lost three days of daily briefs. A clean return (e.g. no
+    ANTHROPIC_API_KEY) is intentional and ends supervision."""
+    while True:
+        try:
+            _worker_loop(db, cfg, sources)
+            return  # dormant by design — nothing to supervise
+        except Exception as e:  # last line of defence
+            log.error("notes.worker_crashed", error=str(e)[:300])
+            _stamp_health(
+                db,
+                NOTES_HEALTH_ERROR_KEY,
+                f"{datetime.now(UTC).isoformat()}|worker crashed, "
+                f"restarting: {str(e)[:250]}",
+            )
+            time.sleep(cfg.notes_tick_seconds)
 
 
 def start_notes_worker(
@@ -1230,7 +1267,7 @@ def start_notes_worker(
         log.info("notes.disabled", reason="cfg.notes_enabled=False")
         return None
     t = threading.Thread(
-        target=_worker_loop,
+        target=_supervised_worker_loop,
         args=(db, cfg, list(sources)),
         name="notes-worker",
         daemon=True,

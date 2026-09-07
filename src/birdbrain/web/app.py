@@ -4054,6 +4054,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         now = datetime.now(UTC)
         ordered, _, _ = _all_sources()
         heartbeats = {h.source_name: h for h in db.list_worker_heartbeats()}
+        # Push-fed sources (TBB units, ingest-node links) run their worker on
+        # ANOTHER box and post finished detections over HTTP — the pipeline
+        # supervisor deliberately skips them (see pipeline.py::_desired_sources).
+        # They are real sources whose liveness belongs on the roster, but they
+        # cost this Pi no detector time, so they must not enter the saturation
+        # maths below.
+        external_names = {
+            r.name for r in db.list_runtime_sources() if getattr(r, "external", False)
+        }
         workers_running = 0
         problems: list[dict] = []
         running: list[str] = []
@@ -4066,6 +4075,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 problems.append(
                     {"name": cfg_src.name, "status": status, "since_s": since_s, "error": error}
                 )
+        local_running = sum(1 for n in running if n not in external_names)
         deaf = _deaf_sources(running)
 
         with db.session() as s:
@@ -4095,9 +4105,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         # Serialized-detector saturation: all workers share one locked
         # BirdNetDetector, so the ceiling is chunk_seconds / inference_time.
+        # Counts LOCAL workers only — a push-fed source burns another box's
+        # detector, and folding those in read as load this Pi was not carrying.
         chunk_s = cfg.chunk_seconds or 3.0
         inf_ms = cfg.inference_ms_estimate or 110.0
-        infer_pct = round(workers_running * inf_ms / (chunk_s * 1000) * 100)
+        infer_pct = round(local_running * inf_ms / (chunk_s * 1000) * 100)
         infer_max = int(chunk_s * 1000 / inf_ms)
 
         # Notes / AI-commentary worker liveness. last_error is the authoritative
@@ -4138,6 +4150,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "db_bytes": db_bytes,
                 "workers_running": workers_running,
                 "workers_total": len(ordered),
+                "workers_local_running": local_running,
+                "workers_external": len(external_names & {c.name for c in ordered}),
                 "worker_problems": problems,
                 "deaf_sources": deaf,
                 "last_det_age_s": last_det_age_s,
@@ -7291,20 +7305,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
-    _enroll_hits: dict[str, list[float]] = {}
-    _ENROLL_RATE_PER_MIN = 10
-
-    def _enroll_rate_ok(client_ip: str) -> bool:
-        now = time.monotonic()
-        hits = [t for t in _enroll_hits.get(client_ip, []) if now - t < 60.0]
-        if len(hits) >= _ENROLL_RATE_PER_MIN:
-            _enroll_hits[client_ip] = hits
-            return False
-        hits.append(now)
-        _enroll_hits[client_ip] = hits
-        return True
-
-    # --- Visitor analytics: anonymous client beacon (path + dwell on tab-hide) ---
     # --- Clip ingest: the audio behind a pushed detection, from an ingest node ---
     # Same token, separate budget: a node uploads clips in batches of ~25 files
     # right behind each detection batch, so the 30/min detection bucket would
@@ -7360,6 +7360,20 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
+    _enroll_hits: dict[str, list[float]] = {}
+    _ENROLL_RATE_PER_MIN = 10
+
+    def _enroll_rate_ok(client_ip: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in _enroll_hits.get(client_ip, []) if now - t < 60.0]
+        if len(hits) >= _ENROLL_RATE_PER_MIN:
+            _enroll_hits[client_ip] = hits
+            return False
+        hits.append(now)
+        _enroll_hits[client_ip] = hits
+        return True
+
+    # --- Visitor analytics: anonymous client beacon (path + dwell on tab-hide) ---
     _TRACK_MAX_BODY = 4_000  # bytes — a tiny JSON beacon
     _TRACK_RATE_PER_MIN = 120
     _track_hits: dict[str, list[float]] = {}
