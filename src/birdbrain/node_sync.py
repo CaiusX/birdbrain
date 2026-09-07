@@ -50,7 +50,11 @@ can never take the capture workers down with it.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import shutil
+import socket
+import subprocess
 import threading
 import time
 import tomllib
@@ -59,8 +63,10 @@ from pathlib import Path
 
 import requests
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from birdbrain.config import AppConfig
+from birdbrain.host import host_metrics
 from birdbrain.logging import get_logger
 from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
@@ -141,6 +147,10 @@ class NodeSyncConfig(BaseModel):
     # how long the clip lives.
     clip_retention_days: int = Field(default=3, ge=0)
     clip_prune_tick_seconds: int = Field(default=3600, ge=60)
+    # How often this node reports its own host + pipeline health to central
+    # (``/ingest/node-health``), for the node pane on central's admin page.
+    # 0 disables. Signed with the first link's token.
+    health_seconds: int = Field(default=60, ge=0)
     links: list[SourceLink] = Field(default_factory=list)
 
 
@@ -546,6 +556,130 @@ def prune_uploaded_clips(db: Database, cfg: NodeSyncConfig, marks: MarkStore) ->
     return removed
 
 
+# --- node health --------------------------------------------------------------
+
+
+def node_version() -> str | None:
+    """Short git sha of the running checkout, or None outside a repo."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
+def node_health_payload(
+    db: Database,
+    cfg: NodeSyncConfig,
+    marks: MarkStore,
+    *,
+    node: str,
+    clips_dir: Path,
+    db_path: Path | None = None,
+    version: str | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """What this node tells central about itself. Mirrors the fields of
+    central's own health card (``web/app.py::_health_view``) so one template
+    can draw both, plus the two numbers only a node knows: how far its rows
+    and clips are behind central."""
+    now = now or datetime.now(UTC)
+    linked = {link.source for link in cfg.links}
+    beats = {h.source_name: h for h in db.list_worker_heartbeats() if h.source_name in linked}
+    running = 0
+    problems: list[dict] = []
+    for name in sorted(linked):
+        h = beats.get(name)
+        if h is None:
+            problems.append({"name": name, "status": "never", "error": None})
+            continue
+        last = h.last_heartbeat_at
+        if last is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        age = (now - last).total_seconds() if last else None
+        if h.state == "running" and age is not None and age <= cfg.worker_stale_seconds:
+            running += 1
+        else:
+            status = h.state if h.state != "running" else "stale"
+            problems.append({"name": name, "status": status, "error": (h.last_error or None)})
+
+    rows_behind = clips_behind = 0
+    with db.session() as s:
+        for link in cfg.links:
+            top = s.scalar(
+                select(func.max(DetectionRow.id)).where(DetectionRow.source_name == link.source)
+            ) or 0
+            rows_behind += max(0, top - marks.get(link.source))
+            clips_behind += max(0, marks.get(link.source) - marks.get_clip(link.source))
+        latest = s.scalar(
+            select(func.max(DetectionRow.started_at)).where(DetectionRow.source_name.in_(linked))
+        ) if linked else None
+        det_24h = s.scalar(
+            select(func.count(DetectionRow.id))
+            .where(DetectionRow.source_name.in_(linked))
+            .where(DetectionRow.started_at >= now - timedelta(hours=24))
+        ) if linked else 0
+    if latest is not None and latest.tzinfo is None:
+        latest = latest.replace(tzinfo=UTC)
+
+    try:
+        du = shutil.disk_usage(clips_dir if clips_dir.exists() else Path.cwd())
+        disk = {"total": du.total, "used": du.used, "free": du.free}
+    except OSError:
+        disk = None
+    db_bytes = None
+    if db_path is not None:
+        with contextlib.suppress(OSError):
+            db_bytes = db_path.stat().st_size
+
+    return {
+        "node": node,
+        "schema": SCHEMA_VERSION,
+        "reported_at": now.isoformat(),
+        "version": version,
+        "host": host_metrics(),
+        "disk": disk,
+        "db_bytes": db_bytes,
+        "workers_running": running,
+        "workers_total": len(linked),
+        "worker_problems": problems[:500],
+        "rows_behind": rows_behind,
+        "clips_behind": clips_behind,
+        "last_detection_age_s": (
+            max(0.0, (now - latest).total_seconds()) if latest is not None else None
+        ),
+        "det_24h": int(det_24h or 0),
+    }
+
+
+def post_node_health(
+    central_url: str,
+    token: str,
+    payload: dict,
+    *,
+    timeout: float = 20.0,
+    session: requests.Session | None = None,
+) -> bool:
+    """POST one health report. True on a 2xx. Best-effort: a failure is logged
+    and the next tick tries again; nothing is queued."""
+    url = central_url.rstrip("/") + "/ingest/node-health"
+    http = session or requests
+    try:
+        resp = http.post(
+            url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=timeout
+        )
+    except requests.RequestException as e:
+        log.warning("node_sync.health_post_failed", error=str(e)[:200])
+        return False
+    if resp.status_code // 100 != 2:
+        log.warning("node_sync.health_rejected", status=resp.status_code, body=resp.text[:200])
+        return False
+    return True
+
+
 def sync_once(
     db: Database,
     cfg: NodeSyncConfig,
@@ -630,6 +764,11 @@ def run_node_sync(
         link.source: _session_for(link.token) for link in cfg.links
     }
     keepalive_due: dict[str, float] = {}
+    app_cfg = AppConfig()
+    node_name = socket.gethostname()
+    version = node_version()
+    db_path = _sqlite_path(app_cfg.db_url)
+    next_health = time.monotonic()  # first report right away, then every health_seconds
     # First sweep after one full tick, not at start: a node that has just
     # rebooted should be pushing its backlog, not walking its clips directory.
     next_prune = time.monotonic() + cfg.interval_seconds
@@ -664,17 +803,52 @@ def run_node_sync(
                     log.exception(
                         "node_sync.link_failed", source=link.source, unit=link.unit
                     )
+            if cfg.health_seconds > 0 and cfg.links and time.monotonic() >= next_health:
+                next_health = time.monotonic() + cfg.health_seconds
+                _report_health(db, cfg, marks, sessions, app_cfg, node_name, version, db_path)
             if cfg.upload_clips and time.monotonic() >= next_prune:
                 next_prune = time.monotonic() + cfg.clip_prune_tick_seconds
-                try:
-                    prune_uploaded_clips(db, cfg, marks)
-                except Exception:
-                    log.exception("node_sync.prune_failed")
+                _sweep(db, cfg, marks)
             if stop_event.wait(jittered(cfg.interval_seconds)):
                 return
     finally:
         for s in sessions.values():
             s.close()
+
+
+def _sweep(db: Database, cfg: NodeSyncConfig, marks: MarkStore) -> None:
+    try:
+        prune_uploaded_clips(db, cfg, marks)
+    except Exception:
+        log.exception("node_sync.prune_failed")
+
+
+def _report_health(
+    db: Database,
+    cfg: NodeSyncConfig,
+    marks: MarkStore,
+    sessions: dict[str, requests.Session],
+    app_cfg: AppConfig,
+    node_name: str,
+    version: str | None,
+    db_path: Path | None,
+) -> None:
+    """One health report, signed with the first link's token. Never raises:
+    the sync loop must not stop over a status card."""
+    try:
+        payload = node_health_payload(
+            db, cfg, marks, node=node_name, clips_dir=app_cfg.clips_dir,
+            db_path=db_path, version=version,
+        )
+        first = cfg.links[0]
+        post_node_health(cfg.central_url, first.token, payload, session=sessions[first.source])
+    except Exception:
+        log.exception("node_sync.health_failed")
+
+
+def _sqlite_path(db_url: str) -> Path | None:
+    prefix = "sqlite:///"
+    return Path(db_url[len(prefix):]) if db_url.startswith(prefix) else None
 
 
 def _flush_clips(

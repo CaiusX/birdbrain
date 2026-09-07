@@ -1624,6 +1624,16 @@ class Database:
             ).all()
         return {k: v for k, v in rows}
 
+    def settings_with_prefix(self, prefix: str) -> dict[str, str]:
+        """``{key: value}`` for every setting whose key starts with ``prefix``
+        (e.g. one document per ingest node under ``node_health:``)."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(AppSettingRow.key, AppSettingRow.value)
+                .where(AppSettingRow.key.like(prefix.replace("%", "\\%") + "%"))
+            ).all()
+        return {k: v for k, v in rows if v is not None}
+
     def set_setting(self, key: str, value: str | None) -> None:
         """Upsert an app_settings value; ``None`` deletes the row (= unset)."""
         with self._Session() as s, s.begin():

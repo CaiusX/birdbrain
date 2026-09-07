@@ -152,4 +152,89 @@
   {% endif %}
 
 </div>
+
+{# --- Ingest nodes: each reports its own host + pipeline state once a minute
+   (node_sync.health_seconds → /ingest/node-health). Same cards as above so
+   the two boxes read alike; two extra cards say how far the node's rows and
+   clips are behind central. --- #}
+{% for n in h.nodes %}
+  {% set nh = n.host %}
+  {% set nthr = nh.throttled %}
+  {% set nthr_now = nthr and (nthr.under_voltage_now or nthr.throttled_now or nthr.freq_capped_now) %}
+  {% set nthr_boot = nthr and (nthr.under_voltage_since_boot or nthr.throttled_since_boot or nthr.freq_capped_since_boot) %}
+  <div class="mt-4 mb-2 flex items-baseline gap-2">
+    <h3 class="text-xs uppercase tracking-wider text-zinc-400">Node {{ n.node }}</h3>
+    <span class="text-[10px] text-zinc-600">ingest node{% if n.version %} · {{ n.version }}{% endif %} · via {{ n.reported_by }}</span>
+  </div>
+  {% if n.stale %}
+    <div class="px-4 py-2 bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs rounded-lg mb-3">
+      ⚠ {{ n.node }} last reported {{ dur(n.age_s) }} ago — the node is down or cannot reach central. Cards below are its last known state.
+    </div>
+  {% elif nthr_now %}
+    <div class="px-4 py-2 bg-rose-500/15 border border-rose-500/40 text-rose-300 text-xs rounded-lg mb-3">
+      ⚠ {{ n.node }} is {{ 'under-voltage' if nthr.under_voltage_now else ('throttled' if nthr.throttled_now else 'frequency-capped') }} right now — check its power supply.
+    </div>
+  {% endif %}
+  {% if n.worker_problems %}
+    <div class="px-4 py-2 bg-amber-500/10 border border-amber-500/40 text-amber-300 text-xs rounded-lg mb-3">
+      {{ n.worker_problems | length }} site{{ '' if n.worker_problems|length == 1 else 's' }} not running on {{ n.node }}:
+      {% for p in n.worker_problems %}
+        <span class="inline-block ml-1" title="{{ p.error or '' }}"><a href="/site/{{ p.name | urlencode }}" class="underline decoration-amber-500/40 hover:text-amber-200">{{ p.name }}</a> <span class="text-amber-200/60">({{ p.status }})</span>{{ ',' if not loop.last }}</span>
+      {% endfor %}
+    </div>
+  {% endif %}
+  <div class="grid grid-cols-2 md:grid-cols-3 gap-px bg-zinc-800/50 {{ 'opacity-60' if n.stale }}">
+    {% if nh.load1 is not none and nh.cpus %}
+      {% set ratio = nh.load1 / nh.cpus %}
+      {% set c = 'text-emerald-300' if ratio < 0.7 else ('text-amber-300' if ratio < 1.0 else 'text-rose-300') %}
+      {{ card('CPU load', '%.2f'|format(nh.load1), c,
+              'of %d cores · %.2f / %.2f (5/15m)'|format(nh.cpus, nh.load5 or 0, nh.load15 or 0)) }}
+    {% else %}
+      {{ card('CPU load', 'n/a', 'text-zinc-600', '') }}
+    {% endif %}
+    {% if nh.mem_total and nh.mem_available is not none %}
+      {% set used = nh.mem_total - nh.mem_available %}
+      {% set pct = (used / nh.mem_total * 100) | round | int %}
+      {% set c = 'text-emerald-300' if pct < 75 else ('text-amber-300' if pct < 90 else 'text-rose-300') %}
+      {{ card('Memory', pct ~ '%', c, gb(used) ~ ' / ' ~ gb(nh.mem_total) ~ ' GB · ' ~ gb(nh.mem_available) ~ ' free') }}
+    {% else %}
+      {{ card('Memory', 'n/a', 'text-zinc-600', '') }}
+    {% endif %}
+    {% if nh.temp_c is not none %}
+      {% set c = 'text-emerald-300' if nh.temp_c < 60 else ('text-amber-300' if nh.temp_c < 75 else 'text-rose-300') %}
+      {{ card('SoC temp', '%.0f°C'|format(nh.temp_c), c, 'CPU package') }}
+    {% else %}
+      {{ card('SoC temp', 'n/a', 'text-zinc-600', '') }}
+    {% endif %}
+    {% if n.disk %}
+      {% set pct = (n.disk.used / n.disk.total * 100) | round | int %}
+      {% set c = 'text-emerald-300' if pct < 80 else ('text-amber-300' if pct < 92 else 'text-rose-300') %}
+      {{ card('Disk', pct ~ '%', c,
+              gb(n.disk.free) ~ ' GB free of ' ~ gb(n.disk.total)
+              ~ (' · DB %.0f MB'|format(n.db_bytes / 1000000) if n.db_bytes else '')) }}
+    {% else %}
+      {{ card('Disk', 'n/a', 'text-zinc-600', '') }}
+    {% endif %}
+    {% if nthr is none %}
+      {{ card('Power', 'n/a', 'text-zinc-600', 'vcgencmd unavailable') }}
+    {% elif nthr_now %}
+      {{ card('Power', 'fault', 'text-rose-300', 'under-voltage / throttled now') }}
+    {% elif nthr_boot %}
+      {{ card('Power', 'warn', 'text-amber-300', 'under-voltage since boot') }}
+    {% else %}
+      {{ card('Power', 'OK', 'text-emerald-300', 'no under-voltage / throttling') }}
+    {% endif %}
+    {{ card('Uptime', dur(nh.uptime_s), 'text-zinc-100', 'since boot') }}
+    {% set wc = 'text-emerald-300' if n.workers_running == n.workers_total and n.workers_total > 0
+                else ('text-rose-300' if n.workers_running == 0 else 'text-amber-300') %}
+    {{ card('Workers', n.workers_running ~ '/' ~ n.workers_total, wc, 'cams running on ' ~ n.node) }}
+    {% set a = n.last_detection_age_s %}
+    {% set dc = 'text-zinc-600' if a is none else ('text-emerald-300' if a < 900 else ('text-amber-300' if a < 3600 else 'text-rose-300')) %}
+    {{ card('Last detection', dur(a) ~ (' ago' if a is not none else ''), dc, n.det_24h ~ ' in last 24h') }}
+    {% set behind = n.rows_behind + n.clips_behind %}
+    {% set sc = 'text-emerald-300' if behind < 200 else ('text-amber-300' if behind < 5000 else 'text-rose-300') %}
+    {{ card('Sync backlog', behind, sc, n.rows_behind ~ ' rows · ' ~ n.clips_behind ~ ' clips not yet on central') }}
+  </div>
+  <div class="text-[10px] text-zinc-600 mt-1 text-right">{{ n.node }} reported {{ dur(n.age_s) }} ago</div>
+{% endfor %}
 <div class="text-[10px] text-zinc-600 mt-2 text-right">updated {{ h.now.strftime('%H:%M:%S') }} UTC · refreshes every 30s</div>

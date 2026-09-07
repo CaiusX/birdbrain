@@ -133,6 +133,16 @@ own `cookies_file`) and the `[[link]]` to `node.toml`, then restart the
 pipeline and node-sync. All eighteen of central's Africam cams moved this
 way on 2026-09-07; central now runs only its RTSP relay and local mics.
 
+## Health pane on central
+
+A node reports its own host and pipeline state to `POST /ingest/node-health`
+every `health_seconds` (default 60, signed with its first link's token), and
+central's admin page draws it under its own cards: CPU load, memory, SoC
+temperature, disk, power, uptime, workers, last detection, and the two
+numbers only a node knows — how many rows and clips are still waiting to be
+pushed. A report older than three minutes is flagged stale; the node is down
+or cannot reach central. Only the latest report per node is kept.
+
 ## Clips
 
 Rows go first, over `POST /ingest/detections`; the audio behind them follows

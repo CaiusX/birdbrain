@@ -128,6 +128,7 @@ from birdbrain.config import AppConfig, SourceConfig, load_sources
 from birdbrain.enroll import EnrollBody, enroll
 from birdbrain.host import host_metrics
 from birdbrain.ingest import (
+    NODE_HEALTH_KEY,
     SCHEMA_CONFLICT_STATUS,
     SUPPORTED_SCHEMAS,
     IngestBody,
@@ -135,9 +136,10 @@ from birdbrain.ingest import (
     hash_token,
     ingest_batch,
     ingest_clips,
+    store_node_health,
 )
 from birdbrain.site_resolver import state_to_resolved
-from birdbrain.wire import WireClipManifest
+from birdbrain.wire import WireClipManifest, WireNodeHealth
 from birdbrain.sites import Site, load_sites
 from birdbrain.storage.db import ALL_SITES_SENTINEL, REPORTING_MIN_CONFIDENCE_DEFAULT
 from birdbrain.storage import (
@@ -4047,6 +4049,28 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         out.sort(key=lambda d: -d["silent_s"])
         return out
 
+    # A node reports every minute (node_sync.health_seconds); past this it is
+    # either down or cut off from central, and the pane says so.
+    NODE_HEALTH_STALE_S = 180.0
+
+    def _node_health_views(now: datetime) -> list[dict]:
+        """Latest report of every ingest node, oldest name first, with the
+        report's age and a stale flag derived from central's receive stamp."""
+        out: list[dict] = []
+        for key, raw in db.settings_with_prefix(NODE_HEALTH_KEY).items():
+            try:
+                doc = json.loads(raw)
+                received = datetime.fromisoformat(doc["received_at"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            age = max(0.0, (now - received).total_seconds())
+            doc["age_s"] = age
+            doc["stale"] = age > NODE_HEALTH_STALE_S
+            doc.setdefault("host", {})
+            doc.setdefault("worker_problems", [])
+            out.append(doc)
+        return sorted(out, key=lambda d: d.get("node", key))
+
     def _health_view() -> dict:
         """Raspberry Pi host health for the admin page: CPU load, memory, SoC
         temperature, throttling/under-voltage, uptime and storage headroom —
@@ -4145,6 +4169,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return {
             "health": {
                 "now": now,
+                "nodes": _node_health_views(now),
                 "host": host_metrics(),
                 "disk": disk,
                 "db_bytes": db_bytes,
@@ -7359,6 +7384,24 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             raise HTTPException(SCHEMA_CONFLICT_STATUS, str(e)) from e
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
+
+    @app.post("/ingest/node-health")
+    def ingest_node_health(request: Request, body: WireNodeHealth) -> dict:
+        """An ingest node's own host + pipeline health, for the node pane on
+        /admin. Token-gated like every ingest route; the same per-unit
+        detection bucket applies since a node reports once a minute."""
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            raise HTTPException(401, "missing bearer token")
+        device = db.device_by_token(hash_token(auth[len("Bearer "):].strip()))
+        if device is None or not device.sync_enabled:
+            raise HTTPException(403, "invalid token or sync disabled")
+        if not _ingest_rate_ok(device.unit_id):
+            raise HTTPException(429, "rate limit exceeded")
+        try:
+            return store_node_health(db, device, body)
+        except UnsupportedSchemaError as e:
+            raise HTTPException(SCHEMA_CONFLICT_STATUS, str(e)) from e
 
     _enroll_hits: dict[str, list[float]] = {}
     _ENROLL_RATE_PER_MIN = 10

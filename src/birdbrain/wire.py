@@ -107,6 +107,60 @@ class WireClipManifest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class WireHostMetrics(BaseModel):
+    """``birdbrain.host.host_metrics()`` as a node reports it. Every field is
+    optional: a probe that fails on the node is None here, and the pane shows
+    n/a for it, the same as central's own card does."""
+
+    load1: float | None = Field(default=None, ge=0, le=10_000)
+    load5: float | None = Field(default=None, ge=0, le=10_000)
+    load15: float | None = Field(default=None, ge=0, le=10_000)
+    cpus: int | None = Field(default=None, ge=1, le=4096)
+    mem_total: int | None = Field(default=None, ge=0)
+    mem_available: int | None = Field(default=None, ge=0)
+    temp_c: float | None = Field(default=None, ge=-50, le=200)
+    throttled: dict[str, bool] | None = None
+    uptime_s: float | None = Field(default=None, ge=0)
+
+
+class WireDiskUsage(BaseModel):
+    total: int = Field(ge=0)
+    used: int = Field(ge=0)
+    free: int = Field(ge=0)
+
+
+class WireWorkerProblem(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    status: str = Field(min_length=1, max_length=32)
+    error: str | None = Field(default=None, max_length=300)
+
+
+class WireNodeHealth(BaseModel):
+    """One POST to ``/ingest/node-health``: an ingest node's own host and
+    pipeline state, so central's admin page can show a node the way it shows
+    itself. Sent every ``health_seconds`` by ``node_sync``; central keeps only
+    the latest report per node and flags it stale after a few minutes."""
+
+    model_config = {"populate_by_name": True}
+
+    node: str = Field(min_length=1, max_length=64)
+    schema_version: int = Field(default=SCHEMA_VERSION, alias="schema")
+    reported_at: datetime
+    version: str | None = Field(default=None, max_length=64)
+    host: WireHostMetrics = Field(default_factory=WireHostMetrics)
+    disk: WireDiskUsage | None = None
+    db_bytes: int | None = Field(default=None, ge=0)
+    workers_running: int = Field(default=0, ge=0, le=10_000)
+    workers_total: int = Field(default=0, ge=0, le=10_000)
+    worker_problems: list[WireWorkerProblem] = Field(default_factory=list, max_length=500)
+    #: rows the node has not yet pushed to central, summed over its links
+    rows_behind: int = Field(default=0, ge=0)
+    #: rows whose clip has not yet followed, summed over its links
+    clips_behind: int = Field(default=0, ge=0)
+    last_detection_age_s: float | None = Field(default=None, ge=0)
+    det_24h: int = Field(default=0, ge=0)
+
+
 class WireAudioQuality(BaseModel):
     """A unit's own audio-quality snapshot, riding along with the batch.
 

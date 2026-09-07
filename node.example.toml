@@ -57,6 +57,9 @@ clip_batch_size = 25
 clip_batches_per_tick = 4
 clip_retention_days = 3
 
+# Report this node's host + pipeline health to central's admin page. 0 disables.
+health_seconds = 60
+
 
 [[link]]
 # `source` must match a [[source]] name in this node's sources.toml.

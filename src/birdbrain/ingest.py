@@ -12,9 +12,10 @@ This module holds the pure validation + upsert logic; the FastAPI route in
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import Mapping
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,6 +29,7 @@ from birdbrain.wire import (
     WireBatch,
     WireClipManifest,
     WireDetection,
+    WireNodeHealth,
     check_schema,
 )
 
@@ -41,6 +43,7 @@ IngestAudioQuality = WireAudioQuality
 # Re-exported so the FastAPI route can answer a schema conflict without adding
 # another import to web/app.py, whose import block already sits after code.
 __all__ = [
+    "NODE_HEALTH_KEY",
     "SCHEMA_CONFLICT_STATUS",
     "SUPPORTED_SCHEMAS",
     "IngestAudioQuality",
@@ -50,7 +53,11 @@ __all__ = [
     "hash_token",
     "ingest_batch",
     "ingest_clips",
+    "store_node_health",
 ]
+
+# app_settings key prefix under which the latest report of each node is kept.
+NODE_HEALTH_KEY = "node_health:"
 
 # Largest single clip central will store. A 6 s OGG Vorbis clip is ~50 KB; a
 # 6 s 48 kHz mono WAV is ~580 KB. Anything past this is not a clip.
@@ -262,3 +269,21 @@ def _write_atomic(dest: Path, data: bytes) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, dest)
+
+
+def store_node_health(db: Database, device: DeviceRow, report: WireNodeHealth) -> dict:
+    """Keep a node's latest health report. One JSON document per node under
+    ``node_health:<node>`` — a report replaces the previous one, so the table
+    never grows, and central stamps ``received_at`` itself rather than trusting
+    the node's clock for staleness.
+
+    Any enrolled device may report. A node authenticates its links, not
+    itself, so the first link's token is what signs the report; ``reported_by``
+    records which one, and the node name is display-only.
+    """
+    check_schema(report.schema_version)
+    doc = report.model_dump(mode="json", by_alias=True)
+    doc["received_at"] = datetime.now(UTC).isoformat()
+    doc["reported_by"] = device.unit_id
+    db.set_setting(NODE_HEALTH_KEY + report.node, json.dumps(doc))
+    return {"ok": True, "node": report.node}
