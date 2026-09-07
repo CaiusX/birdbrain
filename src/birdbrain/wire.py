@@ -152,6 +152,8 @@ class WireNodeHealth(BaseModel):
     db_bytes: int | None = Field(default=None, ge=0)
     workers_running: int = Field(default=0, ge=0, le=10_000)
     workers_total: int = Field(default=0, ge=0, le=10_000)
+    #: linked cams the operator has disabled — off the roster, not a fault
+    workers_disabled: int = Field(default=0, ge=0, le=10_000)
     worker_problems: list[WireWorkerProblem] = Field(default_factory=list, max_length=500)
     #: rows the node has not yet pushed to central, summed over its links
     rows_behind: int = Field(default=0, ge=0)

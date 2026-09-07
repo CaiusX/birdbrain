@@ -1,0 +1,11 @@
+[Unit]
+Description=Check muted cams for returning audio, weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=30min
+Unit=birdbrain-muted-cams.service
+
+[Install]
+WantedBy=timers.target

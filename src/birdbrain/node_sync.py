@@ -587,7 +587,12 @@ def node_health_payload(
     can draw both, plus the two numbers only a node knows: how far its rows
     and clips are behind central."""
     now = now or datetime.now(UTC)
-    linked = {link.source for link in cfg.links}
+    # A cam the operator disabled has no worker by design, and reporting it as a
+    # stopped one would sit on central's node pane as a problem that never
+    # clears. It is off the roster on central too (``_all_sources``), so leaving
+    # it out here keeps the two views telling the same story.
+    disabled = set(db.list_disabled_source_names())
+    linked = {link.source for link in cfg.links} - disabled
     beats = {h.source_name: h for h in db.list_worker_heartbeats() if h.source_name in linked}
     running = 0
     problems: list[dict] = []
@@ -645,6 +650,7 @@ def node_health_payload(
         "db_bytes": db_bytes,
         "workers_running": running,
         "workers_total": len(linked),
+        "workers_disabled": len({link.source for link in cfg.links} & disabled),
         "worker_problems": problems[:500],
         "rows_behind": rows_behind,
         "clips_behind": clips_behind,

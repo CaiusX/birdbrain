@@ -1,0 +1,9 @@
+[Unit]
+Description=BirdBrain muted-cam check (re-enable a cam whose audio came back)
+After=birdbrain-pipeline.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/birdbrain
+ExecStart=%h/.local/bin/uv run python scripts/check-muted-cams.py
+Nice=10

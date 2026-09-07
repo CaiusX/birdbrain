@@ -227,7 +227,9 @@
     {{ card('Uptime', dur(nh.uptime_s), 'text-zinc-100', 'since boot') }}
     {% set wc = 'text-emerald-300' if n.workers_running == n.workers_total and n.workers_total > 0
                 else ('text-rose-300' if n.workers_running == 0 else 'text-amber-300') %}
-    {{ card('Workers', n.workers_running ~ '/' ~ n.workers_total, wc, 'cams running on ' ~ n.node) }}
+    {{ card('Workers', n.workers_running ~ '/' ~ n.workers_total, wc,
+            'cams running on ' ~ n.node
+            ~ (' · ' ~ n.workers_disabled ~ ' disabled' if n.workers_disabled else '')) }}
     {% set a = n.last_detection_age_s %}
     {% set dc = 'text-zinc-600' if a is none else ('text-emerald-300' if a < 900 else ('text-amber-300' if a < 3600 else 'text-rose-300')) %}
     {{ card('Last detection', dur(a) ~ (' ago' if a is not none else ''), dc, n.det_24h ~ ' in last 24h') }}
