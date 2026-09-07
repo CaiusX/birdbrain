@@ -319,19 +319,27 @@ _SINGLETON_LOCKS: list = []
 # drawn — map dot, site list, treemap, inline site name.
 #
 # Colour alone could not carry this. The map is an all-pairs surface (any two
-# dots can land side by side), and "green vegetation + warm-brown arid" is the
-# red-green confusion axis: an exhaustive search over 1.37M candidate palettes
-# found none that clears the colour-blind separation floor while keeping hues
-# that actually evoke their landscape. Lightness separation is the usual escape
-# and it is blocked here — a sand tone pale enough to separate from green falls
-# out of the readable band on the light OSM basemap. So the family carries a
-# SHAPE too, and that is what makes it legible without colour.
+# dots can land side by side), and "green vegetation + warm arid" is the
+# red-green confusion axis: an exhaustive search found no palette that clears
+# the colour-blind separation floor while keeping hues that actually evoke
+# their landscape. So the family carries a SHAPE too, and that is what stays
+# legible without colour.
 #
-# What the palette does clear (light surface #f2efe9, all pairs): lightness
-# band, chroma floor, and the normal-vision floor at ΔE 15.3 — the hard gate,
-# which the previous hand-picked palette failed at ΔE 5.3 with two site colours
-# indistinguishable to *everyone*. Colour-blind separation is ΔE 5.2 against a
-# 6.0 floor, up from 0.4, and the shape channel covers the remainder.
+# The family count is set by the same arithmetic. On the dark basemap the
+# readable lightness band is narrow (OKLCH L 0.48-0.67), too narrow to hold
+# two distinct warm hues: every amber-desert/gold-grassland pair tested came
+# in under the normal-vision floor, so those two fold into one dry-country
+# family rather than ship a pair readers cannot separate.
+#
+# What this palette clears on the dark basemap (#19191a — Esri's dark canvas
+# is really a mid grey, so the tile pane is darkened in CSS; all pairs): lightness
+# band, chroma floor, contrast, and the normal-vision floor at deltaE 19.8 --
+# the hard gate, which the previous hand-picked palette failed at 5.3 with two
+# site colours indistinguishable to *everyone*. Colour-blind separation is 5.8
+# against a 6.0 floor, up from 0.4, and the shape channel covers the rest.
+# The dark basemap is doing real work here: on the old light tiles the same
+# hues scored 15.3 and 5.2 with a contrast warning, and on the tiles at their
+# native mid grey two of the five dropped under 3:1.
 #
 # Adding a site: put it in SITE_BIOME under the right family. It gets a colour
 # and a shape automatically — no new hex to pick, and nothing else shifts.
@@ -347,12 +355,11 @@ class Biome:
 
 
 BIOMES: dict[str, Biome] = {
-    "water":    Biome("Water & riverine",      "#0284c7", "circle"),
-    "dry":      Biome("Desert, dune & pan",    "#d97706", "diamond"),
-    "grass":    Biome("Savanna grassland",     "#854d0e", "square"),
-    "woodland": Biome("Woodland, bush & forest", "#4d7c0f", "triangle"),
-    "highland": Biome("Highland & volcanic",   "#7c3aed", "pentagon"),
-    "urban":    Biome("Garden & urban",        "#db2777", "star"),
+    "water":    Biome("Water & riverine",          "#0284c7", "circle"),
+    "dry":      Biome("Desert, pan & grassland",   "#d97706", "diamond"),
+    "woodland": Biome("Woodland, bush & forest",   "#4d7c0f", "triangle"),
+    "highland": Biome("Highland & volcanic",       "#7c3aed", "pentagon"),
+    "urban":    Biome("Garden & urban",            "#db2777", "star"),
 }
 
 #: Which family each site belongs to. Sites absent from this map fall back to
@@ -378,14 +385,14 @@ SITE_BIOME: dict[str, str] = {
     "Safarihoek":                 "dry",     # Etosha Heights, arid
     "Onguma Waterhole":           "dry",     # Etosha eastern boundary
     "Elephant Pan":               "dry",     # Khwai, Botswana
-    # --- grass: open savanna grassland ------------------------------------
-    "Tortilis Camp":              "grass",   # Amboseli golden grass
-    "Angama Mara":                "grass",   # Mara escarpment
-    "Mahali Mzuri":               "grass",   # Olare Motorogi, Mara
-    "Serengeti Explorer":         "grass",   # Serengeti plains
-    "Wilderness Linkwasha":       "grass",   # Ngamo plains, Hwange
-    "Lentorre":                   "grass",   # South Rift, Kenya
-    "Meno a Kwena":               "grass",   # Boteti, Kalahari grass
+    # --- dry, continued: open savanna grassland ----------------------------
+    "Tortilis Camp":              "dry",     # Amboseli golden grass
+    "Angama Mara":                "dry",     # Mara escarpment
+    "Mahali Mzuri":               "dry",     # Olare Motorogi, Mara
+    "Serengeti Explorer":         "dry",     # Serengeti plains
+    "Wilderness Linkwasha":       "dry",     # Ngamo plains, Hwange
+    "Lentorre":                   "dry",     # South Rift, Kenya
+    "Meno a Kwena":               "dry",     # Boteti, Kalahari grass
     # --- woodland: bushveld, mopane, miombo, forest ------------------------
     "Olifants (Naledi)":          "woodland",  # Greater Kruger bushveld
     "Nkorho Bush Lodge":          "woodland",  # Sabi Sand

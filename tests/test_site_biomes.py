@@ -88,7 +88,7 @@ def test_water_sites_are_blue_and_arid_sites_are_warm():
         assert r > b, f"{dry} should read warm"
     for green in ("Tembe", "Olifants (Naledi)", "Camelthorn"):
         r, g, b = rgb(SOURCE_COLORS[green])
-        assert g > b, f"{green} should read green"
+        assert g > b and g > r, f"{green} should read green"
 
 
 def test_biome_labels_track_the_families():
@@ -105,6 +105,16 @@ def test_site_color_lightens_dark_hues_for_the_dark_ui():
 
     for name in SITE_BIOME:
         assert lum(_site_color(name)) >= lum(SOURCE_COLORS[name]) - 1
+
+
+def test_grassland_folds_into_the_dry_family():
+    """Two warm hues cannot both clear the normal-vision floor inside the dark
+    basemap's lightness band, so open grassland shares the dry-country family
+    rather than shipping a pair readers cannot separate."""
+    for grassy in ("Serengeti Explorer", "Angama Mara", "Wilderness Linkwasha",
+                   "Tortilis Camp", "Lentorre"):
+        assert SITE_BIOME[grassy] == "dry", grassy
+    assert "grassland" in BIOMES["dry"].label.lower()
 
 
 def test_the_new_cams_landed_in_sensible_families():
