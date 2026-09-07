@@ -31,6 +31,7 @@ import argparse
 import json
 import re
 import subprocess
+import time
 
 from birdbrain.audio.youtube import YouTubeSource
 from birdbrain.config import AppConfig, load_sources
@@ -50,6 +51,13 @@ MUTED_KEY = "muted_cams"
 AUDIO_FLOOR_DBFS = -85.0
 
 SAMPLE_SECONDS = 20
+
+#: Resolves fail intermittently on healthy cams ("No video formats found!"),
+#: often enough that a single attempt would leave most weekly runs with no
+#: measurement at all. A few spaced tries turn that into a rare miss without
+#: becoming the request burst that trips YouTube's bot gate.
+RESOLVE_ATTEMPTS = 3
+RESOLVE_GAP_S = 45.0
 
 
 def muted_list(db: Database) -> list[str]:
@@ -79,6 +87,22 @@ def source_url(cfg: AppConfig, db: Database, name: str) -> tuple[str, str | None
         return s.url, (str(s.cookies_file) if s.cookies_file else None)
     row = next((r for r in db.list_runtime_sources() if r.name == name), None)
     return (row.url, row.cookies_file) if row is not None else None
+
+
+def resolve(name: str, url: str, cookies: str | None,
+            attempts: int = RESOLVE_ATTEMPTS, gap_s: float = RESOLVE_GAP_S) -> str | None:
+    """The cam's current stream URL, retrying a transient failure. None when
+    every attempt failed — which says nothing about the audio, so the caller
+    must leave the cam exactly as it found it."""
+    for i in range(attempts):
+        try:
+            return YouTubeSource(name=name, url=url, cookies_file=cookies).current_url()
+        except Exception as e:
+            last = str(e)[:120]
+            if i + 1 < attempts:
+                time.sleep(gap_s)
+    log.info("muted_cams.resolve_failed", source=name, attempts=attempts, error=last)
+    return None
 
 
 def mean_dbfs(url: str, seconds: int = SAMPLE_SECONDS) -> float | None:
@@ -112,12 +136,11 @@ def check(db: Database, cfg: AppConfig, *, dry_run: bool) -> int:
             restored.append(name)  # drop it; there is nothing left to re-enable
             continue
         url, cookies = found
-        try:
-            stream = YouTubeSource(name=name, url=url, cookies_file=cookies).current_url()
-        except Exception as e:
-            # A transient resolve failure says nothing about the audio. Leave
-            # the cam muted and try again next run rather than guessing.
-            print(f"{name}: could not resolve ({str(e)[:80]}) — leaving muted")
+        stream = resolve(name, url, cookies)
+        if stream is None:
+            # A resolve failure says nothing about the audio. Leave the cam
+            # muted and try again next run rather than guessing.
+            print(f"{name}: could not resolve after {RESOLVE_ATTEMPTS} tries — leaving muted")
             continue
         level = mean_dbfs(stream)
         if level is None:

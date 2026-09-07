@@ -91,11 +91,37 @@ def test_a_transient_resolve_failure_never_re_enables(tmp_path, monkeypatch):
         raise RuntimeError("yt-dlp failed: No video formats found!")
 
     monkeypatch.setattr(cmc.YouTubeSource, "current_url", boom)
+    monkeypatch.setattr(cmc.time, "sleep", lambda s: None)
     monkeypatch.setattr(cmc, "mean_dbfs", lambda *a, **k: pytest.fail("must not sample"))
 
     cmc.check(db, cfg, dry_run=False)
     assert CAM in db.list_disabled_source_names()
     assert cmc.muted_list(db) == [CAM]
+
+
+def test_resolve_retries_a_transient_failure(monkeypatch):
+    """One bad resolve must not cost a whole week's measurement."""
+    calls = []
+
+    def flaky(self):
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("No video formats found!")
+        return "http://stream"
+
+    monkeypatch.setattr(cmc.YouTubeSource, "current_url", flaky)
+    monkeypatch.setattr(cmc.time, "sleep", lambda s: None)
+    assert cmc.resolve(CAM, "http://x", None) == "http://stream"
+    assert len(calls) == 3
+
+
+def test_resolve_gives_up_after_its_attempts(monkeypatch):
+    def always(self):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(cmc.YouTubeSource, "current_url", always)
+    monkeypatch.setattr(cmc.time, "sleep", lambda s: None)
+    assert cmc.resolve(CAM, "http://x", None, attempts=2) is None
 
 
 def test_an_unmeasurable_stream_stays_disabled(tmp_path, monkeypatch):
