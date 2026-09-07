@@ -12,8 +12,9 @@ database and the notes worker. Africam alone streams ~50 live cams. Past the
 ceiling the answer is another machine, not a lower threshold.
 
 A node moves *inference* off central and leaves everything else where it is.
-Audio never reaches central — a detection row is ~200 bytes, an audio stream is
-not — so the link carries kilobytes a day per cam.
+The raw audio stream never reaches central; what crosses the link is a
+detection row (~200 bytes) and, trailing it, the 6 s clip behind it (~50 KB),
+so central stays the one place every clip lives. See *Clips* below.
 
 ## How it differs from a TBB unit
 
@@ -108,6 +109,32 @@ formats go missing.
 
 A node runs **no web service**. `birdbrain web` is central's; a node has no
 dashboard to serve and no reason to open a port.
+
+## Clips
+
+Rows go first, over `POST /ingest/detections`; the audio behind them follows
+over `POST /ingest/clips` on its own high-water mark, so a clip can never
+arrive before its row. Central files a pushed clip exactly as it files one of
+its own (`<clips>/<unit>/<day>/<started_at>.ogg`) and attaches it to every row
+from that window, so the clip route, spectrograms and the retention sweep do
+not know or care which Pi heard it.
+
+- **Bandwidth.** ~25 clips per request, ~1.2 MB. Twenty cams at 18k
+  detections a day is about 850 MB/day, ~80 kbit/s averaged.
+- **Backlog drains bounded.** At most `clip_batches_per_tick` batches per link
+  per tick, so one cam with a week of backlog cannot hog a tick.
+- **A clip central filtered has nowhere to go.** Ingest drops rows under a
+  species floor or suppression; central reports their ids back as `unknown`
+  and the node moves on rather than retrying.
+- **The node keeps a clip only as a retry cushion.** Once central has acked it
+  and it is `clip_retention_days` old (default 3) the local copy goes. A clip
+  central has *not* acked is kept whatever its age — it is the only copy.
+- Switch it off per node with `upload_clips = false` in `node.toml`.
+
+Central's own retention (`birdbrain prune`, nightly via
+`deploy/central/birdbrain-prune.timer`) then decides how long a clip lives:
+30 days, shorter for species with an override, with audited clips and a
+low/mid/high reference set per species and source kept indefinitely.
 
 Smoke-test the link before enabling the timer:
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=BirdBrain clip retention sweep (30-day window, per-species overrides, reference set kept)
+After=birdbrain-web.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/birdbrain
+ExecStart=%h/.local/bin/uv run birdbrain prune --days 30 --yes
+Nice=10
+IOSchedulingClass=idle

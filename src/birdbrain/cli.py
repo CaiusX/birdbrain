@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
@@ -20,11 +21,12 @@ for _stream in (sys.stdout, sys.stderr):
             pass
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 
 from birdbrain.config import AppConfig, load_sources
 from birdbrain.cookies import refresh as refresh_cookies_impl
 from birdbrain.logging import configure as configure_logging
+from birdbrain.retention import RetentionPolicy, prune_clips
 from birdbrain.storage import Database, DetectionRow, RuntimeSourceRow
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -683,103 +685,161 @@ def seed_runtime(
 
 @app.command()
 def prune(
-    days: Annotated[int, typer.Option("--days", "-d", help="Delete clip files older than this many days.")] = 14,
-    keep_labelled: Annotated[bool, typer.Option("--keep-labelled/--no-keep-labelled")] = True,
-    keep_pngs: Annotated[bool, typer.Option("--keep-pngs/--delete-pngs", help="Keep cached spectrogram PNGs (they regenerate on demand).")] = True,
+    days: Annotated[int, typer.Option(
+        "--days", "-d",
+        help="Global clip window in days. Per-species overrides (see clip-retention) shorten it.",
+    )] = 30,
+    keep_audited: Annotated[bool, typer.Option(
+        "--keep-audited/--no-keep-audited",
+        help="Keep every clip a person labelled, rated or corrected.",
+    )] = True,
+    keep_reference: Annotated[bool, typer.Option(
+        "--keep-reference/--no-keep-reference",
+        help="Keep the newest low/mid/high-confidence clip of every species at every source.",
+    )] = True,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Count and report; delete nothing.")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the y/N confirmation prompt.")] = False,
 ) -> None:
-    """Delete old detection clips to free disk. DB rows are kept; clip_path is
-    NULLed for any row whose audio file gets removed."""
+    """Delete expired detection clips to free disk. DB rows are kept; clip_path
+    is NULLed for any row whose audio file gets removed. See
+    birdbrain.retention for the rules — age window, per-species overrides,
+    audited clips kept, and a low/mid/high reference set per species and
+    source that never expires."""
     cfg = AppConfig()
     db = Database(cfg.db_url)
-
-    cutoff = datetime.now(UTC) - timedelta(days=days)
-    stmt = (
-        select(DetectionRow.id, DetectionRow.clip_path, DetectionRow.label, DetectionRow.source_name, DetectionRow.confidence)
-        .where(DetectionRow.started_at < cutoff)
-        .where(DetectionRow.clip_path.is_not(None))
+    policy = RetentionPolicy(
+        days=days,
+        species_days=db.species_clip_retention_map(),
+        keep_audited=keep_audited,
+        keep_reference_set=keep_reference,
     )
-    if keep_labelled:
-        stmt = stmt.where(DetectionRow.label.is_(None))
 
-    with db.session() as s:
-        candidates = list(s.execute(stmt))
+    def _report(stats, title: str) -> None:
+        t = Table(title=title)
+        t.add_column("metric")
+        t.add_column("value", justify="right")
+        t.add_row("days scanned", f"{stats.days_scanned:,}")
+        t.add_row("expired rows", f"{stats.rows_seen:,}")
+        t.add_row("rows kept (file shared with a protected row)", f"{stats.rows_kept_shared_file:,}")
+        t.add_row("clip files", f"{stats.files_deleted:,}")
+        t.add_row("cached mp3/png siblings", f"{stats.siblings_deleted:,}")
+        t.add_row("missing on disk", f"{stats.files_missing:,}")
+        t.add_row("rows NULLed", f"{stats.rows_nulled:,}")
+        t.add_row("freed", f"{stats.mb_freed:,.1f} MB")
+        t.add_row("protected files (audited + reference set)", f"{stats.protected_files:,}")
+        t.add_row("species overrides", f"{len(policy.species_days):,}")
+        console.print(t)
+        if stats.by_source:
+            per_src = Table(title="By source")
+            per_src.add_column("source")
+            per_src.add_column("rows", justify="right")
+            for src in sorted(stats.by_source):
+                per_src.add_row(src, f"{stats.by_source[src]:,}")
+            console.print(per_src)
 
-    # Group by clip_path so we delete each file once and NULL out every row
-    # that references it.
-    by_clip: dict[str, list[int]] = {}
-    by_source: dict[str, int] = {}
-    for row in candidates:
-        by_clip.setdefault(row.clip_path, []).append(row.id)
-        by_source[row.source_name] = by_source.get(row.source_name, 0) + 1
-
-    total_bytes = 0
-    missing = 0
-    for clip in by_clip:
-        p = Path(clip)
-        if p.is_file():
-            total_bytes += p.stat().st_size
-            if not keep_pngs:
-                for png in (p.with_suffix(".png"), p.parent / f"{p.stem}.large.png"):
-                    if png.is_file():
-                        total_bytes += png.stat().st_size
-        else:
-            missing += 1
-
-    summary = Table(title=f"Prune candidates (older than {days}d)")
-    summary.add_column("metric")
-    summary.add_column("value", justify="right")
-    summary.add_row("rows affected", f"{len(candidates):,}")
-    summary.add_row("distinct clips", f"{len(by_clip):,}")
-    summary.add_row("missing on disk", f"{missing:,}")
-    summary.add_row("would free", f"{total_bytes/1024/1024:.1f} MB")
-    summary.add_row("keep labelled", "yes" if keep_labelled else "no")
-    summary.add_row("keep PNG cache", "yes" if keep_pngs else "no")
-    console.print(summary)
-    if by_source:
-        per_src = Table(title="By source")
-        per_src.add_column("source")
-        per_src.add_column("rows", justify="right")
-        for src in sorted(by_source):
-            per_src.add_row(src, f"{by_source[src]:,}")
-        console.print(per_src)
-
-    if not by_clip:
-        console.print("[green]nothing to prune.[/green]")
-        return
-
-    if not yes:
+    if dry_run or not yes:
+        plan = prune_clips(db, policy, dry_run=True)
+        _report(plan, f"Prune plan (older than {days}d)")
+        if dry_run:
+            return
+        if not plan.files_deleted and not plan.rows_nulled:
+            console.print("[green]nothing to prune.[/green]")
+            return
         ans = typer.prompt("delete? [y/N]", default="N", show_default=False)
         if ans.strip().lower() not in {"y", "yes"}:
             console.print("[yellow]aborted.[/yellow]")
             raise typer.Exit(code=1)
 
-    deleted_files = 0
-    deleted_bytes = 0
-    nulled_rows = 0
-    with db.session() as s, s.begin():
-        for clip, ids in by_clip.items():
-            p = Path(clip)
-            if p.is_file():
-                deleted_bytes += p.stat().st_size
-                p.unlink()
-                deleted_files += 1
-            if not keep_pngs:
-                for png in (p.with_suffix(".png"), p.parent / f"{p.stem}.large.png"):
-                    if png.is_file():
-                        deleted_bytes += png.stat().st_size
-                        png.unlink()
-            for det_id in ids:
-                row = s.get(DetectionRow, det_id)
-                if row is not None:
-                    row.clip_path = None
-                    nulled_rows += 1
+    def _progress(day, stats) -> None:
+        if stats.by_source:
+            console.print(
+                f"  {day}  files={stats.files_deleted:,}  rows={stats.rows_nulled:,}  "
+                f"freed={stats.mb_freed:,.0f} MB",
+                highlight=False,
+            )
 
+    stats = prune_clips(db, policy, on_day=_progress)
     console.print(
-        f"[green]deleted {deleted_files:,} clip files[/green] "
-        f"({deleted_bytes/1024/1024:.1f} MB), "
-        f"NULLed clip_path on {nulled_rows:,} rows."
+        f"[green]deleted {stats.files_deleted:,} clip files[/green] "
+        f"(+{stats.siblings_deleted:,} cached siblings, {stats.mb_freed:,.1f} MB), "
+        f"NULLed clip_path on {stats.rows_nulled:,} rows."
     )
+
+
+@app.command("clip-retention")
+def clip_retention(
+    species: Annotated[str | None, typer.Argument(
+        help="Scientific or common name, e.g. 'Alopochen aegyptiaca' or 'Egyptian Goose'. "
+             "Omit to list current overrides.",
+    )] = None,
+    days: Annotated[int | None, typer.Option(
+        "--days", help="Keep this species' clips this many days instead of the global window.",
+    )] = None,
+    clear: Annotated[bool, typer.Option("--clear", help="Remove the override.")] = False,
+) -> None:
+    """Per-species clip retention overrides, applied by `birdbrain prune`.
+    Give loud, unmistakable species (Egyptian Goose, Hadada Ibis, Grey
+    Go-away-bird) a short window; the reference set and audited clips are kept
+    regardless."""
+    cfg = AppConfig()
+    db = Database(cfg.db_url)
+    if species is None:
+        overrides = db.species_clip_retention_map()
+        if not overrides:
+            console.print("no per-species overrides; the global window applies to everything.")
+            return
+        names = _common_names(db, overrides)
+        t = Table(title="Clip retention overrides")
+        t.add_column("species")
+        t.add_column("scientific")
+        t.add_column("days", justify="right")
+        for sci in sorted(overrides, key=lambda k: names.get(k, k)):
+            t.add_row(names.get(sci, ""), sci, str(overrides[sci]))
+        console.print(t)
+        return
+    sci = _resolve_species(db, species)
+    if sci is None:
+        console.print(f"[red]no detections match {species!r}[/red] (try the scientific name)")
+        raise typer.Exit(code=1)
+    if clear:
+        db.set_species_clip_retention_days(sci, None)
+        console.print(f"cleared override for {sci}; the global window applies.")
+        return
+    if days is None:
+        console.print("[red]--days N or --clear is required[/red]")
+        raise typer.Exit(code=2)
+    db.set_species_clip_retention_days(sci, days)
+    console.print(f"{sci}: clips kept {days} day(s).")
+
+
+def _resolve_species(db: Database, name: str) -> str | None:
+    """Scientific name for ``name``, accepting a common name (case-insensitive)."""
+    with db.session() as s:
+        hit = s.scalar(
+            select(DetectionRow.scientific_name)
+            .where(DetectionRow.scientific_name == name)
+            .limit(1)
+        )
+        if hit:
+            return hit
+        return s.scalar(
+            select(DetectionRow.scientific_name)
+            .where(func.lower(DetectionRow.common_name) == name.strip().lower())
+            .limit(1)
+        )
+
+
+def _common_names(db: Database, scientific: Iterable[str]) -> dict[str, str]:
+    scis = list(scientific)
+    if not scis:
+        return {}
+    with db.session() as s:
+        rows = s.execute(
+            select(DetectionRow.scientific_name, DetectionRow.common_name)
+            .where(DetectionRow.scientific_name.in_(scis))
+            .distinct()
+        )
+        return {sci: common for sci, common in rows}
 
 
 @app.command()

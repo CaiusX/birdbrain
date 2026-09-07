@@ -49,6 +49,14 @@ worker_stale_seconds = 90.0
 # identical to central's.
 state_file = "data/node_sync_state.json"
 
+# Clip push: the audio behind each acked row follows it to central. Local
+# copies are kept clip_retention_days after central acks them, as a retry
+# cushion; central's own retention decides how long a clip lives.
+upload_clips = true
+clip_batch_size = 25
+clip_batches_per_tick = 4
+clip_retention_days = 3
+
 
 [[link]]
 # `source` must match a [[source]] name in this node's sources.toml.

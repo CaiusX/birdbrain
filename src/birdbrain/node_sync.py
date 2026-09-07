@@ -50,10 +50,11 @@ can never take the capture workers down with it.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import tomllib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -65,7 +66,7 @@ from birdbrain.statefile import StateRead, read_json_state, write_json_atomic
 from birdbrain.storage import Database, DetectionRow
 from birdbrain.sync_status import jittered
 from birdbrain.tbb_sync import post_batch
-from birdbrain.wire import SCHEMA_VERSION
+from birdbrain.wire import SCHEMA_CONFLICT_STATUS, SCHEMA_VERSION
 
 log = get_logger(__name__)
 
@@ -127,6 +128,19 @@ class NodeSyncConfig(BaseModel):
     # not. See _worker_is_live.
     worker_stale_seconds: float = Field(default=90.0, gt=0)
     state_file: Path = Path("data/node_sync_state.json")
+    # Clip push. Rows go first (``/ingest/detections``), then the audio behind
+    # them (``/ingest/clips``) trails on its own mark, so a clip can never
+    # arrive before its row. ~25 OGG clips is ~1.2 MB per request.
+    upload_clips: bool = True
+    clip_batch_size: int = Field(default=25, ge=1, le=200)
+    # Bound per link per tick so one cam with a week of backlog cannot hog the
+    # tick; the rest drains over the following ticks.
+    clip_batches_per_tick: int = Field(default=4, ge=1)
+    # A node keeps a clip only as a retry cushion. Once central has acked it
+    # and it is this old, the local copy goes. Central's own retention decides
+    # how long the clip lives.
+    clip_retention_days: int = Field(default=3, ge=0)
+    clip_prune_tick_seconds: int = Field(default=3600, ge=60)
     links: list[SourceLink] = Field(default_factory=list)
 
 
@@ -154,9 +168,17 @@ class MarkStore:
     bandwidth and produces no duplicates.
     """
 
-    def __init__(self, path: Path, marks: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        marks: dict[str, int] | None = None,
+        clip_marks: dict[str, int] | None = None,
+    ) -> None:
         self.path = path
         self.marks: dict[str, int] = marks or {}
+        # Highest row id whose clip central has acked (or that had none to
+        # send). Always <= the row mark for the same source.
+        self.clip_marks: dict[str, int] = clip_marks or {}
 
     @classmethod
     def load(cls, path: Path) -> MarkStore:
@@ -172,14 +194,11 @@ class MarkStore:
             return cls(path, {})
         if outcome is StateRead.RECOVERED:
             log.warning("node_sync.state_recovered_from_backup", path=str(path))
-        marks: dict[str, int] = {}
-        for name, value in (data.get("marks") or {}).items():
-            try:
-                marks[str(name)] = int(value)
-            except (TypeError, ValueError):
-                # One unparseable entry replays one source, not all of them.
-                log.warning("node_sync.mark_unparseable", source=name, value=value)
-        return cls(path, marks)
+        return cls(
+            path,
+            _int_map(data.get("marks"), "mark"),
+            _int_map(data.get("clip_marks"), "clip_mark"),
+        )
 
     def get(self, source: str) -> int:
         return self.marks.get(source, 0)
@@ -187,8 +206,25 @@ class MarkStore:
     def set(self, source: str, value: int) -> None:
         self.marks[source] = value
 
+    def get_clip(self, source: str) -> int:
+        return self.clip_marks.get(source, 0)
+
+    def set_clip(self, source: str, value: int) -> None:
+        self.clip_marks[source] = value
+
     def save(self) -> None:
-        write_json_atomic(self.path, {"marks": self.marks})
+        write_json_atomic(self.path, {"marks": self.marks, "clip_marks": self.clip_marks})
+
+
+def _int_map(raw: dict | None, what: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for name, value in (raw or {}).items():
+        try:
+            out[str(name)] = int(value)
+        except (TypeError, ValueError):
+            # One unparseable entry replays one source, not all of them.
+            log.warning(f"node_sync.{what}_unparseable", source=name, value=value)
+    return out
 
 
 def fetch_batch(
@@ -305,6 +341,211 @@ def sync_link_once(
     return sent
 
 
+# --- clips ------------------------------------------------------------------
+
+
+def fetch_clip_batch(
+    db: Database, source_name: str, since_id: int, upto_id: int, limit: int
+) -> list[DetectionRow]:
+    """Rows of one source with ``since_id < id <= upto_id``, oldest first.
+
+    Every row in the window, not just those with a clip: the clip mark has to
+    step over clip-less rows too, or a source whose clips are off would never
+    advance and re-scan the same window each tick.
+    """
+    if upto_id <= since_id:
+        return []
+    with db.session() as s:
+        return list(
+            s.scalars(
+                select(DetectionRow)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.id > since_id)
+                .where(DetectionRow.id <= upto_id)
+                .order_by(DetectionRow.id.asc())
+                .limit(limit)
+            )
+        )
+
+
+def clips_manifest(
+    link: SourceLink, rows: list[DetectionRow]
+) -> tuple[dict, dict[str, tuple[str, bytes]]]:
+    """Build the ``/ingest/clips`` manifest and the file parts for ``rows``.
+
+    Rows sharing a clip file (every species BirdNET heard in one 3 s window)
+    collapse to one part carrying all their client ids, so a file crosses the
+    wire once. A row whose file is gone — pruned locally, or never written —
+    contributes nothing; central keeps its ``has_clip`` row and simply never
+    gets the audio, which is the same outcome as before clip push existed.
+    Returns ``(manifest, {part_name: (filename, bytes)})``.
+    """
+    by_path: dict[str, list[DetectionRow]] = {}
+    for r in rows:
+        if r.clip_path:
+            by_path.setdefault(r.clip_path, []).append(r)
+    clips: list[dict] = []
+    parts: dict[str, tuple[str, bytes]] = {}
+    missing = 0
+    for i, (path, group) in enumerate(by_path.items()):
+        p = Path(path)
+        try:
+            data = p.read_bytes()
+        except OSError:
+            missing += 1
+            continue
+        if not data:
+            missing += 1
+            continue
+        part = f"clip{i}"
+        fmt = p.suffix.lstrip(".").lower() or "ogg"
+        clips.append({
+            "part": part,
+            "client_ids": [f"{link.unit}:{r.id}" for r in group],
+            "fmt": fmt,
+        })
+        parts[part] = (p.name, data)
+    if missing:
+        log.warning("node_sync.clips_missing_locally", source=link.source, files=missing)
+    return {"unit": link.unit, "schema": SCHEMA_VERSION, "clips": clips}, parts
+
+
+def post_clips(
+    central_url: str,
+    token: str,
+    manifest: dict,
+    parts: dict[str, tuple[str, bytes]],
+    *,
+    timeout: float = 90.0,
+    session: requests.Session | None = None,
+) -> dict | None:
+    """POST one clip batch. Returns central's summary on a 2xx, else None (the
+    caller leaves the clip mark put and retries next tick). A schema
+    rejection is logged as loudly as ``tbb_sync.post_batch`` logs it, for the
+    same reason: it will not clear on its own."""
+    url = central_url.rstrip("/") + "/ingest/clips"
+    http = session or requests
+    files = {
+        name: (fname, data, "application/octet-stream")
+        for name, (fname, data) in parts.items()
+    }
+    try:
+        resp = http.post(
+            url,
+            data={"manifest": json.dumps(manifest)},
+            files=files,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except requests.RequestException as e:
+        log.warning("node_sync.clips_post_failed", error=str(e)[:200])
+        return None
+    if resp.status_code == SCHEMA_CONFLICT_STATUS:
+        log.error(
+            "node_sync.clips_schema_rejected",
+            status=resp.status_code, body=resp.text[:200], sent_schema=SCHEMA_VERSION,
+            action="central and this node disagree about the wire format; "
+                   "update whichever is older",
+        )
+        return None
+    if resp.status_code // 100 != 2:
+        log.warning("node_sync.clips_rejected", status=resp.status_code, body=resp.text[:200])
+        return None
+    try:
+        return resp.json()
+    except ValueError:
+        return {}
+
+
+def upload_clips_once(
+    db: Database,
+    cfg: NodeSyncConfig,
+    link: SourceLink,
+    marks: MarkStore,
+    session: requests.Session | None = None,
+) -> int:
+    """Push the clips behind rows central has already acked. Returns files sent.
+
+    Walks the window between the clip mark and the row mark in capped batches,
+    at most ``clip_batches_per_tick`` per call. The clip mark advances only on
+    a 2xx — or without a request at all when a batch had no files to send —
+    and is saved per batch, like the row mark, so a node killed mid-drain
+    resumes rather than replays.
+    """
+    sent = 0
+    for _ in range(cfg.clip_batches_per_tick):
+        rows = fetch_clip_batch(
+            db, link.source, marks.get_clip(link.source), marks.get(link.source),
+            cfg.clip_batch_size,
+        )
+        if not rows:
+            break
+        manifest, parts = clips_manifest(link, rows)
+        if parts:
+            result = post_clips(cfg.central_url, link.token, manifest, parts, session=session)
+            if result is None:
+                break  # offline / rejected — don't advance; retry next tick
+            sent += len(parts)
+            if result.get("unknown"):
+                log.debug(
+                    "node_sync.clips_unknown_on_central",
+                    source=link.source, count=len(result["unknown"]),
+                )
+        marks.set_clip(link.source, rows[-1].id)
+        marks.save()
+        if len(rows) < cfg.clip_batch_size:
+            break
+    return sent
+
+
+def prune_uploaded_clips(db: Database, cfg: NodeSyncConfig, marks: MarkStore) -> int:
+    """Delete local clip files central already holds, once they are older than
+    ``clip_retention_days``. Returns files removed.
+
+    Only rows at or below the clip mark qualify — a clip central has not acked
+    is kept whatever its age, because it is the only copy. ``clip_path`` is
+    NULLed so a later resend (a replayed mark) offers nothing for it rather
+    than failing on a missing file.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=cfg.clip_retention_days)
+    removed = 0
+    for link in cfg.links:
+        upto = marks.get_clip(link.source)
+        if upto <= 0:
+            continue
+        with db.session() as s:
+            rows = list(
+                s.execute(
+                    select(DetectionRow.id, DetectionRow.clip_path)
+                    .where(DetectionRow.source_name == link.source)
+                    .where(DetectionRow.id <= upto)
+                    .where(DetectionRow.clip_path.is_not(None))
+                    .where(DetectionRow.started_at < cutoff)
+                )
+            )
+        if not rows:
+            continue
+        by_path: dict[str, list[int]] = {}
+        for det_id, path in rows:
+            by_path.setdefault(path, []).append(det_id)
+        for path, ids in by_path.items():
+            p = Path(path)
+            try:
+                p.unlink()
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.warning("node_sync.clip_unlink_failed", path=path, error=str(e)[:120])
+                continue
+            for png in p.parent.glob(f"{p.stem}*.png"):
+                png.unlink(missing_ok=True)
+            db.set_clip_path_many(ids, None)
+    if removed:
+        log.info("node_sync.clips_pruned", files=removed, retention_days=cfg.clip_retention_days)
+    return removed
+
+
 def sync_once(
     db: Database,
     cfg: NodeSyncConfig,
@@ -334,6 +575,8 @@ def sync_once(
                 )
             elif keepalive_due is not None and cfg.keepalive_seconds > 0:
                 _maybe_keepalive(db, cfg, link, tz, session, keepalive_due, now)
+            if cfg.upload_clips:
+                _flush_clips(db, cfg, link, marks, session)
         except Exception:
             results[link.source] = 0
             log.exception("node_sync.link_failed", source=link.source, unit=link.unit)
@@ -387,6 +630,9 @@ def run_node_sync(
         link.source: _session_for(link.token) for link in cfg.links
     }
     keepalive_due: dict[str, float] = {}
+    # First sweep after one full tick, not at start: a node that has just
+    # rebooted should be pushing its backlog, not walking its clips directory.
+    next_prune = time.monotonic() + cfg.interval_seconds
     log.info(
         "node_sync.start",
         central=cfg.central_url,
@@ -412,15 +658,40 @@ def run_node_sync(
                         _maybe_keepalive(
                             db, cfg, link, tz, sessions[link.source], keepalive_due, None
                         )
+                    if cfg.upload_clips:
+                        _flush_clips(db, cfg, link, marks, sessions[link.source])
                 except Exception:
                     log.exception(
                         "node_sync.link_failed", source=link.source, unit=link.unit
                     )
+            if cfg.upload_clips and time.monotonic() >= next_prune:
+                next_prune = time.monotonic() + cfg.clip_prune_tick_seconds
+                try:
+                    prune_uploaded_clips(db, cfg, marks)
+                except Exception:
+                    log.exception("node_sync.prune_failed")
             if stop_event.wait(jittered(cfg.interval_seconds)):
                 return
     finally:
         for s in sessions.values():
             s.close()
+
+
+def _flush_clips(
+    db: Database,
+    cfg: NodeSyncConfig,
+    link: SourceLink,
+    marks: MarkStore,
+    session: requests.Session | None,
+) -> int:
+    n = upload_clips_once(db, cfg, link, marks, session)
+    if n:
+        log.info(
+            "node_sync.clips_flushed",
+            source=link.source, unit=link.unit,
+            files=n, last_clip_id=marks.get_clip(link.source),
+        )
+    return n
 
 
 def _session_for(token: str) -> requests.Session:

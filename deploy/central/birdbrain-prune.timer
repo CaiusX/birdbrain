@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the BirdBrain clip retention sweep nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=10min
+Unit=birdbrain-prune.service
+
+[Install]
+WantedBy=timers.target

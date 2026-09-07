@@ -75,8 +75,36 @@ class WireDetection(BaseModel):
     scientific_name: str = Field(min_length=1, max_length=256)
     common_name: str = Field(default="", max_length=256)
     confidence: float = Field(ge=0.0, le=1.0)
-    # Audio stays on the unit; central fetches it on demand if it wants it.
+    # Whether the unit holds audio for this row. A TBB unit keeps it and
+    # central fetches on demand; an ingest node pushes it afterwards over
+    # /ingest/clips (WireClipManifest).
     has_clip: bool = False
+
+
+class WireClip(BaseModel):
+    """One clip file in a ``/ingest/clips`` upload, as described by its
+    manifest entry.
+
+    A clip is shared by every detection BirdNET made in the same 3 s window, so
+    one file can carry several ``client_ids``. ``part`` names the multipart
+    field holding the bytes; the sender picks it, central never uses it as a
+    filename. ``fmt`` is the container the bytes are in — central stores the
+    file under its own name with this extension.
+    """
+
+    part: str = Field(min_length=1, max_length=64)
+    client_ids: list[str] = Field(min_length=1, max_length=64)
+    fmt: str = Field(default="ogg", pattern=r"^(ogg|wav|flac|mp3)$")
+
+
+class WireClipManifest(BaseModel):
+    """The JSON ``manifest`` field of a ``/ingest/clips`` upload."""
+
+    unit: str = Field(min_length=1, max_length=64)
+    schema_version: int = Field(alias="schema", default=SCHEMA_VERSION)
+    clips: list[WireClip] = Field(default_factory=list, max_length=200)
+
+    model_config = {"populate_by_name": True}
 
 
 class WireAudioQuality(BaseModel):

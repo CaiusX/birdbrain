@@ -120,6 +120,11 @@ class SpeciesNoteRow(Base):
     # min_confidence is lower. Lets us suppress loud common species (Egyptian
     # Goose, Hadada Ibis) that otherwise drown out quieter detections.
     min_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Per-species clip retention override, in days. NULL means the global
+    # window applies. Set low for loud, unmistakable species (Egyptian Goose,
+    # Hadada Ibis) whose thousands of clips a month teach nobody anything;
+    # the retention sweep still keeps that species' representative set.
+    clip_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Provenance for AI-generated notes. NULL = curated/manual note (or no
     # note yet). When present, the background notes worker is allowed to

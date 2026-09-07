@@ -12,7 +12,10 @@ This module holds the pure validation + upsert logic; the FastAPI route in
 from __future__ import annotations
 
 import hashlib
+import os
+from collections.abc import Mapping
 from datetime import UTC
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from birdbrain.logging import get_logger
@@ -23,6 +26,7 @@ from birdbrain.wire import (
     UnsupportedSchemaError,
     WireAudioQuality,
     WireBatch,
+    WireClipManifest,
     WireDetection,
     check_schema,
 )
@@ -45,7 +49,12 @@ __all__ = [
     "UnsupportedSchemaError",
     "hash_token",
     "ingest_batch",
+    "ingest_clips",
 ]
+
+# Largest single clip central will store. A 6 s OGG Vorbis clip is ~50 KB; a
+# 6 s 48 kHz mono WAV is ~580 KB. Anything past this is not a clip.
+CLIP_MAX_BYTES = 2_000_000
 
 log = get_logger(__name__)
 
@@ -162,3 +171,94 @@ def ingest_batch(db: Database, device: DeviceRow, body: IngestBody) -> dict:
         "filtered": filtered,
         "duplicate": len(body.detections) - inserted - filtered,
     }
+
+
+def ingest_clips(
+    db: Database,
+    device: DeviceRow,
+    clips_root: Path,
+    manifest: WireClipManifest,
+    parts: Mapping[str, bytes],
+) -> dict:
+    """Store pushed clip files and attach each to the detection rows it
+    belongs to. Returns ``{"stored", "attached", "skipped", "unknown"}``.
+
+    Central names every file itself — ``<unit>/<day>/<started_at>.<fmt>``, the
+    same shape ``clips.save_chunk`` gives a locally-captured clip — so a pushed
+    file is indistinguishable from a local one to the clip route, the
+    spectrogram cache and the retention sweep. Nothing in the manifest is ever
+    used as a path.
+
+    ``unknown`` lists client ids central has no row for. That is normal, not an
+    error: ingest filtered the row under a species floor or suppression, so the
+    clip has nowhere to go and the sender should not retry it. A row that
+    already has a clip is left alone (``skipped``), which makes a re-sent
+    batch harmless.
+    """
+    check_schema(manifest.schema_version)
+    if manifest.unit != device.unit_id:
+        raise ValueError(f"unit {manifest.unit!r} does not match token unit {device.unit_id!r}")
+
+    wanted = [cid for c in manifest.clips for cid in c.client_ids]
+    rows = db.detections_by_client_id(device.unit_id, wanted)
+    unit_dir = clips_root / _safe_dir(device.unit_id)
+
+    stored = attached = skipped = 0
+    unknown: list[str] = []
+    for clip in manifest.clips:
+        data = parts.get(clip.part)
+        if not data:
+            raise ValueError(f"manifest names part {clip.part!r} but no such file was sent")
+        if len(data) > CLIP_MAX_BYTES:
+            raise ValueError(f"part {clip.part!r} is {len(data)} bytes; clips are far smaller")
+        targets = []
+        for cid in clip.client_ids:
+            row = rows.get(cid)
+            if row is None:
+                unknown.append(cid)
+            elif row.clip_path:
+                skipped += 1
+            else:
+                targets.append(row)
+        if not targets:
+            continue
+        # Earliest row names the file, as the pipeline names a local clip by
+        # the chunk it was cut from.
+        first = min(targets, key=lambda r: r.started_at)
+        started = first.started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        day_dir = unit_dir / started.strftime("%Y-%m-%d")
+        day_dir.mkdir(parents=True, exist_ok=True)
+        dest = day_dir / started.strftime(f"%Y%m%dT%H%M%S_%fZ.{clip.fmt}")
+        _write_atomic(dest, data)
+        stored += 1
+        attached += db.set_clip_path_many([r.id for r in targets], str(dest))
+
+    if manifest.clips:
+        log.info(
+            "ingest.clips", unit=device.unit_id, stored=stored, attached=attached,
+            skipped=skipped, unknown=len(unknown),
+        )
+    return {"stored": stored, "attached": attached, "skipped": skipped, "unknown": unknown}
+
+
+def _safe_dir(name: str) -> str:
+    """A unit id as a directory name. Unit ids are human names ("Nkorho Bush
+    Lodge") and the local pipeline uses the source name verbatim, so keep
+    spaces and punctuation — but never a path separator or a dot-run."""
+    cleaned = name.replace("/", "_").replace("\\", "_").strip()
+    if cleaned in ("", ".", ".."):
+        raise ValueError(f"unusable unit id for a directory: {name!r}")
+    return cleaned
+
+
+def _write_atomic(dest: Path, data: bytes) -> None:
+    """Write via a sibling temp file and rename, so a reader (the clip route,
+    ffmpeg) never sees a half-written file."""
+    tmp = dest.with_name(dest.name + ".part")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dest)

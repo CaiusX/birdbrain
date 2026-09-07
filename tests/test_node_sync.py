@@ -4,6 +4,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import func, select
 
 from birdbrain import node_sync
 from birdbrain.detector.birdnet import Detection
@@ -17,7 +18,7 @@ from birdbrain.node_sync import (
     sync_link_once,
     sync_once,
 )
-from birdbrain.storage import Database
+from birdbrain.storage import Database, DetectionRow
 from birdbrain.wire import SCHEMA_VERSION, WireBatch
 
 CAM_A = "Nkorho Bush Lodge"
@@ -326,3 +327,185 @@ def test_run_node_sync_stops_promptly_when_asked(tmp_path, monkeypatch):
     stop = threading.Event()
     stop.set()
     node_sync.run_node_sync(db, cfg, stop)  # returns rather than hanging
+
+
+# --- clips ------------------------------------------------------------------
+
+
+def _db_with_clips(tmp_path, source, windows, per_window=1, clip_dir=None):
+    """``windows`` detections-windows for one cam, ``per_window`` species in
+    each, every row of a window sharing one clip file on disk — the shape the
+    pipeline writes. Returns (db, [clip paths])."""
+    db = Database(f"sqlite:///{tmp_path / 'node.sqlite'}")
+    clip_dir = clip_dir or (tmp_path / "clips" / source)
+    clip_dir.mkdir(parents=True, exist_ok=True)
+    base = datetime.now(UTC) - timedelta(days=10)
+    paths = []
+    for w in range(windows):
+        at = base + timedelta(seconds=3 * w)
+        p = clip_dir / f"w{w}.ogg"
+        p.write_bytes(b"OggS" + bytes([w]) * 64)
+        paths.append(p)
+        db.insert_detections(
+            [
+                Detection(
+                    source_name=source, started_at=at, duration_s=3.0,
+                    scientific_name=f"Species {w}-{k}", common_name="x", confidence=0.6,
+                )
+                for k in range(per_window)
+            ],
+            clip_path=str(p),
+        )
+    return db, paths
+
+
+def _acked_rows(db, marks, source):
+    """Pretend central acked every row of ``source`` (sets the row mark)."""
+    with db.session() as s:
+        last = s.scalar(
+            select(func.max(DetectionRow.id)).where(DetectionRow.source_name == source)
+        )
+    marks.set(source, last)
+    marks.save()
+    return last
+
+
+def test_mark_store_carries_clip_marks_and_tolerates_their_absence(tmp_path):
+    p = tmp_path / "state.json"
+    m = MarkStore(p)
+    m.set(CAM_A, 40)
+    m.set_clip(CAM_A, 12)
+    m.save()
+    back = MarkStore.load(p)
+    assert (back.get(CAM_A), back.get_clip(CAM_A)) == (40, 12)
+    # A state file written before clip push existed has no clip marks: every
+    # clip replays from 0, which central dedupes by skipping rows that already
+    # have a file.
+    p.write_text(f'{{"marks": {{"{CAM_A}": 40}}}}')
+    old = MarkStore.load(p)
+    assert (old.get(CAM_A), old.get_clip(CAM_A)) == (40, 0)
+
+
+def test_clip_batch_groups_shared_files_and_namespaces_ids(tmp_path, monkeypatch):
+    db, paths = _db_with_clips(tmp_path, CAM_A, windows=2, per_window=2)
+    cfg = _cfg(tmp_path, links=[SourceLink(source=CAM_A, unit="Unit A", token="t")])
+    marks = MarkStore(cfg.state_file)
+    _acked_rows(db, marks, CAM_A)
+
+    posted = []
+
+    def fake_post(central_url, token, manifest, parts, *, session=None, timeout=90.0):
+        posted.append((manifest, parts))
+        return {"unknown": []}
+
+    monkeypatch.setattr(node_sync, "post_clips", fake_post)
+    sent = node_sync.upload_clips_once(db, cfg, cfg.links[0], marks)
+    assert sent == 2  # two windows → two files, though four rows
+    manifest, parts = posted[0]
+    assert manifest["unit"] == "Unit A" and manifest["schema"] == SCHEMA_VERSION
+    assert [len(c["client_ids"]) for c in manifest["clips"]] == [2, 2]
+    assert all(cid.startswith("Unit A:") for c in manifest["clips"] for cid in c["client_ids"])
+    assert set(parts) == {c["part"] for c in manifest["clips"]}
+    assert parts[manifest["clips"][0]["part"]][1] == paths[0].read_bytes()
+    # The clip mark caught up with the row mark and was persisted.
+    assert marks.get_clip(CAM_A) == marks.get(CAM_A)
+    assert MarkStore.load(cfg.state_file).get_clip(CAM_A) == marks.get(CAM_A)
+
+
+def test_clip_mark_never_passes_the_row_mark(tmp_path, monkeypatch):
+    """Rows central has not acked yet have no home for their clip: the clip
+    window stops at the row mark, whatever else is in the table."""
+    db, _ = _db_with_clips(tmp_path, CAM_A, windows=5)
+    cfg = _cfg(tmp_path)
+    marks = MarkStore(cfg.state_file)
+    marks.set(CAM_A, 2)  # only the first two rows acked
+    posted = []
+    monkeypatch.setattr(
+        node_sync, "post_clips",
+        lambda *a, **k: (posted.append(a[2]) or {"unknown": []}),
+    )
+    assert node_sync.upload_clips_once(db, cfg, cfg.links[0], marks) == 2
+    assert marks.get_clip(CAM_A) == 2
+    assert sum(len(c["client_ids"]) for m in posted for c in m["clips"]) == 2
+
+
+def test_failed_clip_post_leaves_clip_mark_put(tmp_path, monkeypatch):
+    db, _ = _db_with_clips(tmp_path, CAM_A, windows=3)
+    cfg = _cfg(tmp_path)
+    marks = MarkStore(cfg.state_file)
+    _acked_rows(db, marks, CAM_A)
+    monkeypatch.setattr(node_sync, "post_clips", lambda *a, **k: None)
+    assert node_sync.upload_clips_once(db, cfg, cfg.links[0], marks) == 0
+    assert marks.get_clip(CAM_A) == 0
+
+
+def test_rows_without_a_file_advance_the_clip_mark_without_a_request(tmp_path, monkeypatch):
+    db, paths = _db_with_clips(tmp_path, CAM_A, windows=3)
+    for p in paths:
+        p.unlink()  # pruned locally, or never written
+    cfg = _cfg(tmp_path)
+    marks = MarkStore(cfg.state_file)
+    last = _acked_rows(db, marks, CAM_A)
+    calls = []
+    monkeypatch.setattr(node_sync, "post_clips", lambda *a, **k: calls.append(1) or {})
+    assert node_sync.upload_clips_once(db, cfg, cfg.links[0], marks) == 0
+    assert calls == []
+    assert marks.get_clip(CAM_A) == last
+
+
+def test_clip_drain_is_bounded_per_tick(tmp_path, monkeypatch):
+    db, _ = _db_with_clips(tmp_path, CAM_A, windows=10)
+    cfg = _cfg(tmp_path, clip_batch_size=2, clip_batches_per_tick=3)
+    marks = MarkStore(cfg.state_file)
+    last = _acked_rows(db, marks, CAM_A)
+    monkeypatch.setattr(node_sync, "post_clips", lambda *a, **k: {"unknown": []})
+    assert node_sync.upload_clips_once(db, cfg, cfg.links[0], marks) == 6
+    assert marks.get_clip(CAM_A) == last - 4
+    # the rest goes next tick
+    assert node_sync.upload_clips_once(db, cfg, cfg.links[0], marks) == 4
+    assert marks.get_clip(CAM_A) == last
+
+
+def test_sync_pass_pushes_rows_then_clips(tmp_path, monkeypatch):
+    db, _ = _db_with_clips(tmp_path, CAM_A, windows=2)
+    cfg = _cfg(tmp_path, links=[SourceLink(source=CAM_A, unit=CAM_A, token="t")])
+    marks = MarkStore(cfg.state_file)
+    order = []
+    monkeypatch.setattr(node_sync, "post_batch", lambda *a, **k: order.append("rows") or True)
+    monkeypatch.setattr(node_sync, "post_clips", lambda *a, **k: order.append("clips") or {})
+    sync_once(db, cfg, marks)
+    assert order == ["rows", "clips"]
+    assert marks.get_clip(CAM_A) == marks.get(CAM_A) > 0
+
+
+def test_clip_push_can_be_switched_off(tmp_path, monkeypatch):
+    db, _ = _db_with_clips(tmp_path, CAM_A, windows=2)
+    cfg = _cfg(tmp_path, upload_clips=False)
+    marks = MarkStore(cfg.state_file)
+    monkeypatch.setattr(node_sync, "post_batch", lambda *a, **k: True)
+    monkeypatch.setattr(node_sync, "post_clips", lambda *a, **k: pytest.fail("clips posted"))
+    sync_once(db, cfg, marks)
+    assert marks.get_clip(CAM_A) == 0
+
+
+def test_local_prune_only_removes_clips_central_has_acked(tmp_path):
+    db, paths = _db_with_clips(tmp_path, CAM_A, windows=4)  # all 10 days old
+    cfg = _cfg(tmp_path, clip_retention_days=3)
+    marks = MarkStore(cfg.state_file)
+    marks.set_clip(CAM_A, 2)  # central holds the first two
+    removed = node_sync.prune_uploaded_clips(db, cfg, marks)
+    assert removed == 2
+    assert [p.exists() for p in paths] == [False, False, True, True]
+    with db.session() as s:
+        rows = sorted(s.scalars(select(DetectionRow)), key=lambda r: r.id)
+    assert [r.clip_path is None for r in rows] == [True, True, False, False]
+
+
+def test_local_prune_keeps_recent_clips_even_when_acked(tmp_path):
+    db, paths = _db_with_clips(tmp_path, CAM_A, windows=2)
+    cfg = _cfg(tmp_path, clip_retention_days=30)  # window longer than the rows' age
+    marks = MarkStore(cfg.state_file)
+    _acked_rows(db, marks, CAM_A)
+    marks.set_clip(CAM_A, marks.get(CAM_A))
+    assert node_sync.prune_uploaded_clips(db, cfg, marks) == 0
+    assert all(p.exists() for p in paths)

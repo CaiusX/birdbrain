@@ -134,8 +134,10 @@ from birdbrain.ingest import (
     UnsupportedSchemaError,
     hash_token,
     ingest_batch,
+    ingest_clips,
 )
 from birdbrain.site_resolver import state_to_resolved
+from birdbrain.wire import WireClipManifest
 from birdbrain.sites import Site, load_sites
 from birdbrain.storage.db import ALL_SITES_SENTINEL, REPORTING_MIN_CONFIDENCE_DEFAULT
 from birdbrain.storage import (
@@ -7303,6 +7305,61 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return True
 
     # --- Visitor analytics: anonymous client beacon (path + dwell on tab-hide) ---
+    # --- Clip ingest: the audio behind a pushed detection, from an ingest node ---
+    # Same token, separate budget: a node uploads clips in batches of ~25 files
+    # right behind each detection batch, so the 30/min detection bucket would
+    # starve it. 8 MB is ~150 OGG clips; the manifest caps a batch at 200.
+    _CLIPS_MAX_BODY = 8_000_000
+    _CLIPS_RATE_PER_MIN = 120
+    _clip_hits: dict[str, list[float]] = {}
+
+    def _clip_rate_ok(unit_id: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in _clip_hits.get(unit_id, []) if now - t < 60.0]
+        if len(hits) >= _CLIPS_RATE_PER_MIN:
+            _clip_hits[unit_id] = hits
+            return False
+        hits.append(now)
+        _clip_hits[unit_id] = hits
+        return True
+
+    @app.post("/ingest/clips")
+    async def ingest_clips_route(request: Request) -> dict:
+        """Multipart: a ``manifest`` JSON field (``WireClipManifest``) plus one
+        file field per clip, named whatever the manifest's ``part`` says.
+        Central names the stored files itself; see ``ingest.ingest_clips``."""
+        clen = request.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > _CLIPS_MAX_BODY:
+            raise HTTPException(413, "payload too large")
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            raise HTTPException(401, "missing bearer token")
+        device = db.device_by_token(hash_token(auth[len("Bearer "):].strip()))
+        if device is None or not device.sync_enabled:
+            raise HTTPException(403, "invalid token or sync disabled")
+        if not _clip_rate_ok(device.unit_id):
+            raise HTTPException(429, "rate limit exceeded")
+        form = await request.form()
+        raw = form.get("manifest")
+        if not isinstance(raw, str):
+            raise HTTPException(400, "missing manifest field")
+        try:
+            manifest = WireClipManifest.model_validate_json(raw)
+        except ValueError as e:
+            raise HTTPException(400, f"bad manifest: {e}") from e
+        parts: dict[str, bytes] = {}
+        for key, value in form.multi_items():
+            if key != "manifest" and hasattr(value, "read"):
+                parts[key] = await value.read()
+        try:
+            return await asyncio.to_thread(
+                ingest_clips, db, device, clips_root, manifest, parts
+            )
+        except UnsupportedSchemaError as e:
+            raise HTTPException(SCHEMA_CONFLICT_STATUS, str(e)) from e
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+
     _TRACK_MAX_BODY = 4_000  # bytes — a tiny JSON beacon
     _TRACK_RATE_PER_MIN = 120
     _track_hits: dict[str, list[float]] = {}

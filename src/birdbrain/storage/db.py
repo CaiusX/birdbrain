@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import Integer, create_engine, delete, func, or_, select
+from sqlalchemy import Integer, create_engine, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
@@ -169,6 +169,7 @@ class Database:
             ("audio_quality_metrics", "band_hz_low", "INTEGER"),
             ("audio_quality_metrics", "band_hz_high", "INTEGER"),
             ("runtime_sources", "external", "INTEGER DEFAULT 0"),
+            ("species_notes", "clip_retention_days", "INTEGER"),
         ]
         # Indexes to create on existing tables. ``Base.metadata.create_all``
         # only creates indexes for tables it creates, so any index attached to
@@ -180,6 +181,13 @@ class Database:
                 "ix_detections_source_hash_time",
                 "detections",
                 "source_name, audio_hash, started_at",
+            ),
+            # Clip ingest attaches a pushed file to its row by the unit's own
+            # id. Without this the lookup is a table scan per clip.
+            (
+                "ix_detections_source_client",
+                "detections",
+                "source_name, client_id",
             ),
         ]
         # Indexes that have been superseded by something better. Dropped here
@@ -442,6 +450,40 @@ class Database:
                 return False
             row.clip_path = clip_path
         return True
+
+    def detections_by_client_id(
+        self, source_name: str, client_ids: Iterable[str]
+    ) -> dict[str, DetectionRow]:
+        """Rows of one push-fed source keyed by the unit's ``client_id``. Used by
+        clip ingest to attach a pushed file to the rows it belongs to. Ids that
+        central never stored (filtered at ingest by a species floor or
+        suppression) are simply absent."""
+        ids = [c for c in client_ids if c]
+        if not ids:
+            return {}
+        with self._Session() as s:
+            rows = s.scalars(
+                select(DetectionRow)
+                .where(DetectionRow.source_name == source_name)
+                .where(DetectionRow.client_id.in_(ids))
+            ).all()
+            s.expunge_all()
+        return {r.client_id: r for r in rows if r.client_id}
+
+    def set_clip_path_many(self, detection_ids: Iterable[int], clip_path: str | None) -> int:
+        """Point many rows at one clip file (or NULL them all). One UPDATE, not a
+        row-at-a-time ORM walk — the retention sweep NULLs hundreds of thousands
+        of rows in a pass. Returns the number of rows changed."""
+        ids = list(detection_ids)
+        if not ids:
+            return 0
+        with self._Session() as s, s.begin():
+            res = s.execute(
+                update(DetectionRow)
+                .where(DetectionRow.id.in_(ids))
+                .values(clip_path=clip_path)
+            )
+        return int(res.rowcount or 0)
 
     # --- Visitor analytics (client-beacon page views) ---
 
@@ -1531,6 +1573,36 @@ class Database:
                 )
                 s.add(row)
             row.min_confidence = value
+
+    def set_species_clip_retention_days(
+        self, scientific_name: str, days: int | None
+    ) -> None:
+        """Set/clear a per-species clip retention window (see
+        ``SpeciesNoteRow.clip_retention_days``). Creates a minimal note row if
+        none exists, the same way the confidence floor does."""
+        if days is not None and days < 0:
+            raise ValueError("clip_retention_days must be >= 0")
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                row = SpeciesNoteRow(
+                    scientific_name=scientific_name,
+                    common_name="",
+                    note="",
+                    updated_at=datetime.now(UTC),
+                )
+                s.add(row)
+            row.clip_retention_days = days
+
+    def species_clip_retention_map(self) -> dict[str, int]:
+        """``{scientific_name: days}`` for every species with a retention
+        override. Empty when none are set."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(SpeciesNoteRow.scientific_name, SpeciesNoteRow.clip_retention_days)
+                .where(SpeciesNoteRow.clip_retention_days.is_not(None))
+            ).all()
+        return {sci: int(days) for sci, days in rows}
 
     # --- App-wide settings (key/value, polled cross-process) ---
 
