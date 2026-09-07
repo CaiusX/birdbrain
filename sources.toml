@@ -3,84 +3,11 @@
 # pipeline worker; supervisor reads this list once at startup, so add a
 # source here and restart the `pipeline` service for it to take effect.
 
-[[source]]
-name = "Olifants (Naledi)"
-kind = "youtube"
-url = "https://www.youtube.com/watch?v=NapztoCaKFY"
-lat = -24.175278
-lon = 30.905358
-min_confidence = 0.3
-cookies_file = "data/www.youtube.com_cookies.txt"
-timezone = "Africa/Johannesburg"
-
-[[source]]
-name = "Tembe"
-kind = "youtube"
-url = "https://www.youtube.com/watch?v=gdrNUUf-cQw"
-lat = -27.045674
-lon = 32.438341
-min_confidence = 0.3
-cookies_file = "data/www.youtube.com_cookies.txt"
-timezone = "Africa/Johannesburg"
-
-[[source]]
-name = "Timbavati"
-kind = "youtube"
-url = "https://www.youtube.com/watch?v=_AyumoafMOU"
-lat = -24.276074
-lon = 31.30743
-min_confidence = 0.3
-cookies_file = "data/www.youtube.com_cookies.txt"
-timezone = "Africa/Johannesburg"
-
-[[source]]
-name = "Twin Pan"
-kind = "youtube"
-url = "https://www.youtube.com/watch?v=2EZavJUNdLI"
-lat = -18.59
-lon = 23.53
-# Quieter cam — lower threshold lets weaker detections surface.
-min_confidence = 0.15
-cookies_file = "data/www.youtube.com_cookies.txt"
-timezone = "Africa/Gaborone"
-
-[[source]]
-name = "Tau Game Lodge"
-kind = "youtube"
-url = "https://www.youtube.com/watch?v=8J9USywkGmw"
-lat = -24.7461
-lon = 26.4034
-# Dry savanna — moderately quiet. Bump down if detection count stays low.
-min_confidence = 0.3
-cookies_file = "data/www.youtube.com_cookies.txt"
-timezone = "Africa/Johannesburg"
-
-[[source]]
-name = "Tortilis Camp"
-kind = "youtube"
-url = "https://www.youtube.com/watch?v=XyPU5-pNg5E"
-lat = -2.6543
-lon = 37.2226
-# Kenya — Amboseli, semi-arid savanna at Kilimanjaro's foot. The "dry" half
-# of the Kenya pair. Africam restarts its live broadcasts under new video
-# IDs periodically — if the worker starts erroring "This live stream
-# recording is not available", search YouTube for the current
-# "Live from Tortilis Camp" broadcast and update the URL above.
-min_confidence = 0.3
-cookies_file = "data/www.youtube.com_cookies.txt"
-timezone = "Africa/Nairobi"
-
-[[source]]
-name = "Mara River"
-kind = "youtube"
-url = "https://www.youtube.com/watch?v=ACc7IkdOF-Y"
-lat = -1.387
-lon = 35.014
-# Kenya — Mara Triangle, Fig Tree Crossing. The "wet" half of the Kenya
-# pair — riparian / open water; highest bird density of the new three.
-min_confidence = 0.3
-cookies_file = "data/www.youtube.com_cookies.txt"
-timezone = "Africa/Nairobi"
+# The Africam YouTube cams that used to live here run on the ingest node bne
+# since 2026-09-07 (docs/ingest-node.md). They still appear on central as
+# external runtime sources — same names, same history — so do not re-add
+# them here: central skips external sources, but it would happily run a
+# duplicate listed in this file and the two would race.
 
 [[source]]
 name = "Djuma"
