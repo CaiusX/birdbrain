@@ -110,6 +110,29 @@ formats go missing.
 A node runs **no web service**. `birdbrain web` is central's; a node has no
 dashboard to serve and no reason to open a port.
 
+## Moving a cam off central
+
+A cam that central already runs keeps its name, its history and its site page
+when it moves to a node; only the worker changes box. On central:
+
+1. Make it an **external runtime source that keeps its YouTube kind and URL**:
+   `db.add_runtime_source(name=..., external=True)` for a runtime row, or the
+   full field set copied from `sources.toml` for a static one. The supervisor
+   drops an external source on its next tick, but the site page embed and the
+   live listen still read the row's URL — which is why it must not be
+   re-registered as a bare `tbb://` mic source.
+2. If it was in `sources.toml`, remove it there (and commit): central skips
+   external *runtime* rows, but it would happily run a duplicate from the file.
+3. `birdbrain tbb-device-add --unit-id "<name>" --lat … --lon … --public`
+   for its token, using the exact source name as the unit id.
+4. Copy any `gate_highlights:<name>` setting to the node's DB — the highlight
+   watcher runs in the node's pipeline against the node's settings.
+
+On the node: append the `[[source]]` to `sources.node.toml` (with the node's
+own `cookies_file`) and the `[[link]]` to `node.toml`, then restart the
+pipeline and node-sync. All eighteen of central's Africam cams moved this
+way on 2026-09-07; central now runs only its RTSP relay and local mics.
+
 ## Clips
 
 Rows go first, over `POST /ingest/detections`; the audio behind them follows
