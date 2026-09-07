@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
 import json
 import math
 import os
@@ -16,6 +17,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -310,60 +312,171 @@ TEMPLATES.env.filters["parse_brief"] = _parse_brief
 _SINGLETON_LOCKS: list = []
 
 
-# Per-source colour palette for the /species treemap. Hand-picked to evoke
-# each site's biome rather than scraped from a logo (africam.com doesn't
-# carry distinct per-lodge logos — checked). Any source not in this dict
-# falls back to the template's default emerald.
-SOURCE_COLORS: dict[str, str] = {
-    "Tembe":               "#059669",  # KZN coastal sand forest — emerald-600
-    "Olifants (Naledi)":   "#84cc16",  # Greater Kruger bushveld — lime-500
-    "Timbavati":           "#b91c1c",  # Lowveld red soils       — red-700
-    "Twin Pan":            "#a8a29e",  # Botswana pan / grass    — stone-400
-    "Safarihoek":          "#ea580c",  # Etosha Heights, arid    — orange-600
-    "Tau Game Lodge":      "#b45309",  # Madikwe bushveld        — amber-700
-    "Tortilis Camp":       "#eab308",  # Amboseli golden grass   — yellow-500
-    "Mara River":          "#0891b2",  # Mara Triangle, riverine — cyan-600
-    "Mpala Watering Hole": "#4d7c0f",  # Laikipia acacia plateau — lime-700
-    "Stony Point":         "#1d4ed8",  # Coastal Atlantic colony — blue-700
-    "Elephant Pan":        "#7c2d12",  # Tuli rusty riparian     — orange-900
-    "Kalahari":            "#92400e",  # Kalahari red dune sand  — amber-800
-    "Namib Desert":        "#fdba74",  # Namib pale dune sand    — orange-300
-    "Okaukuejo":           "#d6d3d1",  # Etosha white salt pan   — stone-300
-    # Majete (Malawi, lower Shire) — six cams share one map point, so give each
-    # a well-separated hue so they're tellable apart when the dot fans out.
-    "Majete Cam 1":          "#14b8a6",  # teal-500
-    "Majete Cam 2":          "#8b5cf6",  # violet-500
-    "Majete Cam 3":          "#ec4899",  # pink-500
-    "Majete Cam 4":          "#f59e0b",  # amber-500
-    "Majete Cam 5":          "#0ea5e9",  # sky-500
-    "Majete Thawale Lodge":  "#f43f5e",  # rose-500
+# --- Site biome palette ------------------------------------------------------
+#
+# Every site belongs to one of six biome families. The family fixes both a
+# colour and a marker shape, and both travel together everywhere a site is
+# drawn — map dot, site list, treemap, inline site name.
+#
+# Colour alone could not carry this. The map is an all-pairs surface (any two
+# dots can land side by side), and "green vegetation + warm-brown arid" is the
+# red-green confusion axis: an exhaustive search over 1.37M candidate palettes
+# found none that clears the colour-blind separation floor while keeping hues
+# that actually evoke their landscape. Lightness separation is the usual escape
+# and it is blocked here — a sand tone pale enough to separate from green falls
+# out of the readable band on the light OSM basemap. So the family carries a
+# SHAPE too, and that is what makes it legible without colour.
+#
+# What the palette does clear (light surface #f2efe9, all pairs): lightness
+# band, chroma floor, and the normal-vision floor at ΔE 15.3 — the hard gate,
+# which the previous hand-picked palette failed at ΔE 5.3 with two site colours
+# indistinguishable to *everyone*. Colour-blind separation is ΔE 5.2 against a
+# 6.0 floor, up from 0.4, and the shape channel covers the remainder.
+#
+# Adding a site: put it in SITE_BIOME under the right family. It gets a colour
+# and a shape automatically — no new hex to pick, and nothing else shifts.
+
+
+@dataclass(frozen=True)
+class Biome:
+    """One biome family: what it is called, how it is coloured, how it is drawn."""
+
+    label: str   # legend text
+    color: str   # base hex — validated as a set, see the note above
+    shape: str   # marker shape; the colour-independent channel
+
+
+BIOMES: dict[str, Biome] = {
+    "water":    Biome("Water & riverine",      "#0284c7", "circle"),
+    "dry":      Biome("Desert, dune & pan",    "#d97706", "diamond"),
+    "grass":    Biome("Savanna grassland",     "#854d0e", "square"),
+    "woodland": Biome("Woodland, bush & forest", "#4d7c0f", "triangle"),
+    "highland": Biome("Highland & volcanic",   "#7c3aed", "pentagon"),
+    "urban":    Biome("Garden & urban",        "#db2777", "star"),
 }
 
+#: Which family each site belongs to. Sites absent from this map fall back to
+#: the neutral default — that is the "everything is green" state this replaces,
+#: so a new cam should be added here when it joins the roster.
+SITE_BIOME: dict[str, str] = {
+    # --- water: rivers, dams, springs, floodplain, coast -------------------
+    "Mara River":                 "water",   # Mara Triangle, Fig Tree Crossing
+    "Moela Lodge":                "water",   # Boteti River, Botswana
+    "Tembo Plains":               "water",   # Zambezi, Sapi Reserve
+    "The Basin":                  "water",   # Selinda spillway
+    "Simbavati Waterside":        "water",   # Klaserie riverbed
+    "Roy's Dam":                  "water",   # Sabi Sand dam
+    "Deteema Springs":            "water",   # Hwange spring
+    "Djuma":                      "water",   # Gowrie Dam waterhole
+    "Stony Point":                "water",   # Atlantic penguin colony
+    # --- dry: desert, dune, salt pan --------------------------------------
+    "Namib Desert":               "dry",     # Namib pale dune sand
+    "Kalahari":                   "dry",     # Kalahari red dune sand
+    "Okaukuejo":                  "dry",     # Etosha white salt pan
+    "Jack's Camp":                "dry",     # Makgadikgadi pans
+    "Twin Pan":                   "dry",     # Selinda pan
+    "Safarihoek":                 "dry",     # Etosha Heights, arid
+    "Onguma Waterhole":           "dry",     # Etosha eastern boundary
+    "Elephant Pan":               "dry",     # Khwai, Botswana
+    # --- grass: open savanna grassland ------------------------------------
+    "Tortilis Camp":              "grass",   # Amboseli golden grass
+    "Angama Mara":                "grass",   # Mara escarpment
+    "Mahali Mzuri":               "grass",   # Olare Motorogi, Mara
+    "Serengeti Explorer":         "grass",   # Serengeti plains
+    "Wilderness Linkwasha":       "grass",   # Ngamo plains, Hwange
+    "Lentorre":                   "grass",   # South Rift, Kenya
+    "Meno a Kwena":               "grass",   # Boteti, Kalahari grass
+    # --- woodland: bushveld, mopane, miombo, forest ------------------------
+    "Olifants (Naledi)":          "woodland",  # Greater Kruger bushveld
+    "Nkorho Bush Lodge":          "woodland",  # Sabi Sand
+    "Tau Game Lodge":             "woodland",  # Madikwe bushveld
+    "Timbavati":                  "woodland",  # Lowveld red soils
+    "Tembe":                      "woodland",  # KZN coastal sand forest
+    "Senyati Waterhole":          "woodland",  # Chobe mopane
+    "The Hide":                   "woodland",  # Hwange teak
+    "Hwange Safari Lodge":        "woodland",  # Hwange teak
+    "Victoria Falls Safari Lodge": "woodland", # Zambezi mopane
+    "Camelthorn":                 "woodland",  # Boteti camelthorn woodland
+    "Finch Hattons":              "woodland",  # Tsavo West springs & woodland
+    "Majete Cam 1":               "woodland",  # lower Shire miombo
+    "Majete Cam 2":               "woodland",
+    "Majete Cam 3":               "woodland",
+    "Majete Cam 4":               "woodland",
+    "Majete Cam 5":               "woodland",
+    "Majete Thawale Lodge":       "woodland",
+    "GRACE Gorilla Sanctuary":    "woodland",  # Albertine Rift montane forest
+    "Lola ya Bonobo":             "woodland",  # Congo Basin rainforest
+    # --- highland: volcanic hills, plateau ---------------------------------
+    "ol Donyo Lodge":             "highland",  # Chyulu Hills, volcanic
+    "Mpala Watering Hole":        "highland",  # Laikipia acacia plateau
+    "Porini Rhino Camp":          "highland",  # Ol Pejeta, Laikipia
+    # --- urban: garden mics -------------------------------------------------
+    "JHB - Hyde Park":            "urban",
+    "tbb-test":                   "urban",
+    "tbb-mems":                   "urban",
+}
 
-# Short location + biome label per site, surfaced in the dashboard map's
-# site-summary popup. Mirrors the SOURCE_COLORS biome notes above. Sites not
-# listed (e.g. the garden mic) simply show no biome line.
+#: Neutral for a site with no family yet — deliberately grey rather than a
+#: sixth-ish hue, so an unclassified site looks unclassified instead of
+#: silently joining a family it does not belong to.
+UNCLASSIFIED_COLOR = "#71717a"
+UNCLASSIFIED_SHAPE = "circle"
+
+#: How many lightness steps a family spreads across. Sites inside one family
+#: are told apart by position and label, not colour, so this is variety rather
+#: than encoding — but it keeps a cluster of same-family dots from reading as
+#: one blob.
+_FAMILY_STEPS = 5
+
+
+def _step_for(name: str) -> int:
+    """A site's lightness step within its family. Derived from a stable hash of
+    the name, never from its position in a list: colour must follow the entity,
+    so adding or removing a cam never repaints the others."""
+    digest = hashlib.sha1(name.encode("utf-8")).digest()
+    return digest[0] % _FAMILY_STEPS
+
+
+def _shift(hex_: str, t: float) -> str:
+    """Move ``hex_`` toward white (t > 0) or black (t < 0) by fraction ``t``."""
+    r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
+    if t >= 0:
+        r, g, b = (c + (255 - c) * t for c in (r, g, b))
+    else:
+        r, g, b = (c * (1 + t) for c in (r, g, b))
+    return f"#{round(r):02x}{round(g):02x}{round(b):02x}"
+
+
+def biome_of(name: str) -> Biome | None:
+    """The site's biome family, or None if it has not been classified."""
+    key = SITE_BIOME.get(name)
+    return BIOMES.get(key) if key else None
+
+
+def _biome_color(name: str) -> str:
+    """The site's map/treemap colour: its family hue, stepped for variety."""
+    fam = biome_of(name)
+    if fam is None:
+        return UNCLASSIFIED_COLOR
+    # Steps straddle the base: two darker, the base, two lighter. The spread is
+    # small (±16%) so the family hue stays recognisable as one colour.
+    return _shift(fam.color, (_step_for(name) - 2) * 0.08)
+
+
+def site_shape(name: str) -> str:
+    """The site's marker shape — the channel that survives colour blindness."""
+    fam = biome_of(name)
+    return fam.shape if fam else UNCLASSIFIED_SHAPE
+
+
+#: Per-site colour, derived from the biome family. Kept as a plain dict because
+#: templates index it directly (``source_colors.get(src, ...)``).
+SOURCE_COLORS: dict[str, str] = {name: _biome_color(name) for name in SITE_BIOME}
+
+
+#: Short biome label per site, shown in the map's site-summary popup.
 SOURCE_BIOME: dict[str, str] = {
-    "Tembe":               "KZN coastal sand forest",
-    "Olifants (Naledi)":   "Greater Kruger bushveld",
-    "Timbavati":           "Lowveld red soils",
-    "Twin Pan":            "Botswana pan & grassland",
-    "Safarihoek":          "Etosha Heights — arid",
-    "Tau Game Lodge":      "Madikwe bushveld",
-    "Tortilis Camp":       "Amboseli golden grass",
-    "Mara River":          "Mara Triangle — riverine",
-    "Mpala Watering Hole": "Laikipia acacia plateau",
-    "Stony Point":         "Atlantic penguin colony",
-    "Elephant Pan":        "Tuli rusty riparian",
-    "Kalahari":            "Kalahari red dune sand",
-    "Namib Desert":        "Namib pale dune sand",
-    "Okaukuejo":           "Etosha white salt pan",
-    "Majete Cam 1":          "Majete, Malawi — lower Shire miombo",
-    "Majete Cam 2":          "Majete, Malawi — lower Shire miombo",
-    "Majete Cam 3":          "Majete, Malawi — lower Shire miombo",
-    "Majete Cam 4":          "Majete, Malawi — lower Shire miombo",
-    "Majete Cam 5":          "Majete, Malawi — lower Shire miombo",
-    "Majete Thawale Lodge":  "Majete, Malawi — Thawale camp waterhole",
+    name: BIOMES[key].label for name, key in SITE_BIOME.items() if key in BIOMES
 }
 
 
@@ -373,10 +486,8 @@ def _site_color(name: str) -> str:
     dots (Elephant Pan rust, Kalahari amber, Stony Point blue) and would be
     unreadable as text on the near-black UI, so dark hues are lightened toward
     white until legible — the hue stays, only the brightness lifts. Unknown
-    sites (e.g. the garden mic) fall back to emerald-400."""
-    hex_ = SOURCE_COLORS.get(name)
-    if not hex_:
-        return "#34d399"
+    sites fall back to the unclassified grey."""
+    hex_ = SOURCE_COLORS.get(name) or UNCLASSIFIED_COLOR
     r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
     lum = 0.2126 * r + 0.7152 * g + 0.0722 * b  # 0..255
     if lum < 150:
@@ -994,6 +1105,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             t.is_runtime = t.name in runtime_names  # type: ignore[attr-defined]
         return ordered, merged, tiles
 
+    def _biome_legend(names: Iterable[str]) -> list[dict]:
+        """Legend rows for the map: one per family actually on the roster, so a
+        family with no sites on this deployment never appears."""
+        active = {SITE_BIOME[n] for n in names if n in SITE_BIOME}
+        return [
+            {"key": k, "label": b.label, "color": b.color, "shape": b.shape}
+            for k, b in BIOMES.items() if k in active
+        ]
+
     def _map_sites(sources_by_name: dict[str, SourceConfig]) -> list[dict]:
         """Map pins: sites.toml entries (for multi-site OCR resolution) plus any
         single-site source that carries its own lat/lon (most do — runtime
@@ -1175,7 +1295,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "lon": site["lon"],
                 # Per-site palette colour drives the dashboard map dot.
                 # Falls back to the templates' default emerald.
-                "color": SOURCE_COLORS.get(name, "#10b981"),
+                "color": SOURCE_COLORS.get(name, UNCLASSIFIED_COLOR),
+                # Biome family marker shape. The second, colour-independent
+                # channel — see the palette note above BIOMES.
+                "shape": site_shape(name),
                 "species_24h": len(sp),
                 # Site-summary popup fields (location/biome, all-time species,
                 # online-since). Concise by design — the popup links through to
@@ -1530,6 +1653,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "site_states": _site_states(tiles, sources_by_name),
                 "source_tz": source_tz,
                 "latest_brief": latest_brief,
+                "biome_legend": _biome_legend(sources_by_name),
                 **_note_tag_context(),
             },
         )

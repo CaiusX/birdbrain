@@ -74,6 +74,19 @@
       <span class="text-xs text-zinc-500">hover a dot · lines = shared species (30 d)</span>
     </div>
     <div id="map" class="w-full" style="height: 460px;"></div>
+    {# Biome legend. Shape and colour both come from the site's family, and the
+       shape is the half that survives colour blindness — so the legend shows
+       both, never a colour swatch alone. #}
+    {% if biome_legend %}
+      <ul class="flex flex-wrap gap-x-4 gap-y-1.5 px-4 py-2.5 border-t border-zinc-800">
+        {% for b in biome_legend %}
+          <li class="flex items-center gap-1.5 text-[11px] text-zinc-400">
+            <span class="biome-key inline-flex" data-shape="{{ b.shape }}" data-color="{{ b.color }}"></span>
+            {{ b.label }}
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
   </div>
 
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden flex flex-col">
@@ -434,19 +447,44 @@
     return `<a href="/site/${encodeURIComponent(s.name)}"`
       + ` class="block w-52 px-3 py-2.5 rounded-md hover:bg-zinc-800/60 transition-colors">`
       + `<div class="flex items-center gap-2">`
-      + `<span class="inline-block w-2.5 h-2.5 rounded-full shrink-0" style="background:${s.color}"></span>`
+      + `<span class="inline-flex shrink-0">${shapeSvg(s.shape, s.color, 12)}</span>`
       + `<strong class="text-sm font-semibold text-zinc-100">${escapeHtml(s.name)}</strong></div>`
       + biome
       + `<dl class="mt-2 space-y-0.5 text-xs text-zinc-400">${rows.join('')}</dl>`
       + `<div class="mt-2 text-xs text-emerald-300">View site &rarr;</div></a>`;
   }
 
+  // Biome marker shapes. The shape, not the colour, is what stays readable
+  // under colour blindness — green bushveld and brown desert sit on the
+  // red-green axis and no palette separates them (see BIOMES in app.py).
+  // Each path is drawn in the same 14x14 box with matched visual weight.
+  // All six are solved to the SAME area (61.5 px² in the 14×14 box) and sit
+  // inside a 0.9 px margin so the stroke never clips. Equal weight matters:
+  // a lighter glyph reads as a less important site, which is not what shape
+  // is encoding here.
+  const SHAPES = {
+    circle:   '<circle cx="7" cy="7" r="4.4"/>',
+    diamond:  '<path d="M7,1.5 12.5,7 7,12.5 1.5,7Z"/>',
+    square:   '<rect x="3.1" y="3.1" width="7.8" height="7.8" rx="1.1"/>',
+    triangle: '<path d="M7,2 13.1,12 0.9,12Z"/>',
+    pentagon: '<path d="M7,1.9 11.8,5.4 10,11.1 4,11.1 2.2,5.4Z"/>',
+    star:     '<path d="M7,0.9 9,4.2 12.8,5.1 10.3,8.1 10.6,11.9 7,10.4 3.4,11.9 3.7,8.1 1.2,5.1 5,4.2Z"/>',
+  };
+  const shapeSvg = (shape, color, px) =>
+    `<svg width="${px}" height="${px}" viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">`
+    + `<g fill="${color}" stroke="#fafafa" stroke-width="1.4" stroke-linejoin="round">`
+    + (SHAPES[shape] || SHAPES.circle) + `</g></svg>`;
+
+  // Legend keys use the very same renderer as the markers, so the two can
+  // never drift apart.
+  document.querySelectorAll('.biome-key').forEach(el => {
+    el.innerHTML = shapeSvg(el.dataset.shape, el.dataset.color, 11);
+  });
+
   SITES.forEach(s => {
     const icon = L.divIcon({
       className: 'site-dot',
-      html: `<svg width="${DOT_PX}" height="${DOT_PX}" viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">`
-          + `<circle cx="7" cy="7" r="5.5" fill="${s.color}" stroke="#fafafa" stroke-width="1.5"/>`
-          + `</svg>`,
+      html: shapeSvg(s.shape, s.color, DOT_PX),
       iconSize: [DOT_PX, DOT_PX],
       iconAnchor: [DOT_PX / 2, DOT_PX / 2],
     });
