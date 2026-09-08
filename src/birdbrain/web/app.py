@@ -331,15 +331,21 @@ _SINGLETON_LOCKS: list = []
 # in under the normal-vision floor, so those two fold into one dry-country
 # family rather than ship a pair readers cannot separate.
 #
-# What this palette clears on the dark basemap (#19191a — Esri's dark canvas
-# is really a mid grey, so the tile pane is darkened in CSS; all pairs): lightness
-# band, chroma floor, contrast, and the normal-vision floor at deltaE 19.8 --
-# the hard gate, which the previous hand-picked palette failed at 5.3 with two
-# site colours indistinguishable to *everyone*. Colour-blind separation is 5.8
-# against a 6.0 floor, up from 0.4, and the shape channel covers the rest.
-# The dark basemap is doing real work here: on the old light tiles the same
-# hues scored 15.3 and 5.2 with a contrast warning, and on the tiles at their
-# native mid grey two of the five dropped under 3:1.
+# What this palette clears on the dark basemap, measured against the ground as
+# it actually renders (land #232324, sea #131315 -- Esri's canvas is a mid grey
+# that the tile pane darkens; all pairs): lightness band, chroma floor, and the
+# normal-vision floor at deltaE 19.8 -- the hard gate, which the previous
+# hand-picked palette failed at 5.3 with two site colours indistinguishable to
+# *everyone*. Colour-blind separation is 5.8 against a 6.0 floor, up from 0.4,
+# and the shape channel covers the rest. The dark basemap is doing real work:
+# on the old light tiles the same hues scored 15.3 and 5.2.
+#
+# One accepted warning: highland violet is 2.76:1 over land, just under 3:1.
+# No violet clears it without leaving the readable lightness band, and the only
+# other lever -- darkening the ground further -- is what made an earlier attempt
+# an unreadable murk with no visible coastline. The relief the rule asks for is
+# present and then some: every marker carries a 1.4 px white stroke, a hover
+# tooltip naming the site, a click popup, and a legend.
 #
 # Adding a site: put it in SITE_BIOME under the right family. It gets a colour
 # and a shape automatically — no new hex to pick, and nothing else shifts.
