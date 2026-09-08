@@ -247,3 +247,33 @@ def test_confidence_filter_carries_into_the_by_site_level(tmp_path):
     _add(db, sci="A", common="Bird", source="Quiet", conf=0.2, n=2)
     html = TestClient(app).get("/review?tab=sites&sci=A&min_conf=0.5").text
     assert _sites_listed(html) == ["Loud"]
+
+
+# --- reaching the review queue from the species page -----------------------
+
+
+def test_the_species_page_links_each_site_to_that_species_review_queue(tmp_path):
+    """The By-site table's site name goes to the site's own page, which answers
+    a different question and loses the species. The row now also carries a
+    review link that keeps both halves."""
+    app, db = _app(tmp_path)
+    _add(db, sci="Otus senegalensis", common="African Scops-Owl", source="Twin Pan", n=3)
+    _add(db, sci="Otus senegalensis", common="African Scops-Owl", source="Timbavati", n=2)
+
+    html = TestClient(app).get("/species/Otus senegalensis").text
+    for site in ("Twin%20Pan", "Timbavati"):
+        assert f"/review?tab=detections&sci=Otus%20senegalensis&source={site}" in html
+    # ...and the site's own page is still one click away.
+    assert "/site/Twin%20Pan" in html
+
+
+def test_that_link_lands_on_only_that_species_at_only_that_site(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="Otus senegalensis", common="African Scops-Owl", source="Twin Pan", n=3)
+    _add(db, sci="Otus senegalensis", common="African Scops-Owl", source="Timbavati", n=2)
+    _add(db, sci="Other sp", common="Other Bird", source="Twin Pan", n=4)
+
+    html = TestClient(app).get(
+        "/review?tab=detections&sci=Otus senegalensis&source=Twin Pan").text
+    assert len(re.findall(r"id=\"audit-\d+\"", html)) == 3
+    assert "Other Bird" not in html.split("<ul")[-1]

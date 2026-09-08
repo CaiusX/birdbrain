@@ -496,6 +496,7 @@
             <th class="text-right font-medium px-5 py-2">Count</th>
             <th class="text-right font-medium px-5 py-2">Max conf</th>
             <th class="text-left font-medium px-5 py-2 hidden md:table-cell">Last seen</th>
+            <th class="text-right font-medium px-5 py-2"><span class="sr-only">Review</span></th>
           </tr>
         </thead>
         <tbody class="divide-y divide-zinc-800">
@@ -508,6 +509,14 @@
               <td class="px-5 py-2 text-zinc-400 hidden md:table-cell tabular-nums">
                 {{ s.last_seen | localtime(tz) }}
                 <span class="text-xs text-zinc-600 ml-1">{{ tz | tz_abbr }}</span>
+              </td>
+              {# Straight into this species' review queue AT this site. The site
+                 name beside it still goes to the site's own page — the two are
+                 different questions, and losing either one costs a detour. #}
+              <td class="px-5 py-2 text-right whitespace-nowrap">
+                <a href="/review?tab=detections&sci={{ scientific | urlencode }}&source={{ s.source | urlencode }}"
+                   class="text-xs text-emerald-400/80 hover:text-emerald-300"
+                   title="review {{ common_name or scientific }} clips from {{ s.source }}">review →</a>
               </td>
             </tr>
           {% endfor %}
