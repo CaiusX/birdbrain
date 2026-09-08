@@ -5156,6 +5156,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if note_tag == "untagged":
             tagged = {n.scientific_name for n in notes if n.tag is not None}
             species = [x for x in species if x["scientific_name"] not in tagged]
+        reviewed = db.reviewed_counts_by_species()
+        for row in species:
+            row["reviewed"] = reviewed.get(row["scientific_name"], 0)
         return {
             "species_rows": species,
             "species_total": len(species),
@@ -5175,6 +5178,46 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "note_tag": note_tag,
                 "order": order,
                 "limit": limit,
+            },
+        }
+
+    def _species_sites_context(
+        sci: str,
+        min_conf: float,
+        max_conf: float,
+    ) -> dict:
+        """The middle step: one species, broken out by site.
+
+        Going straight from "which bird" to a flat list of its clips throws
+        away the thing that usually decides plausibility. African Scops-Owl has
+        100k clips waiting across 36 sites; 48k of them are Twin Pan alone, and
+        knowing that is the difference between reviewing a species and
+        reviewing a species *somewhere*.
+        """
+        _, sources_by_name, _ = _all_sources()
+        sites = db.review_sites_for_species(sci, min_conf=min_conf, max_conf=max_conf)
+        with db.session() as s:
+            common = s.scalar(
+                select(DetectionRow.common_name)
+                .where(DetectionRow.scientific_name == sci)
+                .limit(1)
+            )
+            notes = list(s.scalars(select(SpeciesNoteRow)))
+        return {
+            "site_rows": sites,
+            "focus_species": {"scientific": sci, "common": common or sci},
+            "site_total": sum(x["n"] for x in sites),
+            "note_tag_by_sci": {n.scientific_name: n.tag for n in notes},
+            "status_by_sci": {
+                n.scientific_name: n.conservation_status
+                for n in notes if n.conservation_status
+            },
+            "source_tz": {n: c.timezone for n, c in sources_by_name.items()},
+            "filters": {
+                "source": "", "species": "", "sci": sci,
+                "min_conf": min_conf, "max_conf": max_conf,
+                "label_filter": "unreviewed", "note_tag": "any",
+                "order": "backlog", "limit": 0,
             },
         }
 
@@ -5378,9 +5421,15 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     ) -> HTMLResponse:
         """Unified review surface — merges the old /audition (per-detection)
         and /soundscape (multi-species chunks) into one page with tabs."""
-        if tab not in ("species", "detections", "chunks"):
+        if tab not in ("species", "sites", "detections", "chunks"):
             tab = "species"
-        if tab == "species":
+        if tab == "sites" and not sci:
+            tab = "species"          # no species to break out — fall back
+        if tab == "sites":
+            ctx = _species_sites_context(
+                sci=sci, min_conf=min_conf, max_conf=max_conf,
+            )
+        elif tab == "species":
             ctx = _species_review_context(
                 source=source,
                 min_conf=min_conf,

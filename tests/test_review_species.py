@@ -31,21 +31,33 @@ def _listed(html: str) -> list[str]:
     species search datalist holding every name ever heard, so a naive
     ``"X" in html`` is true for species the queue is not offering at all.
     """
-    return re.findall(r"tab=detections&(?:amp;)?sci=([^\"&]+)", html)
+    return re.findall(r"tab=(?:sites|detections)&(?:amp;)?sci=([^\"&]+)", html)
+
+
+_seq = iter(range(1, 100_000))
 
 
 def _add(db, *, sci, common, source="Cam", conf=0.8, n=1, clip=True, label=None, at=None):
+    """Add ``n`` detections. ``label`` marks only the rows this call creates —
+    labelling every row of the species instead would quietly make a test that
+    mixes reviewed and unreviewed clips of one bird impossible to write."""
     base = at or datetime.now(UTC)
-    for i in range(n):
+    made = []
+    for _ in range(n):
+        k = next(_seq)
+        started = base + timedelta(seconds=3 * k)
         db.insert_detections(
-            [Detection(source_name=source, started_at=base + timedelta(seconds=3 * i),
-                       duration_s=3.0, scientific_name=sci, common_name=common,
-                       confidence=conf)],
-            clip_path=f"/clips/{sci}-{source}-{i}.ogg" if clip else None,
+            [Detection(source_name=source, started_at=started, duration_s=3.0,
+                       scientific_name=sci, common_name=common, confidence=conf)],
+            clip_path=f"/clips/{sci}-{source}-{k}.ogg" if clip else None,
         )
+        made.append(started)
     if label:
         with db.session() as s, s.begin():
-            for row in s.query(DetectionRow).filter(DetectionRow.scientific_name == sci):
+            for row in s.query(DetectionRow).filter(
+                DetectionRow.scientific_name == sci,
+                DetectionRow.started_at.in_(made),
+            ):
                 row.label = label
 
 
@@ -150,3 +162,88 @@ def test_legacy_audition_still_lands_on_the_flat_list(tmp_path):
     r = TestClient(app).get("/audition", follow_redirects=False)
     assert r.status_code == 302
     assert "tab=detections" in r.headers["location"]
+
+
+# --- reviewed counts, and the by-site level -------------------------------
+
+
+def _sites_listed(html: str) -> list[str]:
+    """Site names the by-site level lists, read off the drill-through links."""
+    return re.findall(
+        r"tab=detections&(?:amp;)?sci=[^\"&]+&(?:amp;)?source=([^\"&]+)", html
+    )
+
+
+def test_the_species_index_shows_how_many_are_already_done(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", n=4)
+    _add(db, sci="A", common="Bird", n=3, label="good")   # already reviewed
+    assert db.reviewed_counts_by_species() == {"A": 3}
+    row = next(r for r in db.review_species_summary() if r["scientific_name"] == "A")
+    assert row["n"] == 4                                   # waiting excludes the done ones
+    html = TestClient(app).get("/review").text
+    assert "3 done" in html
+
+
+def test_a_species_nobody_has_touched_shows_no_done_count(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", n=2)
+    assert db.reviewed_counts_by_species() == {}
+    assert "done" not in TestClient(app).get("/review").text
+
+
+def test_clicking_a_species_lands_on_its_sites_not_its_clips(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", n=5)
+    _add(db, sci="A", common="Bird", source="Cam2", n=2)
+    html = TestClient(app).get("/review").text
+    assert "tab=sites&sci=A" in html
+
+    sites = TestClient(app).get("/review?tab=sites&sci=A").text
+    assert _sites_listed(sites) == ["Cam1", "Cam2"]        # busiest site first
+    assert "Bird" in sites and "all species" in sites
+
+
+def test_the_by_site_level_reports_each_sites_share(tmp_path):
+    _, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", conf=0.4, n=5)
+    _add(db, sci="A", common="Bird", source="Cam2", conf=0.9, n=1)
+    rows = db.review_sites_for_species("A")
+    assert [r["source_name"] for r in rows] == ["Cam1", "Cam2"]
+    assert rows[0]["n"] == 5 and rows[1]["n"] == 1
+    assert rows[1]["min_conf"] == 0.9
+
+
+def test_a_site_row_opens_that_species_at_that_site(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", n=2)
+    _add(db, sci="A", common="Bird", source="Cam2", n=3)
+    html = TestClient(app).get("/review?tab=detections&sci=A&source=Cam2").text
+    assert len(re.findall(r"id=\"audit-\d+\"", html)) == 3
+
+
+def test_choosing_a_site_first_skips_the_by_site_step(tmp_path):
+    """With a site already picked there is nothing left to break out, so the
+    species row should go straight to the clips."""
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", n=2)
+    html = TestClient(app).get("/review?tab=species&source=Cam1").text
+    assert "tab=detections&sci=A" in html
+    assert "tab=sites&sci=A" not in html
+
+
+def test_the_by_site_level_needs_a_species(tmp_path):
+    """/review?tab=sites with nothing to break out falls back rather than 500s."""
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", n=1)
+    r = TestClient(app).get("/review?tab=sites")
+    assert r.status_code == 200
+    assert "By species" in r.text
+
+
+def test_confidence_filter_carries_into_the_by_site_level(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Loud", conf=0.9, n=2)
+    _add(db, sci="A", common="Bird", source="Quiet", conf=0.2, n=2)
+    html = TestClient(app).get("/review?tab=sites&sci=A&min_conf=0.5").text
+    assert _sites_listed(html) == ["Loud"]

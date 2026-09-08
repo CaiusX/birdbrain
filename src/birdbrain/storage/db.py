@@ -214,6 +214,15 @@ class Database:
                 "scientific_name, confidence, source_name, started_at, common_name",
                 "label IS NULL AND clip_path IS NOT NULL",
             ),
+            # The mirror image: rows someone HAS reviewed. Only ~500 of 1.9M,
+            # but without it "how many of this species are done" scans a
+            # full-table index for 2.5 s to count a few hundred rows.
+            (
+                "ix_det_reviewed",
+                "detections",
+                "scientific_name",
+                "label IS NOT NULL",
+            ),
         ]
         # Indexes that have been superseded by something better. Dropped here
         # so old deployments don't drag along a redundant index forever.
@@ -1476,6 +1485,47 @@ class Database:
         if note_tags is not None:
             out = [d for d in out if d["scientific_name"] in note_tags]
         return out
+
+    def reviewed_counts_by_species(self) -> dict[str, int]:
+        """``{scientific_name: clips already labelled}``. Served by
+        ``ix_det_reviewed``; the planner finds it without a hint because the
+        partial index is so much smaller than the alternatives."""
+        with self._Session() as s:
+            rows = s.execute(text(
+                "SELECT scientific_name, count(*) AS n FROM detections "
+                "WHERE label IS NOT NULL GROUP BY scientific_name"
+            )).all()
+        return {sci: int(n) for sci, n in rows}
+
+    def review_sites_for_species(
+        self,
+        scientific_name: str,
+        *,
+        min_conf: float = 0.0,
+        max_conf: float = 1.0,
+    ) -> list[dict]:
+        """One row per site holding unreviewed clips of this species — the
+        middle step between "which bird" and "which clip". A species on 39
+        sites is 39 different soundscapes, and which site a call came from is
+        usually the thing that decides whether it is plausible."""
+        sql = """
+            SELECT source_name,
+                   count(*)        AS n,
+                   min(confidence) AS min_conf,
+                   max(confidence) AS max_conf,
+                   max(started_at) AS last_at
+              FROM detections INDEXED BY ix_det_review_queue
+             WHERE label IS NULL AND clip_path IS NOT NULL
+               AND scientific_name = :sci
+               AND confidence >= :min_conf AND confidence <= :max_conf
+          GROUP BY source_name
+          ORDER BY n DESC
+        """
+        with self._Session() as s:
+            rows = s.execute(text(sql), {
+                "sci": scientific_name, "min_conf": min_conf, "max_conf": max_conf,
+            }).mappings().all()
+        return [dict(r) for r in rows]
 
     def review_backlog_total(self, source: str | None = None) -> int:
         """Clips that can actually be reviewed: unlabelled AND still holding
