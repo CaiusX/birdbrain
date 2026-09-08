@@ -67,12 +67,25 @@
            class="absolute top-0 bottom-0 w-px bg-emerald-300 shadow-[0_0_6px_2px_rgba(110,231,183,0.7)] pointer-events-none"
            style="left: 0%; display: none;"></div>
       {# Frequency axis: the image is rendered 80 Hz–12 kHz on a log scale
-         (ffmpeg start=80:stop=12000, legend off), so label the bottom/top
-         edges. pointer-events-none keeps click-to-seek working. #}
+         (ffmpeg start=80:stop=12000, legend off). Two edge labels alone are
+         nearly two decades apart, so the gridlines below give the eye
+         something to measure against — and the call descriptions in the note
+         cite bands ("1.5–3.5 kHz"), which is only checkable if the axis is
+         readable. Drawn in JS from FREQ_GRID so the lines and the hover
+         readout can never disagree about where a frequency sits.
+         pointer-events-none keeps click-to-seek working. #}
+      <div id="spec-modal-grid" class="absolute inset-0 pointer-events-none select-none"></div>
       <span class="absolute left-1 top-0.5 text-[10px] font-medium text-white/85 tabular-nums
                    drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none select-none">12&nbsp;kHz</span>
       <span class="absolute left-1 bottom-0.5 text-[10px] font-medium text-white/85 tabular-nums
                    drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)] pointer-events-none select-none">80&nbsp;Hz</span>
+      {# Cursor readout: frequency and time under the pointer. #}
+      <div id="spec-modal-crosshair"
+           class="absolute inset-x-0 h-px bg-white/45 pointer-events-none hidden"></div>
+      <div id="spec-modal-cursor"
+           class="absolute z-10 px-1.5 py-0.5 rounded bg-zinc-950/90 border border-zinc-700
+                  text-[11px] tabular-nums text-zinc-100 pointer-events-none hidden
+                  whitespace-nowrap"></div>
     </div>
     <div id="spec-modal-locator-legend"
          class="hidden mt-2 flex items-center gap-3 flex-wrap text-[11px] text-zinc-400">
@@ -309,6 +322,9 @@
   const audio    = document.getElementById('spec-modal-audio');
   const playhead = document.getElementById('spec-modal-playhead');
   const specEl   = document.getElementById('spec-modal-spec');
+  const gridEl   = document.getElementById('spec-modal-grid');
+  const crossEl  = document.getElementById('spec-modal-crosshair');
+  const cursorEl = document.getElementById('spec-modal-cursor');
   const speciesEl = document.getElementById('spec-modal-species');
   const sciEl     = document.getElementById('spec-modal-scientific');
   const metaEl   = document.getElementById('spec-modal-meta');
@@ -885,11 +901,46 @@
   // play. Only one section loops at a time — clicking another chip switches.
   let loopRange = null;
 
+  // The rendered axis. Fixed by the ffmpeg filter in app.py
+  // (SPEC_FILTER_BASE: start=80:stop=12000, fscale=log) — if that changes,
+  // change these two together or every overlay silently lies.
+  const SPEC_LO_HZ = 80, SPEC_HI_HZ = 12000;
+  // Round decade/octave marks inside the band, low enough to matter for birds.
+  const FREQ_GRID = [200, 500, 1000, 2000, 4000, 8000];
+
   function _freqToYPct(f, loHz, hiHz) {
     // Spectrogram uses log frequency axis; bottom = loHz, top = hiHz.
     // Return % from the top edge.
     const t = (Math.log(f) - Math.log(loHz)) / (Math.log(hiHz) - Math.log(loHz));
     return (1 - Math.max(0, Math.min(1, t))) * 100;
+  }
+
+  function _yPctToFreq(pct, loHz, hiHz) {
+    // Inverse of _freqToYPct: 0% is the top of the image (hiHz).
+    const t = 1 - Math.max(0, Math.min(1, pct / 100));
+    return Math.exp(Math.log(loHz) + t * (Math.log(hiHz) - Math.log(loHz)));
+  }
+
+  function _fmtHz(f) {
+    return f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz`
+                     : `${Math.round(f)} Hz`;
+  }
+
+  function drawFreqGrid() {
+    gridEl.innerHTML = '';
+    for (const f of FREQ_GRID) {
+      const y = _freqToYPct(f, SPEC_LO_HZ, SPEC_HI_HZ);
+      const line = document.createElement('div');
+      line.className = 'absolute inset-x-0 border-t border-dashed border-white/20';
+      line.style.top = y + '%';
+      const tag = document.createElement('span');
+      tag.className = 'absolute right-1 -translate-y-1/2 text-[9px] tabular-nums '
+                    + 'text-white/60 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]';
+      tag.style.top = y + '%';
+      tag.textContent = f >= 1000 ? `${f / 1000}k` : f;
+      gridEl.appendChild(line);
+      gridEl.appendChild(tag);
+    }
   }
 
   async function loadLocators(detectionId) {
@@ -1359,6 +1410,32 @@
     tick();
   });
 
+  // Cursor readout. The frequency half works with no audio loaded; the time
+  // half only once a duration is known, so it is appended rather than assumed.
+  specEl.addEventListener('mousemove', (e) => {
+    const rect = specEl.getBoundingClientRect();
+    if (!rect.height) return;
+    const yPct = (e.clientY - rect.top) / rect.height * 100;
+    const xFrac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    let label = _fmtHz(_yPctToFreq(yPct, SPEC_LO_HZ, SPEC_HI_HZ));
+    if (audio.duration) label += ` · ${(xFrac * audio.duration).toFixed(1)} s`;
+    cursorEl.textContent = label;
+    crossEl.style.top = (e.clientY - rect.top) + 'px';
+    crossEl.classList.remove('hidden');
+    cursorEl.classList.remove('hidden');
+    // Keep the chip inside the image: flip it left of the cursor near the
+    // right edge, and below the line near the top.
+    const cw = cursorEl.offsetWidth || 90, ch = cursorEl.offsetHeight || 20;
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    cursorEl.style.left = (x + 12 + cw > rect.width ? x - cw - 12 : x + 12) + 'px';
+    cursorEl.style.top = (y - ch - 8 < 0 ? y + 10 : y - ch - 8) + 'px';
+  });
+  const _hideCursor = () => {
+    crossEl.classList.add('hidden');
+    cursorEl.classList.add('hidden');
+  };
+  specEl.addEventListener('mouseleave', _hideCursor);
+
   specEl.addEventListener('click', (e) => {
     if (!audio.duration) return;
     const rect = specEl.getBoundingClientRect();
@@ -1420,8 +1497,12 @@
 
   // Header × and the Close button in the verdict bar both dismiss the modal.
   dialog.querySelectorAll('[data-spec-close]').forEach((b) => b.addEventListener('click', closeIt));
-  dialog.addEventListener('close',  () => { audio.pause(); stopTick(); });
+  dialog.addEventListener('close',  () => { audio.pause(); stopTick(); _hideCursor(); });
   dialog.addEventListener('cancel', closeIt);
   dialog.addEventListener('click', (e) => { if (e.target === dialog) closeIt(); });
+
+  // The axis never changes, so the gridlines are drawn once rather than on
+  // every open.
+  drawFreqGrid();
 })();
 </script>
