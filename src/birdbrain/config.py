@@ -83,6 +83,15 @@ class AppConfig(UnitConfig):
     # network access to Wikipedia (no API key).
     media_cache_enabled: bool = True
     notes_model: str = "claude-haiku-4-5"
+    # Call descriptions get their own, stronger model. They are written once per
+    # species and then read for years, and the whole corpus was generated on
+    # Opus 5 — a later species arriving on Haiku would read differently from its
+    # 698 neighbours for no reason anyone could see. Costs a few cents a year at
+    # the rate new species turn up.
+    notes_call_model: str = "claude-opus-5"
+    # Medium effort measured noticeably more precise than low on trial species
+    # (correct mnemonics, tighter frequency bands) for about 40% more output.
+    notes_call_effort: str = "medium"
     notes_tick_seconds: int = 300
     notes_stale_days: int = 7
     notes_min_detections: int = 3

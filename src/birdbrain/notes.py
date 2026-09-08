@@ -684,8 +684,14 @@ def _call_claude(
     model: str,
     client,
     max_tokens: int,
+    effort: str | None = None,
 ) -> str:
     """Single API call. Returns the response text; raises on API error."""
+    kwargs = {}
+    if effort:
+        # output_config, not a top-level param. Only set when asked for, so the
+        # existing note calls keep their model's default.
+        kwargs["output_config"] = {"effort": effort}
     response = client.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -697,6 +703,7 @@ def _call_claude(
             }
         ],
         messages=[{"role": "user", "content": user_text}],
+        **kwargs,
     )
     text_blocks = [b.text for b in response.content if b.type == "text"]
     return "\n\n".join(t.strip() for t in text_blocks if t.strip())
@@ -795,8 +802,10 @@ def _call_description_tick(db: Database, cfg: AppConfig, client) -> str | None:
         system_prompt=call_description_system_prompt(),
         user_text=f"Describe the call of {common} ({sci}).",
         client=client,
-        model=cfg.notes_model,
-        max_tokens=200,
+        model=cfg.notes_call_model,
+        max_tokens=2000,          # room for adaptive thinking, which is on by
+                                  # default on Opus 5; the visible answer is ~60 words
+        effort=cfg.notes_call_effort,
     )
     if not text_:
         return None
