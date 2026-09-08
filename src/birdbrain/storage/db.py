@@ -1579,6 +1579,20 @@ class Database:
                 .limit(1)
             )
 
+    def sites_for_species(self, scientific_name: str) -> list[str]:
+        """Every site this species has been recorded at, alphabetically.
+
+        Served by ix_det_species_time. Used to narrow the review page's site
+        filter once a species is chosen: offering all 44 sites when the bird
+        has only ever been heard at 12 of them means most of the menu leads to
+        an empty list."""
+        with self._Session() as s:
+            rows = s.execute(text(
+                "SELECT DISTINCT source_name FROM detections "
+                " WHERE scientific_name = :sci ORDER BY source_name"
+            ), {"sci": scientific_name}).scalars().all()
+        return list(rows)
+
     def set_species_call_description(self, scientific_name: str, text_: str) -> None:
         """Store the call description, creating a minimal note row if needed —
         same shape as the confidence floor and retention overrides."""

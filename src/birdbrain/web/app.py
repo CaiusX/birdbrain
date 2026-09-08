@@ -4997,6 +4997,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             rows = list(s.scalars(stmt.limit(limit)))
 
             all_sources, all_species = _review_dropdowns()
+            if sci:
+                # Drilled into one species: only offer sites it has actually
+                # been recorded at. The full roster would be mostly dead ends —
+                # African Scops-Owl is on 36 of 44 sites, Cape Robin-Chat on 18.
+                all_sources = _sites_for_species_cached(sci) or all_sources
             # Counts for the filter chips. Per-user when logged in (their own
             # tallies; unreviewed = clips they haven't scored), else consensus.
             label_counts, your_labels = _review_counts(s, user_id, rows)
@@ -5069,6 +5074,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 .order_by(DetectionRow.common_name)
             ))
         return sources, species
+
+    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=256)
+    def _sites_for_species_cached(scientific_name: str) -> list[str]:
+        """Sites holding this species. Same reasoning as the dispersion cache —
+        which sites a species has been heard at over months does not change
+        between one clip and the next."""
+        return db.sites_for_species(scientific_name)
 
     @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=256)
     def _species_dispersion_cached(scientific_name: str) -> dict:

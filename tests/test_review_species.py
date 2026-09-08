@@ -277,3 +277,42 @@ def test_that_link_lands_on_only_that_species_at_only_that_site(tmp_path):
         "/review?tab=detections&sci=Otus senegalensis&source=Twin Pan").text
     assert len(re.findall(r"id=\"audit-\d+\"", html)) == 3
     assert "Other Bird" not in html.split("<ul")[-1]
+
+
+def test_the_site_filter_narrows_to_sites_holding_the_species(tmp_path):
+    """Offering the whole roster once a species is chosen makes most of the
+    menu a dead end — pick a site the bird has never been heard at and the
+    queue comes back empty."""
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Everywhere", source="Cam1", n=2)
+    _add(db, sci="A", common="Everywhere", source="Cam2", n=2)
+    _add(db, sci="B", common="Elsewhere", source="Cam3", n=2)
+
+    def sites(html):
+        block = re.search(r'<select name="source".*?</select>', html, re.S).group(0)
+        return re.findall(r'<option value="([^"]+)"', block)
+
+    c = TestClient(app)
+    assert sites(c.get("/review?tab=detections").text) == ["Cam1", "Cam2", "Cam3"]
+    # Drilled into species A, Cam3 is gone — A has never been heard there.
+    assert sites(c.get("/review?tab=detections&sci=A").text) == ["Cam1", "Cam2"]
+    assert sites(c.get("/review?tab=detections&sci=B").text) == ["Cam3"]
+
+
+def test_a_species_with_no_sites_falls_back_rather_than_emptying_the_filter(tmp_path):
+    """An unknown species should not leave the operator with a filter that
+    offers nothing at all."""
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", n=1)
+    html = TestClient(app).get("/review?tab=detections&sci=Nothing here").text
+    block = re.search(r'<select name="source".*?</select>', html, re.S).group(0)
+    assert re.findall(r'<option value="([^"]+)"', block) == ["Cam1"]
+
+
+def test_sites_for_species_is_scoped_and_sorted(tmp_path):
+    _, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Zulu", n=1)
+    _add(db, sci="A", common="Bird", source="Alpha", n=1)
+    _add(db, sci="B", common="Other", source="Mike", n=1)
+    assert db.sites_for_species("A") == ["Alpha", "Zulu"]
+    assert db.sites_for_species("Nothing") == []
