@@ -128,11 +128,12 @@
    data-* with an empty-string fallback and fetches the rest by detection
    id, so callers pass whatever metadata they have. `cls` controls
    display/width (e.g. "block w-full" or "inline-block w-44 align-middle"). #}
-{% macro spectrogram_clip(id, confidence=None, common='', scientific='', meta='', label='', suggested='', sound_rating='', palette='fire', cls='block w-full') -%}
+{% macro spectrogram_clip(id, confidence=None, common='', scientific='', meta='', label='', suggested='', sound_rating='', palette='fire', cls='block w-full', source='') -%}
   <button type="button" data-spectrogram-trigger
           data-detection-id="{{ id }}"
           data-species="{{ common }}"
           data-scientific="{{ scientific }}"
+          data-source="{{ source }}"
           data-meta="{{ meta }}"
           data-label="{{ label }}"
           data-suggested="{{ suggested }}"

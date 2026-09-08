@@ -125,6 +125,16 @@ class SpeciesNoteRow(Base):
     # Hadada Ibis) whose thousands of clips a month teach nobody anything;
     # the retention sweep still keeps that species' representative set.
     clip_retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # What the bird sounds like, in a couple of sentences — pitch, rhythm,
+    # timbre, and what it gets confused with. Written for someone staring at a
+    # spectrogram deciding whether this clip is that bird, which is a different
+    # question from the one ``note`` answers (why our network is detecting it
+    # the way it is). Kept separate so the audition pane can show the useful
+    # half without the several-paragraph narrative.
+    call_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    call_description_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Provenance for AI-generated notes. NULL = curated/manual note (or no
     # note yet). When present, the background notes worker is allowed to

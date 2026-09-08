@@ -441,6 +441,31 @@ Output the explanation as plain text, nothing else."""
 # Anthropic's prompt cache keeps hitting.
 
 
+_CALL_PROMPT = """\
+You describe bird vocalisations for someone auditioning spectrograms.
+
+They are looking at a 6-second clip and one question: is this that bird?
+They can see the spectrogram and hear the audio. They cannot see the bird.
+
+Write 2 short sentences, 35-55 words total:
+  1. What the call sounds like — pitch or frequency band, rhythm, timbre,
+     phrase length, and how it repeats. Concrete and acoustic. "A hollow
+     two-note hoo-poo around 700 Hz, repeated every few seconds" beats
+     "a distinctive call".
+  2. What it is most confused with on a spectrogram, and the one feature
+     that separates them. If nothing is commonly confused with it, say what
+     makes it unmistakable instead.
+
+Plain prose, no markdown, no bullet points, no preamble. Do not name the
+species again — the reader already knows which bird they are looking at.
+Do not mention our sites, our detections, or BirdNET.
+"""
+
+
+def call_description_system_prompt() -> str:
+    return _CALL_PROMPT
+
+
 def species_system_prompt(sites_context: str) -> str:
     return _SPECIES_PROMPT_TEMPLATE.format(sites_context=sites_context)
 
@@ -752,6 +777,31 @@ def _species_tick(
         chars=len(note_text),
         detections=evidence["detection_count"],
     )
+    return sci
+
+
+def _call_description_tick(db: Database, cfg: AppConfig, client) -> str | None:
+    """Give one species a call description. Costs a single short completion,
+    and only ever runs for species that have none — this is reference material
+    about the bird, not a reading of our data, so it does not go stale and is
+    never regenerated."""
+    sci = db.pick_species_missing_call_description(
+        min_detections=cfg.notes_min_detections,
+    )
+    if sci is None:
+        return None
+    common = db.common_name_for(sci) or sci
+    text_ = _call_claude(
+        system_prompt=call_description_system_prompt(),
+        user_text=f"Describe the call of {common} ({sci}).",
+        client=client,
+        model=cfg.notes_model,
+        max_tokens=200,
+    )
+    if not text_:
+        return None
+    db.set_species_call_description(sci, text_.strip())
+    log.info("notes.call_described", species=sci, chars=len(text_))
     return sci
 
 
@@ -1218,6 +1268,10 @@ def _worker_loop(
                 # ticks the combined rate is well within budget.
                 _species_tick(db, cfg, sources, client)
                 _species_site_tick(db, cfg, sources, client)
+                # Call descriptions are the audition pane's half of the work
+                # and are written once per species, so this backlog drains and
+                # then costs nothing.
+                _call_description_tick(db, cfg, client)
             # A tick that completed without raising means the worker is alive
             # and (if it did any work) the API is reachable — clear any stale
             # error so a recovery shows up on the health panel immediately.

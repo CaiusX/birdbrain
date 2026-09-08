@@ -5070,6 +5070,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             ))
         return sources, species
 
+    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=256)
+    def _species_dispersion_cached(scientific_name: str) -> dict:
+        """Per-species site spread. Up to ~300 ms for an abundant species, and
+        the audition pane asks for it on every clip opened — but where a
+        species has been heard over months does not move between two clips."""
+        return db.species_dispersion(scientific_name)
+
     def _review_counts(s, user_id: int | None, rows: list) -> tuple[dict, dict]:
         """(label tallies, this user's labels for the rows on screen).
 
@@ -6997,11 +7004,30 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "scientific_name": row.scientific_name,
                 "common_name": row.common_name,
                 "note": row.note,
+                "call_description": row.call_description,
                 "tag": row.tag,
                 "min_confidence": row.min_confidence,
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
         )
+
+    @app.get("/api/species/{scientific_name:path}/audition-context")
+    def species_audition_context(scientific_name: str) -> JSONResponse:
+        """What the audition pane needs: what the bird sounds like, and where
+        it has been heard.
+
+        Deliberately not the species note. That note explains why the network
+        is detecting a species the way it is, in a few paragraphs — good
+        reading on the species page, and the wrong thing to put in front of
+        someone holding one 6-second clip and asking "is this that bird, here".
+        """
+        row = db.get_species_note(scientific_name)
+        return JSONResponse({
+            "scientific_name": scientific_name,
+            "call_description": (row.call_description if row else None) or "",
+            "tag": row.tag if row else None,
+            "dispersion": _species_dispersion_cached(scientific_name),
+        })
 
     @app.post("/api/species_notes/{scientific_name:path}")
     async def post_species_note(request: Request, scientific_name: str) -> JSONResponse:

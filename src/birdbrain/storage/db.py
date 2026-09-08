@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
@@ -39,20 +40,20 @@ from birdbrain.storage.models import (
     Base,
     ClaimCodeRow,
     DailyBriefRow,
-    DetectionScoreRow,
-    HighlightIntervalRow,
-    PlaybackStateRow,
     DetectionRow,
+    DetectionScoreRow,
     DeviceRow,
+    HighlightIntervalRow,
     PageViewRow,
+    PlaybackStateRow,
     RuntimeSourceRow,
-    UserRow,
     SiteNoteRow,
     SourceDisableRow,
     SourceStateRow,
     SpeciesNoteRow,
     SpeciesSiteNoteRow,
     SpeciesSuppressionRow,
+    UserRow,
     WeatherObservationRow,
     WorkerDowntimeRow,
     WorkerHeartbeatRow,
@@ -129,7 +130,7 @@ class Database:
             from sqlalchemy import event
 
             @event.listens_for(self.engine, "connect")
-            def _sqlite_pragmas(dbapi_conn, _record):  # noqa: ANN001
+            def _sqlite_pragmas(dbapi_conn, _record):
                 cur = dbapi_conn.cursor()
                 cur.execute("PRAGMA journal_mode=WAL")
                 cur.execute("PRAGMA synchronous=NORMAL")
@@ -179,6 +180,8 @@ class Database:
             ("audio_quality_metrics", "band_hz_high", "INTEGER"),
             ("runtime_sources", "external", "INTEGER DEFAULT 0"),
             ("species_notes", "clip_retention_days", "INTEGER"),
+            ("species_notes", "call_description", "TEXT"),
+            ("species_notes", "call_description_at", "TIMESTAMP"),
         ]
         # Indexes to create on existing tables. ``Base.metadata.create_all``
         # only creates indexes for tables it creates, so any index attached to
@@ -1526,6 +1529,86 @@ class Database:
                 "sci": scientific_name, "min_conf": min_conf, "max_conf": max_conf,
             }).mappings().all()
         return [dict(r) for r in rows]
+
+    def species_dispersion(self, scientific_name: str, top: int = 4) -> dict:
+        """Where this species has actually been heard on our network.
+
+        The audition question is "is this bird plausible *here*", and the
+        species note answers it only in passing, buried in a few paragraphs.
+        This is the same information as a shape: how many sites, which ones
+        carry it, and how much of the total each holds.
+        """
+        with self._Session() as s:
+            rows = s.execute(text(
+                "SELECT source_name, count(*) AS n, "
+                "       max(latitude) AS lat, max(longitude) AS lon "
+                "  FROM detections WHERE scientific_name = :sci "
+                " GROUP BY source_name ORDER BY n DESC"
+            ), {"sci": scientific_name}).mappings().all()
+        if not rows:
+            return {"sites": 0, "total": 0, "top": [], "span_km": None}
+        total = sum(r["n"] for r in rows)
+        pts = [(r["lat"], r["lon"]) for r in rows if r["lat"] is not None and r["lon"] is not None]
+        span = None
+        if len(pts) > 1:
+            lats = [p[0] for p in pts]
+            lons = [p[1] for p in pts]
+            # Rough great-circle extent of the bounding box — enough to say
+            # "one valley" from "half a continent", which is the only
+            # distinction that matters while auditioning.
+            dlat = (max(lats) - min(lats)) * 111.0
+            dlon = (max(lons) - min(lons)) * 111.0 * math.cos(math.radians(sum(lats) / len(lats)))
+            span = round(math.hypot(dlat, dlon))
+        return {
+            "sites": len(rows),
+            "total": total,
+            "span_km": span,
+            "top": [
+                {"source": r["source_name"], "n": r["n"], "share": r["n"] / total}
+                for r in rows[:top]
+            ],
+        }
+
+    def common_name_for(self, scientific_name: str) -> str | None:
+        """The common name BirdNET reports for this species, if we have heard
+        it. Served by ix_det_species_time — one row, not a scan."""
+        with self._Session() as s:
+            return s.scalar(
+                select(DetectionRow.common_name)
+                .where(DetectionRow.scientific_name == scientific_name)
+                .limit(1)
+            )
+
+    def set_species_call_description(self, scientific_name: str, text_: str) -> None:
+        """Store the call description, creating a minimal note row if needed —
+        same shape as the confidence floor and retention overrides."""
+        with self._Session() as s, s.begin():
+            row = s.get(SpeciesNoteRow, scientific_name)
+            if row is None:
+                row = SpeciesNoteRow(
+                    scientific_name=scientific_name, common_name="", note="",
+                    updated_at=datetime.now(UTC),
+                )
+                s.add(row)
+            row.call_description = text_
+            row.call_description_at = datetime.now(UTC)
+
+    def pick_species_missing_call_description(self, min_detections: int = 50) -> str | None:
+        """The species most worth describing next: the one with the largest
+        unreviewed backlog that has no call description yet. Whoever sits down
+        to review meets the biggest pile first, so that is where the help is
+        worth the API call."""
+        with self._Session() as s:
+            return s.scalar(text(
+                "SELECT d.scientific_name FROM detections d INDEXED BY ix_det_review_queue "
+                " WHERE d.label IS NULL AND d.clip_path IS NOT NULL "
+                "   AND d.scientific_name NOT IN ("
+                "        SELECT scientific_name FROM species_notes "
+                "         WHERE call_description IS NOT NULL AND call_description != ''"
+                "   ) "
+                " GROUP BY d.scientific_name HAVING count(*) >= :n "
+                " ORDER BY count(*) DESC LIMIT 1"
+            ), {"n": min_detections})
 
     def review_backlog_total(self, source: str | None = None) -> int:
         """Clips that can actually be reviewed: unlabelled AND still holding

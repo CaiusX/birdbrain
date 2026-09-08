@@ -125,7 +125,20 @@
           edit
         </button>
       </div>
-      <p id="spec-modal-note-text" class="mt-1 whitespace-pre-wrap text-zinc-200 max-h-32 overflow-y-auto pr-1"></p>
+      {# What the bird sounds like. The question in front of the reader is "is
+         this that bird", and the species note answers a different one — why
+         the network detects it the way it does — over several paragraphs. That
+         note stays one click away on the species page. #}
+      <p id="spec-modal-call" class="mt-1 text-zinc-200"></p>
+      {# ...and where it has been heard, because the other half of the question
+         is "here". Concentration matters more than the raw total: a species
+         that is 90% one site is a different proposition at the other 10%. #}
+      <div id="spec-modal-dispersion" class="hidden mt-2 pt-2 border-t border-zinc-800/70">
+        <div class="text-[10px] uppercase tracking-wider text-zinc-500">heard at</div>
+        <div id="spec-modal-dispersion-bars" class="mt-1 space-y-0.5"></div>
+        <div id="spec-modal-dispersion-sum" class="mt-1 text-[11px] text-zinc-500"></div>
+      </div>
+      <p id="spec-modal-note-text" class="hidden"></p>
     </div>
 
     <div id="spec-modal-note-edit-form"
@@ -462,6 +475,7 @@
     null:     ['border-zinc-800',                          'border-zinc-700 text-zinc-400',          'note'],
   };
   let currentSci = null;
+  let currentSource = '';
   let currentId = null;
   let currentLabel = null;
   let currentSuggested = '';
@@ -506,6 +520,10 @@
     currentSuggested = btn.dataset.suggested || '';
     currentSoundRating = parseInt(btn.dataset.soundRating, 10) || null;
     currentSci = btn.dataset.scientific || '';
+    // Which site this clip came from, so the dispersion list can mark it —
+    // "is this bird plausible" is a different question at its stronghold than
+    // at a site holding 1% of its detections.
+    currentSource = btn.dataset.source || '';
     speciesEl.textContent = btn.dataset.species || '';
     // Common name links through to the species page (same scientific-name
     // route the row links use). No sci name → leave it inert.
@@ -550,19 +568,53 @@
     }
   }
 
+  const callEl    = document.getElementById('spec-modal-call');
+  const dispBox   = document.getElementById('spec-modal-dispersion');
+  const dispBars  = document.getElementById('spec-modal-dispersion-bars');
+  const dispSum   = document.getElementById('spec-modal-dispersion-sum');
+
   function applyNoteView(data) {
     const tag = data && data.tag ? data.tag : null;
     const [boxCls, tagCls, tagLabel] = noteTagStyle[tag] || noteTagStyle.null;
-    if (data && data.note) {
-      noteBox.className = 'mb-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40 ' + boxCls;
-      noteTagEl.className = 'uppercase tracking-wider text-[10px] font-medium px-1.5 py-0.5 rounded border ' + tagCls;
-      noteTagEl.textContent = tagLabel;
-      noteTextEl.textContent = data.note;
-      noteBox.classList.remove('hidden');
-      noteTextEl.scrollTop = 0;   // a long note scrolls within its box; start at top
+    const call = (data && data.call_description) || '';
+    const disp = (data && data.dispersion) || null;
+    // The note itself is kept only so the edit button has something to edit;
+    // it is not shown here any more.
+    noteTextEl.textContent = (data && data.note) || '';
+
+    if (!call && !(disp && disp.sites)) { noteBox.classList.add('hidden'); noteForm.classList.add('hidden'); return; }
+    noteBox.className = 'mb-3 rounded border px-3 py-2 text-xs leading-relaxed bg-zinc-950/40 ' + boxCls;
+    noteTagEl.className = 'uppercase tracking-wider text-[10px] font-medium px-1.5 py-0.5 rounded border ' + tagCls;
+    noteTagEl.textContent = tagLabel;
+    callEl.textContent = call || 'No call description yet for this species.';
+    callEl.classList.toggle('text-zinc-500', !call);
+    callEl.classList.toggle('italic', !call);
+
+    dispBars.innerHTML = '';
+    if (disp && disp.sites) {
+      const here = (currentSource || '').trim();
+      for (const t of disp.top) {
+        const pct = Math.round(t.share * 100);
+        const isHere = here && t.source === here;
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2 ' + (isHere ? 'text-emerald-300' : 'text-zinc-400');
+        row.innerHTML =
+          `<span class="w-36 shrink-0 truncate" title="${t.source}">${isHere ? '▸ ' : ''}${t.source}</span>`
+          + `<span class="flex-1 h-1.5 rounded bg-zinc-900 overflow-hidden">`
+          + `<span class="block h-full" style="width:${Math.max(2, pct)}%;background:${isHere ? '#34d399' : '#4d7c0f'}"></span></span>`
+          + `<span class="tabular-nums w-9 text-right">${pct}%</span>`;
+        dispBars.appendChild(row);
+      }
+      const others = disp.sites - disp.top.length;
+      dispSum.textContent =
+        `${disp.total.toLocaleString()} detections · ${disp.sites} site${disp.sites === 1 ? '' : 's'}`
+        + (others > 0 ? ` (${others} more)` : '')
+        + (disp.span_km ? ` · ${disp.span_km.toLocaleString()} km across` : '');
+      dispBox.classList.remove('hidden');
     } else {
-      noteBox.classList.add('hidden');
+      dispBox.classList.add('hidden');
     }
+    noteBox.classList.remove('hidden');
     noteForm.classList.add('hidden');
   }
 
@@ -746,9 +798,13 @@
     noteForm.classList.add('hidden');
     if (!sci) return;
     try {
-      const resp = await fetch(`/api/species_notes/${encodeURIComponent(sci)}`);
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const data = await resp.json();
+      const [noteResp, ctxResp] = await Promise.all([
+        fetch(`/api/species_notes/${encodeURIComponent(sci)}`),
+        fetch(`/api/species/${encodeURIComponent(sci)}/audition-context`),
+      ]);
+      if (!noteResp.ok) throw new Error('HTTP ' + noteResp.status);
+      const data = await noteResp.json();
+      if (ctxResp.ok) Object.assign(data, await ctxResp.json());
       noteBox.dataset.common = common || '';
       applyNoteView(data);
     } catch (e) {

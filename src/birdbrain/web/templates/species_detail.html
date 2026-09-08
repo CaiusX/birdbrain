@@ -20,6 +20,7 @@
           data-detection-id="{{ r.id }}"
           data-species="{{ common_name }}"
           data-scientific="{{ scientific }}"
+          data-source="{{ r.source_name }}"
           data-meta="{{ r.source_name }} · {{ r.started_at | localtime(tz) }} {{ tz | tz_abbr }} · conf {{ '%.2f'|format(r.confidence) }}"
           data-label="{{ r.label or '' }}"
           data-suggested="{{ r.suggested_species or '' }}"
