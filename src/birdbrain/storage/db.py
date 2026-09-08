@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     create_engine,
     delete,
+    desc,
     func,
     or_,
     select,
@@ -1578,6 +1579,35 @@ class Database:
                 .where(DetectionRow.scientific_name == scientific_name)
                 .limit(1)
             )
+
+    def clips_for_export(
+        self,
+        scientific_name: str,
+        source_name: str,
+        *,
+        min_conf: float = 0.0,
+        label_filter: str = "all",
+        limit: int = 500,
+    ) -> list[DetectionRow]:
+        """One species at one site, newest first, for a Raven export. Only rows
+        that still hold audio — a selection table pointing at a pruned clip
+        opens in Raven as an error, not a review."""
+        stmt = (
+            select(DetectionRow)
+            .where(DetectionRow.scientific_name == scientific_name)
+            .where(DetectionRow.source_name == source_name)
+            .where(DetectionRow.clip_path.is_not(None))
+            .where(DetectionRow.confidence >= min_conf)
+        )
+        if label_filter == "unreviewed":
+            stmt = stmt.where(DetectionRow.label.is_(None))
+        elif label_filter in ("good", "bad", "unsure"):
+            stmt = stmt.where(DetectionRow.label == label_filter)
+        stmt = stmt.order_by(desc(DetectionRow.started_at)).limit(limit)
+        with self._Session() as s:
+            rows = list(s.scalars(stmt))
+            s.expunge_all()
+        return rows
 
     def sites_for_species(self, scientific_name: str) -> list[str]:
         """Every site this species has been recorded at, alphabetically.
