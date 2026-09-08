@@ -325,27 +325,24 @@ _SINGLETON_LOCKS: list = []
 # their landscape. So the family carries a SHAPE too, and that is what stays
 # legible without colour.
 #
-# The family count is set by the same arithmetic. On the dark basemap the
-# readable lightness band is narrow (OKLCH L 0.48-0.67), too narrow to hold
-# two distinct warm hues: every amber-desert/gold-grassland pair tested came
-# in under the normal-vision floor, so those two fold into one dry-country
-# family rather than ship a pair readers cannot separate.
+# The family count is set by the same arithmetic. Two distinct warm hues --
+# amber desert and gold grassland -- never cleared the normal-vision floor
+# against each other at any lightness that stayed readable, so they fold into
+# one dry-country family rather than ship a pair readers cannot separate.
+# Folding them turned out to help everywhere, not just where it was forced:
+# five families score better than six did on this same light basemap
+# (normal-vision 19.8 vs 15.3, colour-blind 5.8 vs 5.2).
 #
-# What this palette clears on the dark basemap, measured against the ground as
-# it actually renders (land #232324, sea #131315 -- Esri's canvas is a mid grey
-# that the tile pane darkens; all pairs): lightness band, chroma floor, and the
-# normal-vision floor at deltaE 19.8 -- the hard gate, which the previous
-# hand-picked palette failed at 5.3 with two site colours indistinguishable to
-# *everyone*. Colour-blind separation is 5.8 against a 6.0 floor, up from 0.4,
-# and the shape channel covers the rest. The dark basemap is doing real work:
-# on the old light tiles the same hues scored 15.3 and 5.2.
+# What this palette clears on the OSM basemap (surface #f2efe9, all pairs):
+# lightness band, chroma floor, and the normal-vision floor at deltaE 19.8 --
+# the hard gate, which the previous hand-picked palette failed at 5.3 with two
+# site colours indistinguishable to *everyone*. Colour-blind separation is 5.8
+# against a 6.0 floor, up from 0.4, and the shape channel covers the rest.
 #
-# One accepted warning: highland violet is 2.76:1 over land, just under 3:1.
-# No violet clears it without leaving the readable lightness band, and the only
-# other lever -- darkening the ground further -- is what made an earlier attempt
-# an unreadable murk with no visible coastline. The relief the rule asks for is
-# present and then some: every marker carries a 1.4 px white stroke, a hover
-# tooltip naming the site, a click popup, and a legend.
+# One accepted warning: desert amber is 2.78:1 against the basemap, just under
+# 3:1. The relief the rule asks for is present and then some -- every marker
+# carries a 1.4 px white stroke, a hover tooltip naming the site, a click
+# popup, and a legend.
 #
 # Adding a site: put it in SITE_BIOME under the right family. It gets a colour
 # and a shape automatically — no new hex to pick, and nothing else shifts.

@@ -11,13 +11,6 @@
   /* Dashboard map markers are simple coloured dots (one per site); the
      activity clockface appears in the click popup. */
   .leaflet-marker-icon.site-dot { background: transparent; border: none; }
-  /* Esri's "Dark Gray" canvas is really a MID grey (#3f3f41) — too light for a
-     coloured mark to clear 3:1 against. It ships as two layers, though, so the
-     ground can be darkened, but only so far: the country names and coastlines
-     live in these same tiles, and the first attempt (0.40) crushed them into a
-     murky void with no visible shoreline. 0.55 keeps the cartography legible
-     and still darkens the ground enough for the markers to sit on it. */
-  .leaflet-basemap-pane { filter: brightness(0.55) saturate(0.8); }
   .site-dot svg { filter: drop-shadow(0 1px 3px rgba(0,0,0,0.6)); cursor: pointer; }
   /* The expanded clockface still uses .map-dial inside the popup. */
   .map-dial svg { width: 100% !important; height: 100% !important; max-width: none !important; }
@@ -408,24 +401,9 @@
   // connecting threads. ---
   const map = L.map('map', { scrollWheelZoom: true });
   lockMap(map);
-  // Dark basemap, to match the rest of the page — and it earns its place in
-  // the palette too: on a dark surface the site hues clear every gate that the
-  // light OSM tiles forced them to fail (see BIOMES in app.py). CARTO's
-  // dark_matter is key-free; attribution covers both it and OSM.
-  // Esri's Dark Gray Canvas: a purpose-made dark basemap, no API key. (CARTO's
-  // dark_matter now watermarks every tile with "API KEY REQUIRED" — it looks
-  // key-free right up until you render it.) Note the {z}/{y}/{x} order, which
-  // is Esri's, not the {z}/{x}/{y} the OSM-style URLs use.
-  //
-  // The base layer alone. Esri also ships a "Reference" overlay, but it adds
-  // city labels (Dubai, Accra, Johannesburg) that this map has no use for —
-  // they crowd the site markers and one of them lands on top of the
-  // Johannesburg cluster. The base already carries country names, which is the
-  // only geography a continent-scale cam map needs.
-  map.createPane('basemap');
-  map.getPane('basemap').style.zIndex = 200;
-  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
-    attribution: 'Tiles &copy; Esri', maxZoom: 16, pane: 'basemap',
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap',
+    maxZoom: 18,
   }).addTo(map);
 
   // Pane stack: lines below the default markerPane so dots sit on top of
@@ -443,7 +421,7 @@
     const op = 0.25 + 0.35 * (p.shared / sharedMax);
     L.polyline(
       [[p.lat_a, p.lon_a], [p.lat_b, p.lon_b]],
-      { color: '#34d399', weight: w, opacity: op, pane: 'sharedLines' },
+      { color: '#10b981', weight: w, opacity: op, pane: 'sharedLines' },
     ).bindTooltip(
       `${p.a} ↔ ${p.b} · ${p.shared} shared species (30 d)`,
       { sticky: true, className: 'site-label' },
