@@ -36,6 +36,11 @@ batch_size = 200
 # automatically while a cam's local worker heartbeat is stale — a wedged worker
 # must not be able to report itself healthy.
 #
+# Keep the whole CYCLE under central's staleness cutoff, not just this value:
+# a link's heartbeat is refreshed once per pass, so the worst-case age is one
+# pass plus interval_seconds. node-sync warns ("cycle_too_slow") when that
+# creeps up on the cutoff and names this knob. With ~40 links a 25s interval
+# is already marginal; 10-15s leaves room.
 # Keep this under central's 60s staleness cutoff (web/app.py::_hb_status) or
 # every quiet cam flaps to stale between birds, and a dead cam becomes
 # indistinguishable from a healthy one at a silent waterhole.
@@ -59,6 +64,10 @@ clip_retention_days = 3
 
 # Report this node's host + pipeline health to central's admin page. 0 disables.
 health_seconds = 60
+
+# Mirrors central's staleness cutoff (web/app.py::_hb_status) so the node can
+# warn when a cycle grows past it. 0 mutes the warning.
+central_stale_seconds = 60
 
 
 [[link]]

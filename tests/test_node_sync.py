@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -509,3 +510,98 @@ def test_local_prune_keeps_recent_clips_even_when_acked(tmp_path):
     marks.set_clip(CAM_A, marks.get(CAM_A))
     assert node_sync.prune_uploaded_clips(db, cfg, marks) == 0
     assert all(p.exists() for p in paths)
+
+
+# --- liveness vs bulk -------------------------------------------------------
+
+
+def test_liveness_for_every_link_lands_before_any_clip_upload(tmp_path, monkeypatch):
+    """A link's heartbeat on central is only refreshed when this node posts for
+    it, and central marks a source stale past 60 s. Clip batches are megabytes
+    and take as long as they take, so they must not sit between one cam's
+    heartbeat and the next — that is what made cams flicker between running and
+    stale once clip push was switched on."""
+    db, _ = _db_with_clips(tmp_path, CAM_A, windows=2)
+    _live(db, CAM_A, CAM_B)
+    _db_with_clips(tmp_path / "b", CAM_B, windows=2, clip_dir=tmp_path / "cb")
+    cfg = _cfg(tmp_path, links=[SourceLink(source=CAM_A, unit=CAM_A, token="t1"),
+                                SourceLink(source=CAM_B, unit=CAM_B, token="t2")])
+    order = []
+    def rows_post(url, tok, payload, **k):
+        order.append(("rows", payload["unit"]))
+        return True
+
+    def clips_post(url, tok, manifest, parts, **k):
+        order.append(("clips", manifest["unit"]))
+        return {}
+
+    monkeypatch.setattr(node_sync, "post_batch", rows_post)
+    monkeypatch.setattr(node_sync, "post_clips", clips_post)
+    stop = threading.Event()
+    monkeypatch.setattr(node_sync, "jittered", lambda s: 0.01)
+
+    def run():
+        node_sync.run_node_sync(db, cfg, stop)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    for _ in range(200):
+        if sum(1 for kind, _ in order if kind == "clips") >= 1:
+            break
+        time.sleep(0.02)
+    stop.set()
+    t.join(timeout=5)
+
+    kinds = [k for k, _ in order]
+    first_clip = kinds.index("clips")
+    # Every link's liveness post happens before the first clip upload.
+    assert set(u for k, u in order[:first_clip] if k == "rows") == {CAM_A, CAM_B}
+
+
+def test_a_slow_cycle_says_which_knob_to_turn(tmp_path, monkeypatch):
+    """The failure mode is a config one that looks like a network one, so the
+    warning has to name the setting rather than just report a number."""
+    seen = []
+    monkeypatch.setattr(node_sync.log, "warning", lambda ev, **kw: seen.append((ev, kw)))
+    cfg = _cfg(tmp_path, interval_seconds=25, central_stale_seconds=60)
+    node_sync._warn_if_slow(cfg, work_s=40.0, liveness_s=9.0)   # 65 s cycle
+    assert len(seen) == 1
+    event, kw = seen[0]
+    assert event == "node_sync.cycle_too_slow"
+    assert kw["cycle_s"] == 65.0 and kw["liveness_s"] == 9.0
+    assert "interval_seconds" in kw["action"]
+
+
+def test_a_healthy_cycle_is_silent(tmp_path, monkeypatch):
+    warned = []
+    monkeypatch.setattr(node_sync.log, "warning", lambda *a, **k: warned.append(a))
+    cfg = _cfg(tmp_path, interval_seconds=10, central_stale_seconds=60)
+    node_sync._warn_if_slow(cfg, work_s=12.0, liveness_s=6.0)   # 22 s cycle
+    assert warned == []
+
+
+def test_the_warning_can_be_muted(tmp_path, monkeypatch):
+    warned = []
+    monkeypatch.setattr(node_sync.log, "warning", lambda *a, **k: warned.append(a))
+    cfg = _cfg(tmp_path, interval_seconds=25, central_stale_seconds=0)
+    node_sync._warn_if_slow(cfg, work_s=300.0, liveness_s=200.0)
+    assert warned == []
+
+
+def test_one_links_liveness_failure_does_not_cost_the_others_theirs(tmp_path, monkeypatch):
+    db, _ = _db_with_clips(tmp_path, CAM_A, windows=1)
+    cfg = _cfg(tmp_path)
+    marks = MarkStore(cfg.state_file)
+    calls = []
+
+    def flaky(db_, cfg_, link, marks_, tz, session):
+        calls.append(link.source)
+        if link.source == CAM_A:
+            raise RuntimeError("boom")
+        return 0
+
+    monkeypatch.setattr(node_sync, "sync_link_once", flaky)
+    for link in cfg.links:
+        sessions = {x.source: None for x in cfg.links}
+        node_sync._liveness_once(db, cfg, link, marks, sessions, {}, {})
+    assert calls == [CAM_A, CAM_B]

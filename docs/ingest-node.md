@@ -181,6 +181,15 @@ Smoke-test the link before enabling the timer:
   scientific_name)` and every row carries a stable `client_id`.
 - **A stalled cam is isolated.** Marks are per-source, so one cam bot-gated for
   an hour does not hold back the rest of the roster behind it.
+- **Liveness is a cycle-time budget, not a setting.** Central marks a pushed
+  source stale when its heartbeat passes 60s, and a link's heartbeat is only
+  refreshed when the node posts for it — once per pass. So the whole cycle
+  (walk every link, then wait `interval_seconds`) must finish inside that
+  cutoff. Clip upload runs in a second phase after every link's liveness post,
+  precisely so a megabyte of audio can never sit between one cam's heartbeat
+  and the next. When the cycle still creeps up on the cutoff the node logs
+  `cycle_too_slow` and names the knob; the symptom otherwise is cams flickering
+  between running and stale, which reads like a network fault and is not one.
 - **A wedged worker shows as offline.** Keep-alives are suppressed while a cam's
   local worker heartbeat is stale, so central's ordinary stale-heartbeat logic
   can mark it down. Real backlog still flushes — data captured before a wedge is

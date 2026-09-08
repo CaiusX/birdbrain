@@ -151,6 +151,11 @@ class NodeSyncConfig(BaseModel):
     # (``/ingest/node-health``), for the node pane on central's admin page.
     # 0 disables. Signed with the first link's token.
     health_seconds: int = Field(default=60, ge=0)
+    # Central marks a push-fed source stale when its heartbeat passes this
+    # (web/app.py::_hb_status). The node cannot read that value over the wire,
+    # so it is mirrored here purely to warn when a cycle grows past it. 0 mutes
+    # the check.
+    central_stale_seconds: float = Field(default=60.0, ge=0)
     links: list[SourceLink] = Field(default_factory=list)
 
 
@@ -787,39 +792,94 @@ def run_node_sync(
     )
     try:
         while True:
+            # Phase 1 — liveness. Rows and keep-alives for every link, and
+            # nothing else. Central marks a source stale when its heartbeat is
+            # older than ``central_stale_seconds``, and a link's heartbeat is
+            # only refreshed when this node posts for it, so this phase has to
+            # come round faster than that cutoff. Keeping it separate from the
+            # clip uploads below is what makes that true: liveness costs one
+            # small POST per link (~0.2 s on a LAN), while a clip batch is a
+            # megabyte and takes as long as it takes.
+            cycle_started = time.monotonic()
             for link in cfg.links:
                 if stop_event.is_set():
                     return
-                try:
-                    tz = (timezones or {}).get(link.source)
-                    sent = sync_link_once(db, cfg, link, marks, tz, sessions[link.source])
-                    if sent:
-                        log.info(
-                            "node_sync.flushed",
-                            source=link.source, unit=link.unit,
-                            count=sent, last_synced_id=marks.get(link.source),
-                        )
-                    elif cfg.keepalive_seconds > 0:
-                        _maybe_keepalive(
-                            db, cfg, link, tz, sessions[link.source], keepalive_due, None
-                        )
-                    if cfg.upload_clips:
+                _liveness_once(db, cfg, link, marks, sessions, timezones, keepalive_due)
+            liveness_s = time.monotonic() - cycle_started
+
+            # Phase 2 — bulk. Clips trail their rows and nobody's liveness
+            # depends on them, so they run after every heartbeat is in.
+            if cfg.upload_clips:
+                for link in cfg.links:
+                    if stop_event.is_set():
+                        return
+                    try:
                         _flush_clips(db, cfg, link, marks, sessions[link.source])
-                except Exception:
-                    log.exception(
-                        "node_sync.link_failed", source=link.source, unit=link.unit
-                    )
+                    except Exception:
+                        log.exception(
+                            "node_sync.clips_failed", source=link.source, unit=link.unit
+                        )
             if cfg.health_seconds > 0 and cfg.links and time.monotonic() >= next_health:
                 next_health = time.monotonic() + cfg.health_seconds
                 _report_health(db, cfg, marks, sessions, app_cfg, node_name, version, db_path)
             if cfg.upload_clips and time.monotonic() >= next_prune:
                 next_prune = time.monotonic() + cfg.clip_prune_tick_seconds
                 _sweep(db, cfg, marks)
+            # A link's worst-case heartbeat age on central is one whole cycle.
+            # If that is drifting toward the cutoff the roster has outgrown the
+            # interval, and the symptom — sources flickering between running and
+            # stale — looks like a network fault rather than a config one, so
+            # say plainly which knob to turn.
+            _warn_if_slow(cfg, time.monotonic() - cycle_started, liveness_s)
             if stop_event.wait(jittered(cfg.interval_seconds)):
                 return
     finally:
         for s in sessions.values():
             s.close()
+
+
+def _warn_if_slow(cfg: NodeSyncConfig, work_s: float, liveness_s: float) -> None:
+    """A link's worst-case heartbeat age on central is one whole cycle. If that
+    is drifting toward central's cutoff the roster has outgrown the interval,
+    and the symptom — cams flickering between running and stale — looks like a
+    network fault rather than a config one, so say which knob to turn."""
+    cycle_s = work_s + cfg.interval_seconds
+    if cfg.central_stale_seconds and cycle_s > cfg.central_stale_seconds * 0.8:
+        log.warning(
+            "node_sync.cycle_too_slow",
+            cycle_s=round(cycle_s, 1),
+            liveness_s=round(liveness_s, 1),
+            central_stale_seconds=cfg.central_stale_seconds,
+            links=len(cfg.links),
+            action="central will start marking these cams stale; lower "
+                   "interval_seconds in node.toml",
+        )
+
+
+def _liveness_once(
+    db: Database,
+    cfg: NodeSyncConfig,
+    link: SourceLink,
+    marks: MarkStore,
+    sessions: dict[str, requests.Session],
+    timezones: dict[str, str] | None,
+    keepalive_due: dict[str, float],
+) -> None:
+    """One link's liveness step: push whatever rows it has, or a keep-alive if
+    it has none. Never raises — one cam must not cost the rest their heartbeat."""
+    try:
+        tz = (timezones or {}).get(link.source)
+        sent = sync_link_once(db, cfg, link, marks, tz, sessions[link.source])
+        if sent:
+            log.info(
+                "node_sync.flushed",
+                source=link.source, unit=link.unit,
+                count=sent, last_synced_id=marks.get(link.source),
+            )
+        elif cfg.keepalive_seconds > 0:
+            _maybe_keepalive(db, cfg, link, tz, sessions[link.source], keepalive_due, None)
+    except Exception:
+        log.exception("node_sync.link_failed", source=link.source, unit=link.unit)
 
 
 def _sweep(db: Database, cfg: NodeSyncConfig, marks: MarkStore) -> None:
