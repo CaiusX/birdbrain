@@ -4914,6 +4914,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     def _detections_context(
         source: str | None,
         species: str | None,
+        sci: str | None,
         min_conf: float,
         max_conf: float,
         label_filter: str,
@@ -4948,7 +4949,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             )
             if source:
                 stmt = stmt.where(DetectionRow.source_name == source)
-            if species:
+            if sci:
+                # Exact scientific name — how the species index drills in. The
+                # free-text ``species`` box below stays a substring match.
+                stmt = stmt.where(DetectionRow.scientific_name == sci)
+            elif species:
                 stmt = stmt.where(DetectionRow.common_name.ilike(f"%{species}%"))
             if user_id is not None:
                 # Per-user queue: scored-by-me vs not.
@@ -4991,52 +4996,10 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 stmt = stmt.order_by(desc(DetectionRow.confidence))
             rows = list(s.scalars(stmt.limit(limit)))
 
-            all_sources = list(
-                s.scalars(
-                    select(DetectionRow.source_name)
-                    .group_by(DetectionRow.source_name)
-                    .order_by(DetectionRow.source_name)
-                )
-            )
-            all_species = list(
-                s.scalars(
-                    select(DetectionRow.common_name)
-                    .group_by(DetectionRow.common_name)
-                    .order_by(DetectionRow.common_name)
-                )
-            )
+            all_sources, all_species = _review_dropdowns()
             # Counts for the filter chips. Per-user when logged in (their own
             # tallies; unreviewed = clips they haven't scored), else consensus.
-            your_labels: dict[int, str | None] = {}
-            if user_id is not None:
-                uc = dict(s.execute(
-                    select(DetectionScoreRow.label, func.count())
-                    .where(DetectionScoreRow.user_id == user_id)
-                    .group_by(DetectionScoreRow.label)
-                ).all())
-                scored = sum(uc.values())
-                total_clips = s.scalar(
-                    select(func.count()).select_from(DetectionRow)
-                    .where(DetectionRow.clip_path.is_not(None))
-                ) or 0
-                label_counts = {
-                    "good": uc.get("good", 0), "bad": uc.get("bad", 0),
-                    "unsure": uc.get("unsure", 0),
-                    None: max(0, total_clips - scored),
-                }
-                if rows:
-                    your_labels = dict(s.execute(
-                        select(DetectionScoreRow.detection_id, DetectionScoreRow.label)
-                        .where(DetectionScoreRow.user_id == user_id)
-                        .where(DetectionScoreRow.detection_id.in_([r.id for r in rows]))
-                    ).all())
-            else:
-                label_counts = dict(
-                    s.execute(
-                        select(DetectionRow.label, func.count())
-                        .group_by(DetectionRow.label)
-                    ).all()
-                )
+            label_counts, your_labels = _review_counts(s, user_id, rows)
             # Species → note tag, so each row can encode its palette in the
             # spectrogram URL (browser cache busts on re-tag without a full
             # page reload).
@@ -5060,9 +5023,14 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             },
             "default_palette": SPEC_PALETTE_FOR_TAG[None],
             "source_tz": source_tz,
+            "focus_species": (
+                {"scientific": sci, "common": rows[0].common_name if rows else sci}
+                if sci else None
+            ),
             "filters": {
                 "source": source or "",
                 "species": species or "",
+                "sci": sci or "",
                 "min_conf": min_conf,
                 "max_conf": max_conf,
                 "label_filter": label_filter,
@@ -5077,6 +5045,137 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 "unreviewed": label_counts.get(None, 0),
             },
             "your_labels": your_labels,
+        }
+
+    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=1)
+    def _review_dropdowns() -> tuple[list[str], list[str]]:
+        """(sites, common names) for the review filter dropdowns.
+
+        Both are full scans of ``detections`` — the species one takes 2.1 s on
+        this table, and it was rerun on every page load. That was most of what
+        a species drill-down spent its time on: 3.3 s for a page whose actual
+        query is 2 ms. The roster of names a deployment has ever heard moves on
+        the scale of days, so a few minutes stale is invisible.
+        """
+        with db.session() as s:
+            sources = list(s.scalars(
+                select(DetectionRow.source_name)
+                .group_by(DetectionRow.source_name)
+                .order_by(DetectionRow.source_name)
+            ))
+            species = list(s.scalars(
+                select(DetectionRow.common_name)
+                .group_by(DetectionRow.common_name)
+                .order_by(DetectionRow.common_name)
+            ))
+        return sources, species
+
+    def _review_counts(s, user_id: int | None, rows: list) -> tuple[dict, dict]:
+        """(label tallies, this user's labels for the rows on screen).
+
+        Logged in, the tallies are that tester's own and "unreviewed" means
+        clips they have not scored. Anonymous, they are the consensus — and
+        "unreviewed" has to mean *reviewable* and not yet reviewed. Counting
+        every unlabelled row said 1.93M when only 720k still held audio: 63% of
+        that number was clips retention had already pruned, which can never be
+        auditioned. The good/bad/unsure tallies stay whole-history on purpose,
+        because that work was done even if the clip has since been swept.
+        """
+        if user_id is None:
+            counts = dict(
+                s.execute(
+                    select(DetectionRow.label, func.count()).group_by(DetectionRow.label)
+                ).all()
+            )
+            counts[None] = db.review_backlog_total()
+            return counts, {}
+        uc = dict(s.execute(
+            select(DetectionScoreRow.label, func.count())
+            .where(DetectionScoreRow.user_id == user_id)
+            .group_by(DetectionScoreRow.label)
+        ).all())
+        total_clips = s.scalar(
+            select(func.count()).select_from(DetectionRow)
+            .where(DetectionRow.clip_path.is_not(None))
+        ) or 0
+        counts = {
+            "good": uc.get("good", 0), "bad": uc.get("bad", 0),
+            "unsure": uc.get("unsure", 0),
+            None: max(0, total_clips - sum(uc.values())),
+        }
+        mine: dict[int, str | None] = {}
+        if rows:
+            mine = dict(s.execute(
+                select(DetectionScoreRow.detection_id, DetectionScoreRow.label)
+                .where(DetectionScoreRow.user_id == user_id)
+                .where(DetectionScoreRow.detection_id.in_([r.id for r in rows]))
+            ).all())
+        return counts, mine
+
+    def _note_tag_filter(note_tag: str, notes: list) -> set[str] | None:
+        """Scientific names the note-tag chip allows through, or None for no
+        filter. ``untagged`` is the awkward one: it is the complement of the
+        tagged set, not a set of its own."""
+        if note_tag in ("reliable", "suspect", "rare"):
+            return {n.scientific_name for n in notes if n.tag == note_tag}
+        if note_tag == "untagged":
+            # The complement of "has a tag" over every species, so it cannot be
+            # expressed as an allow-set built from the notes table alone — the
+            # caller inverts it instead.
+            return None
+        return None
+
+    def _species_review_context(
+        source: str | None,
+        min_conf: float,
+        max_conf: float,
+        note_tag: str,
+        order: str,
+        limit: int,
+    ) -> dict:
+        """The species-first view of /review: one row per species awaiting
+        review, not one per detection.
+
+        The flat per-detection list was unusable at this backlog. 720k clips
+        across 695 species averages ~1,000 clips each, and ordering them by
+        confidence meant the first screen was 35 Namaqua Sandgrouse from one
+        site at identical confidence — you could not see what needed attention,
+        only what happened to score highest.
+        """
+        _, sources_by_name, _ = _all_sources()
+        with db.session() as s:
+            notes = list(s.scalars(select(SpeciesNoteRow)))
+        note_tag_by_sci = {n.scientific_name: n.tag for n in notes}
+        status_by_sci = {
+            n.scientific_name: n.conservation_status for n in notes if n.conservation_status
+        }
+        species = db.review_species_summary(
+            source=source or None, min_conf=min_conf, max_conf=max_conf,
+            note_tags=_note_tag_filter(note_tag, notes), limit=limit, order=order,
+        )
+        if note_tag == "untagged":
+            tagged = {n.scientific_name for n in notes if n.tag is not None}
+            species = [x for x in species if x["scientific_name"] not in tagged]
+        return {
+            "species_rows": species,
+            "species_total": len(species),
+            "species_truncated": len(species) >= limit,
+            "backlog_total": db.review_backlog_total(source=source or None),
+            "note_tag_by_sci": note_tag_by_sci,
+            "status_by_sci": status_by_sci,
+            "all_sources": sorted(sources_by_name),
+            "bands": Database.REVIEW_BANDS,
+            "filters": {
+                "source": source or "",
+                "species": "",
+                "sci": "",
+                "min_conf": min_conf,
+                "max_conf": max_conf,
+                "label_filter": "unreviewed",
+                "note_tag": note_tag,
+                "order": order,
+                "limit": limit,
+            },
         }
 
     def _chunks_context(
@@ -5261,10 +5360,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     @app.get("/review", response_class=HTMLResponse)
     def review(
         request: Request,
-        tab: str = Query(default="detections"),
+        tab: str = Query(default="species"),
         # Detection-view filters
         source: str | None = Query(default=None),
         species: str | None = Query(default=None),
+        sci: str | None = Query(default=None),
         min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
         max_conf: float = Query(default=1.0, ge=0.0, le=1.0),
         label_filter: str = Query(default="unreviewed"),
@@ -5278,9 +5378,18 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     ) -> HTMLResponse:
         """Unified review surface — merges the old /audition (per-detection)
         and /soundscape (multi-species chunks) into one page with tabs."""
-        if tab not in ("detections", "chunks"):
-            tab = "detections"
-        if tab == "chunks":
+        if tab not in ("species", "detections", "chunks"):
+            tab = "species"
+        if tab == "species":
+            ctx = _species_review_context(
+                source=source,
+                min_conf=min_conf,
+                max_conf=max_conf,
+                note_tag=note_tag,
+                order=order or "backlog",
+                limit=limit or 800,
+            )
+        elif tab == "chunks":
             ctx = _chunks_context(
                 source=source,
                 min_species=min_species,
@@ -5293,6 +5402,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             ctx = _detections_context(
                 source=source,
                 species=species,
+                sci=sci,
                 min_conf=min_conf,
                 max_conf=max_conf,
                 label_filter=label_filter,

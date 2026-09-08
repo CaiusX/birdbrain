@@ -2,6 +2,7 @@
 {% block title %}BirdBrain · review · {{ tab }}{% endblock %}
 
 {% block content %}
+{% from "_macros.html" import iucn_badge %}
 {# Carry the review source filter through to species pages and the included
    detection rows so a species click lands pre-scoped to the same site. #}
 {% set page_source = filters.source %}
@@ -9,22 +10,138 @@
    spectrogram modal is included once at the bottom of the file. #}
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl">
   <div class="px-5 pt-3 pb-0 border-b border-zinc-800/60 flex items-center gap-1 text-xs">
+    <a href="/review?tab=species{% if filters.source %}&source={{ filters.source }}{% endif %}"
+       class="px-3 py-2 -mb-px border-b-2 {% if tab == 'species' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
+      By species{% if tab == 'species' %}<span class="ml-1 tabular-nums text-zinc-300">{{ species_rows | length }}</span>{% endif %}
+    </a>
     <a href="/review?tab=detections{% if filters.source %}&source={{ filters.source }}{% endif %}"
        class="px-3 py-2 -mb-px border-b-2 {% if tab == 'detections' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
-      Per detection{% if tab == 'detections' %}<span class="ml-1 tabular-nums text-zinc-300">{{ rows | length }}</span>{% endif %}
+      {% if filters.sci %}One species{% else %}All detections{% endif %}{% if tab == 'detections' %}<span class="ml-1 tabular-nums text-zinc-300">{{ rows | length }}</span>{% endif %}
     </a>
     <a href="/review?tab=chunks{% if filters.source %}&source={{ filters.source }}{% endif %}"
        class="px-3 py-2 -mb-px border-b-2 {% if tab == 'chunks' %}border-zinc-100 text-zinc-100{% else %}border-transparent text-zinc-500 hover:text-zinc-300{% endif %}">
       Multi-species chunks{% if tab == 'chunks' %}<span class="ml-1 tabular-nums text-zinc-300">{{ groups | length }}</span>{% endif %}
     </a>
     <span class="ml-auto text-zinc-600 text-[11px] hidden md:inline">
-      {% if tab == 'detections' %}listen → label → keeps it as ground truth
+      {% if tab == 'species' %}pick a species, then listen → label
+      {% elif tab == 'detections' %}listen → label → keeps it as ground truth
       {% else %}distinct species calling in the same 3-second window{% endif %}
     </span>
   </div>
 
-  {% if tab == 'detections' %}
+  {% if tab == 'species' %}
+  {# ---- By species: one row per bird waiting, not one per clip ---- #}
+  <div class="px-5 py-3 border-b border-zinc-800">
+    <h2 class="text-sm uppercase tracking-wider text-zinc-400">
+      <span class="text-zinc-200">{{ species_rows | length }}</span> species
+      <span class="text-zinc-500 ml-1 text-xs normal-case tracking-normal">
+        {%- if species_truncated %} (first {{ filters.limit }} of more){% endif %}
+        · {{ '{:,}'.format(backlog_total) }} clips waiting{% if filters.source %} at {{ filters.source }}{% endif %}
+      </span>
+    </h2>
+  </div>
+
+  <form method="get" action="/review" class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-6 gap-3 text-xs">
+    <input type="hidden" name="tab" value="species">
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Site</span>
+      {% include "_source_filter.html" %}
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Min conf</span>
+      <input name="min_conf" type="number" step="0.05" min="0" max="1" value="{{ filters.min_conf }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Max conf</span>
+      <input name="max_conf" type="number" step="0.05" min="0" max="1" value="{{ filters.max_conf }}"
+             class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100 tabular-nums">
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Note tag</span>
+      <select name="note_tag" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [('any','— any —'), ('reliable','reliable'), ('suspect','suspect'), ('rare','rare'), ('untagged','untagged')] %}
+          <option value="{{ v }}" {% if filters.note_tag == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-zinc-500 uppercase tracking-wider">Order</span>
+      <select name="order" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
+        {% for v, lbl in [('backlog','most waiting'), ('conf_desc','highest conf'), ('conf_asc','lowest conf'), ('recent','most recent'), ('name','A–Z')] %}
+          <option value="{{ v }}" {% if filters.order == v %}selected{% endif %}>{{ lbl }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="flex items-end gap-2">
+      <a href="/review?tab=species" class="px-3 py-1.5 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200">reset</a>
+      <button class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 font-medium">apply</button>
+    </div>
+  </form>
+
+  {% if species_rows %}
+    <ul class="divide-y divide-zinc-800/70">
+      {% for sp in species_rows %}
+        {% set tag = note_tag_by_sci.get(sp.scientific_name) %}
+        <li>
+          <a href="/review?tab=detections&sci={{ sp.scientific_name | urlencode }}{% if filters.source %}&source={{ filters.source }}{% endif %}{% if filters.min_conf %}&min_conf={{ filters.min_conf }}{% endif %}{% if filters.max_conf != 1.0 %}&max_conf={{ filters.max_conf }}{% endif %}"
+             class="px-5 py-2.5 grid grid-cols-1 md:grid-cols-12 gap-3 items-center hover:bg-zinc-800/40 group">
+            <div class="md:col-span-4 min-w-0">
+              <div class="text-sm font-medium text-zinc-100 truncate flex items-center gap-1.5 flex-wrap">
+                <span class="group-hover:text-emerald-300">{{ sp.common_name }}</span>
+                {{ iucn_badge(status_by_sci.get(sp.scientific_name), hide_common=True) }}
+                {% if tag %}<span class="text-[10px] uppercase tracking-wider px-1 rounded bg-zinc-800 text-zinc-400">{{ tag }}</span>{% endif %}
+              </div>
+              <div class="text-xs italic text-zinc-500 truncate">{{ sp.scientific_name }}</div>
+            </div>
+            <div class="md:col-span-2 text-xs text-zinc-400 tabular-nums">
+              <span class="text-zinc-100 text-sm font-medium">{{ '{:,}'.format(sp.n) }}</span> waiting
+              <div class="text-zinc-600">{{ sp.sites }} site{{ '' if sp.sites == 1 else 's' }}</div>
+            </div>
+            {# Confidence spread: where this species' backlog actually sits.
+               An all-0.9+ bar means easy confirmations; a fat low band means
+               the model is unsure and the clips are worth a listen. #}
+            <div class="md:col-span-4">
+              <div class="flex h-3.5 rounded overflow-hidden bg-zinc-950 border border-zinc-800"
+                   title="{% for lo, hi in bands %}{{ '%.2f'|format(lo) }}–{{ '%.2f'|format(hi if hi <= 1 else 1) }}: {{ sp.bands[loop.index0] }}{% if not loop.last %} · {% endif %}{% endfor %}">
+                {% for lo, hi in bands %}
+                  {% set w = (sp.bands[loop.index0] / sp.n * 100) if sp.n else 0 %}
+                  {% if w > 0 %}
+                    <div style="width: {{ '%.1f'|format(w) }}%; background: {{ ['#3f3f46', '#a16207', '#ca8a04', '#65a30d'][loop.index0] }}"></div>
+                  {% endif %}
+                {% endfor %}
+              </div>
+              <div class="text-[11px] text-zinc-600 tabular-nums mt-0.5">
+                conf {{ '%.2f'|format(sp.min_conf) }}–{{ '%.2f'|format(sp.max_conf) }}
+              </div>
+            </div>
+            <div class="md:col-span-2 text-xs text-zinc-500 tabular-nums text-right">
+              {{ sp.last_at[:16] if sp.last_at else '' }}
+              <div class="text-emerald-400/70 text-[11px] group-hover:text-emerald-300">review →</div>
+            </div>
+          </a>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="px-5 py-8 text-zinc-500 text-sm">Nothing waiting with these filters.</p>
+  {% endif %}
+
+  {% elif tab == 'detections' %}
   {# ---- Per-detection (formerly /audition) ---- #}
+  {% if focus_species %}
+    {# Drilled in from the species index: name the bird and offer the way back,
+       so this reads as that species' review queue rather than a filtered list
+       that happens to contain one species. #}
+    <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline gap-3 flex-wrap">
+      <a href="/review?tab=species{% if filters.source %}&source={{ filters.source }}{% endif %}"
+         class="text-xs text-zinc-500 hover:text-zinc-300">&larr; all species</a>
+      <h2 class="text-base font-medium text-zinc-100">{{ focus_species.common }}</h2>
+      <span class="text-xs italic text-zinc-500">{{ focus_species.scientific }}</span>
+      <a href="/species/{{ focus_species.scientific | urlencode }}"
+         class="text-xs text-emerald-400/80 hover:text-emerald-300 ml-auto">species page &rarr;</a>
+    </div>
+  {% endif %}
   <div class="px-5 py-3 border-b border-zinc-800 flex items-center justify-between">
     <h2 class="text-sm uppercase tracking-wider text-zinc-400">
       <span class="text-zinc-200 ml-1">{{ rows | length }}</span>
@@ -39,6 +156,7 @@
 
   <form method="get" action="/review" class="px-5 py-3 border-b border-zinc-800 grid grid-cols-1 md:grid-cols-7 gap-3 text-xs">
     <input type="hidden" name="tab" value="detections">
+    {% if filters.sci %}<input type="hidden" name="sci" value="{{ filters.sci }}">{% endif %}
     <label class="flex flex-col gap-1">
       <span class="text-zinc-500 uppercase tracking-wider">Site</span>
       {% include "_source_filter.html" %}

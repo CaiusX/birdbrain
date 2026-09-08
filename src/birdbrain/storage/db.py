@@ -7,7 +7,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import Integer, create_engine, delete, func, or_, select, update
+from sqlalchemy import (
+    Integer,
+    create_engine,
+    delete,
+    func,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased, sessionmaker
 
@@ -190,6 +199,22 @@ class Database:
                 "source_name, client_id",
             ),
         ]
+        # Partial indexes. Kept apart from ``added_indexes`` because they carry
+        # a WHERE clause, and that clause is the whole point: the review queue
+        # is 720k rows out of 1.9M, so an index over just those is a fraction
+        # of the size and can be scanned in group order. It carries every column
+        # the summary aggregates. Every one of them has to be there: leaving
+        # out common_name alone put the query back to 2.6 s from 0.3, because
+        # each of the 720k index entries then needs its table row fetched just
+        # to name the bird.
+        added_partial_indexes: list[tuple[str, str, str, str]] = [
+            (
+                "ix_det_review_queue",
+                "detections",
+                "scientific_name, confidence, source_name, started_at, common_name",
+                "label IS NULL AND clip_path IS NOT NULL",
+            ),
+        ]
         # Indexes that have been superseded by something better. Dropped here
         # so old deployments don't drag along a redundant index forever.
         dropped_indexes: list[str] = [
@@ -209,6 +234,10 @@ class Database:
             for name, table, cols in added_indexes:
                 conn.exec_driver_sql(
                     f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({cols})"
+                )
+            for name, table, cols, where in added_partial_indexes:
+                conn.exec_driver_sql(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({cols}) WHERE {where}"
                 )
             for name in dropped_indexes:
                 conn.exec_driver_sql(f"DROP INDEX IF EXISTS {name}")
@@ -1379,6 +1408,88 @@ class Database:
             if row is not None:
                 s.expunge(row)
             return row
+
+    #: Confidence bands the review species index buckets into, so a row can
+    #: show at a glance whether a species is all-certain or spread thin.
+    REVIEW_BANDS = ((0.0, 0.5), (0.5, 0.75), (0.75, 0.9), (0.9, 1.01))
+
+    def review_species_summary(
+        self,
+        *,
+        source: str | None = None,
+        min_conf: float = 0.0,
+        max_conf: float = 1.0,
+        note_tags: set[str] | None = None,
+        limit: int = 400,
+        order: str = "backlog",
+    ) -> list[dict]:
+        """One row per species awaiting review: how many clips, their spread of
+        confidence, how many sites, and when it was last heard.
+
+        Pinned to ``ix_det_review_queue`` with INDEXED BY. Without the hint
+        SQLite picks ``ix_detections_label`` and a temp B-tree for the GROUP BY,
+        which takes 1.5 s over this backlog against 0.17 s scanning the partial
+        index in group order — the index only helps if it is actually used, and
+        the planner's own statistics say otherwise. Same reasoning as the
+        ANALYZE note in _migrate_in_place, one step further.
+        """
+        where = ["label IS NULL", "clip_path IS NOT NULL",
+                 "confidence >= :min_conf", "confidence <= :max_conf"]
+        params: dict[str, Any] = {"min_conf": min_conf, "max_conf": max_conf}
+        if source:
+            where.append("source_name = :source")
+            params["source"] = source
+        bands = ", ".join(
+            f"sum(case when confidence >= {lo} and confidence < {hi} then 1 else 0 end) as band{i}"
+            for i, (lo, hi) in enumerate(self.REVIEW_BANDS)
+        )
+        order_sql = {
+            "backlog": "n DESC",
+            "conf_desc": "max_conf DESC",
+            "conf_asc": "min_conf ASC",
+            "recent": "last_at DESC",
+            "name": "common_name COLLATE NOCASE ASC",
+        }.get(order, "n DESC")
+        sql = f"""
+            SELECT scientific_name,
+                   max(common_name)          AS common_name,
+                   count(*)                  AS n,
+                   min(confidence)           AS min_conf,
+                   max(confidence)           AS max_conf,
+                   count(DISTINCT source_name) AS sites,
+                   max(started_at)           AS last_at,
+                   {bands}
+              FROM detections INDEXED BY ix_det_review_queue
+             WHERE {" AND ".join(where)}
+          GROUP BY scientific_name
+          ORDER BY {order_sql}
+             LIMIT :limit
+        """
+        params["limit"] = limit
+        with self._Session() as s:
+            rows = s.execute(text(sql), params).mappings().all()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["bands"] = [d.pop(f"band{i}") for i in range(len(self.REVIEW_BANDS))]
+            out.append(d)
+        if note_tags is not None:
+            out = [d for d in out if d["scientific_name"] in note_tags]
+        return out
+
+    def review_backlog_total(self, source: str | None = None) -> int:
+        """Clips that can actually be reviewed: unlabelled AND still holding
+        audio. The old counter said 1.9M by counting every unlabelled row, but
+        63% of those had their clip pruned by retention and can never be
+        auditioned — a number three times more hopeless than the real queue."""
+        sql = ("SELECT count(*) FROM detections INDEXED BY ix_det_review_queue "
+               "WHERE label IS NULL AND clip_path IS NOT NULL")
+        params: dict[str, Any] = {}
+        if source:
+            sql += " AND source_name = :source"
+            params["source"] = source
+        with self._Session() as s:
+            return int(s.execute(text(sql), params).scalar() or 0)
 
     def list_worker_heartbeats(self) -> list[WorkerHeartbeatRow]:
         with self._Session() as s:
