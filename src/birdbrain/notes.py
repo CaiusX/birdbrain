@@ -803,8 +803,10 @@ def _call_description_tick(db: Database, cfg: AppConfig, client) -> str | None:
         user_text=f"Describe the call of {common} ({sci}).",
         client=client,
         model=cfg.notes_call_model,
-        max_tokens=2000,          # room for adaptive thinking, which is on by
-                                  # default on Opus 5; the visible answer is ~60 words
+        # Adaptive thinking is on by default on Opus 5 and comes out of this
+        # budget. At 2000, five of 698 species spent enough on reasoning that
+        # the visible answer was cut off mid-word; 6000 left every one intact.
+        max_tokens=6000,
         effort=cfg.notes_call_effort,
     )
     if not text_:
