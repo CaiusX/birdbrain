@@ -78,6 +78,33 @@ def test_the_readout_and_the_locator_boxes_use_one_shared_mapping():
     assert abs(y_to_freq(0) - hi) < 1.0
 
 
+def test_the_image_fills_its_box_exactly():
+    """Every overlay on the spectrogram — playhead, locator boxes, gridlines,
+    cursor readout — maps a percentage of the BOX to a time or a frequency.
+    That is only true if the image exactly fills the box.
+
+    object-cover scales to cover and crops the overflow. At 900x220 into a
+    711x224 box it drew 916 px wide and cut 205, so the picture showed
+    0.67-5.33 s of a 6 s clip while every overlay still assumed 0-6 — up to
+    0.67 s out at the edges and exactly right in the middle, which is what
+    "nearly in sync" looks like and why it went unnoticed.
+    """
+    src = MODAL.read_text()
+    img = re.search(r'<img id="spec-modal-img"[^>]*>', src).group(0)
+    assert "object-fill" in img, "the spectrogram must fill its box, not cover it"
+    for bad in ("object-cover", "object-contain", "object-none", "object-scale-down"):
+        assert bad not in img, f"{bad} crops or letterboxes; overlays would misalign"
+
+
+def test_the_locator_boxes_scale_by_the_clips_own_duration():
+    """The marker carries the duration the peak was measured against. Using a
+    hardcoded window instead would stretch every box on a clip of another
+    length — the saved clips are 6 s while the BirdNET window is 3 s."""
+    src = MODAL.read_text()
+    assert "m.peak_time_s / dur" in src
+    assert "m.duration_s" in src
+
+
 def test_the_modal_ships_the_hover_elements():
     src = MODAL.read_text()
     for el in ("spec-modal-grid", "spec-modal-crosshair", "spec-modal-cursor"):

@@ -59,7 +59,18 @@
   </div>
   <div class="p-5">
     <div id="spec-modal-spec" class="relative w-full bg-zinc-950 rounded overflow-hidden cursor-pointer select-none">
-      <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-cover">
+      {# object-FILL, not cover. Every overlay on this box — the playhead, the
+         species locator boxes, the frequency gridlines, the cursor readout —
+         maps a percentage of the box to a time or a frequency, which is only
+         true if the image exactly fills it. object-cover scales to cover and
+         crops the overflow: at 900x220 into a 711x224 box it drew 916 px wide
+         and cut 205 px, so the picture showed 0.67-5.33 s of a 6 s clip while
+         every overlay still assumed 0-6. That put the playhead and the boxes
+         up to 0.67 s out at the edges and dead right in the middle, which is
+         exactly what "nearly in sync" looks like. Stretching distorts the
+         aspect ratio; a spectrogram is a plot, not a photograph, and being
+         able to trust the axes matters more. #}
+      <img id="spec-modal-img" src="" alt="" class="block w-full h-56 object-fill">
       <div id="spec-modal-locators"
            class="absolute inset-0 pointer-events-none transition-opacity duration-150"
            style="opacity: 0.85;"></div>
