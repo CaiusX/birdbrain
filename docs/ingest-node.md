@@ -159,6 +159,16 @@ not know or care which Pi heard it.
 - **A clip central filtered has nowhere to go.** Ingest drops rows under a
   species floor or suppression; central reports their ids back as `unknown`
   and the node moves on rather than retrying.
+- **A pushed clip's filename is not its start time.** The pipeline names a
+  locally captured clip after the audio's real beginning, which is 3 s before
+  the detection because the previous chunk is prepended as pre-roll. Central
+  names a pushed clip after the *detection* instead, so the two paths disagree
+  by exactly that pre-roll. Anything that needs to locate a detection inside
+  its own clip — an export, a training-set cut, a trim — must not read the
+  filename. Use the rule that holds for both: **the detection occupies the last
+  `duration_s` seconds of the file.** Verified by re-running BirdNET over each
+  half of real clips of both kinds; the species fires in the second half every
+  time, recovering the stored confidence to within 0.02.
 - **The node keeps a clip only as a retry cushion.** Once central has acked it
   and it is `clip_retention_days` old (default 3) the local copy goes. A clip
   central has *not* acked is kept whatever its age — it is the only copy.

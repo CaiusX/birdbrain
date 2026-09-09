@@ -7,7 +7,6 @@ import hashlib
 import json
 import math
 import os
-import io
 import re
 import shutil
 import statistics
@@ -15,7 +14,6 @@ import subprocess
 import tempfile
 import sys
 import threading
-import zipfile
 import time
 import urllib.parse
 import urllib.request
@@ -142,11 +140,6 @@ from birdbrain.ingest import (
     ingest_clips,
     store_node_health,
 )
-from birdbrain.raven import DEFAULT_EXPORT_FORMAT, EXPORT_FORMATS
-from birdbrain.raven import Clip as RavenClip
-from birdbrain.raven import band_for as raven_band_for
-from birdbrain.raven import selection_table as raven_selection_table
-from birdbrain.raven import transcode as raven_transcode
 from birdbrain.site_resolver import state_to_resolved
 from birdbrain.wire import WireClipManifest, WireNodeHealth
 from birdbrain.sites import Site, load_sites
@@ -4526,152 +4519,6 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             with contextlib.suppress(RuntimeError):
                 await websocket.close()
             log.info("terminal.session_closed", active=len(_terminal_sessions))
-
-    @app.get("/admin/raven", response_class=HTMLResponse)
-    def admin_raven(
-        request: Request,
-        sci: str | None = Query(default=None),
-        source: str | None = Query(default=None),
-        min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
-        label_filter: str = Query(default="all"),
-        limit: int = Query(default=200, ge=1, le=500),
-    ) -> HTMLResponse:
-        """Build a Raven Pro export: one species at one site.
-
-        Raven is a desktop application with no API, so the handoff is a file it
-        already reads — a sound selection table plus the audio it points at,
-        zipped together so the whole thing unpacks and opens on the operator's
-        machine.
-        """
-        species = _review_dropdowns()[1]           # common names, cached
-        with db.session() as s:
-            pairs = s.execute(
-                select(DetectionRow.scientific_name, func.max(DetectionRow.common_name))
-                .where(DetectionRow.clip_path.is_not(None))
-                .group_by(DetectionRow.scientific_name)
-                .order_by(func.max(DetectionRow.common_name))
-            ).all()
-        preview, sites = [], []
-        if sci:
-            sites = _sites_for_species_cached(sci)
-            if source:
-                preview = db.clips_for_export(
-                    sci, source, min_conf=min_conf,
-                    label_filter=label_filter, limit=limit,
-                )
-        return TEMPLATES.TemplateResponse(
-            request,
-            "admin_raven.html",
-            {
-                "species_pairs": pairs,
-                "sites": sites,
-                "preview": preview,
-                "band": raven_band_for(sci) if sci else None,
-                "filters": {
-                    "sci": sci or "", "source": source or "",
-                    "min_conf": min_conf, "label_filter": label_filter, "limit": limit,
-                },
-                "all_species": species,
-            },
-        )
-
-    @app.get("/admin/raven/export")
-    def admin_raven_export(
-        sci: str = Query(...),
-        source: str = Query(...),
-        min_conf: float = Query(default=0.0, ge=0.0, le=1.0),
-        label_filter: str = Query(default="all"),
-        limit: int = Query(default=200, ge=1, le=500),
-        audio: bool = Query(default=True),
-        fmt: str = Query(default=DEFAULT_EXPORT_FORMAT),
-    ) -> Response:
-        """The export itself: a zip of the selection table and its clips.
-
-        The table alone would be useless on another machine — every row names
-        an audio file, and Raven has to be able to open them. Clip basenames
-        are unique (they are microsecond timestamps), so they flatten into one
-        directory without collision.
-        """
-        if fmt not in EXPORT_FORMATS:
-            raise HTTPException(400, f"fmt must be one of {sorted(EXPORT_FORMATS)}")
-        rows = db.clips_for_export(
-            sci, source, min_conf=min_conf, label_filter=label_filter, limit=limit,
-        )
-        if not rows:
-            raise HTTPException(404, "nothing to export with those filters")
-        clips: list[RavenClip] = []
-        for r in rows:
-            path = Path(r.clip_path).resolve()
-            try:
-                path.relative_to(clips_root)
-            except ValueError:
-                continue                      # never leave the clips tree
-            if not path.is_file():
-                continue                      # pruned since the query
-            clips.append(RavenClip(
-                detection_id=r.id, path=path,
-                duration_s=_clip_duration_s(path),
-                window_s=float(r.duration_s or 3.0),
-                scientific_name=r.scientific_name, common_name=r.common_name,
-                confidence=float(r.confidence), source_name=r.source_name,
-                started_at=r.started_at.isoformat() if r.started_at else "",
-                label=r.label,
-                export_name=path.with_suffix(EXPORT_FORMATS[fmt][1]).name,
-            ))
-        if not clips:
-            raise HTTPException(404, "every clip for that selection has been pruned")
-
-        stem = re.sub(r"[^A-Za-z0-9]+", "-", f"{sci}-{source}").strip("-").lower()
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr(f"{stem}.selections.txt", raven_selection_table(clips))
-            z.writestr(f"{stem}.README.txt", _raven_readme(sci, source, clips, stem))
-            if audio:
-                # Transcoded, not copied: Raven cannot open the OGG we store.
-                for c in clips:
-                    name, blob = raven_transcode(c.path, fmt)
-                    z.writestr(f"audio/{name}", blob)
-        buf.seek(0)
-        log.info("raven.exported", species=sci, source=source, clips=len(clips),
-                 audio=audio, fmt=fmt, bytes=buf.getbuffer().nbytes)
-        return Response(
-            buf.getvalue(),
-            media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{stem}.zip"'},
-        )
-
-    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=2048)
-    def _clip_duration_s(path: Path) -> float:
-        """Length of the audio file. Read from the container header rather than
-        assumed: the export's geometry hangs on it, and a clip is 6 s only when
-        the pipeline had pre-roll to prepend. Header read only — no decode."""
-        import soundfile as sf  # noqa: PLC0415 - keeps libsndfile off the import path
-
-        try:
-            info = sf.info(str(path))
-            return float(info.frames) / float(info.samplerate or 1)
-        except Exception:
-            return 6.0          # the overwhelmingly common shape
-
-    def _raven_readme(sci: str, source: str, clips: list, stem: str) -> str:
-        return (
-            f"BirdBrain export — {clips[0].common_name} ({sci}) at {source}\n"
-            f"{len(clips)} clips.\n\n"
-            "Open in Raven Pro:\n"
-            "  1. File > Open Sound Files..., select everything in audio/,\n"
-            "     and choose to open them as a single sequence.\n"
-            f"  2. File > Open Selection Table..., pick {stem}.selections.txt\n\n"
-            "Each row boxes the 3 s window BirdNET fired on — the last 3 s of\n"
-            "each clip; the first 3 s is pre-roll context, deliberately included.\n"
-            "Audio is FLAC because Raven does not read the OGG Vorbis we store.\n"
-            "The clips were Vorbis on disk, so its artefacts are in the\n"
-            "spectrogram; the transcode is lossless and adds none of its own.\n"
-            "Frequency bounds are the species' typical band, the same one the\n"
-            "review page draws.\n\n"
-            "The Label column is ours and starts empty (or carries an existing\n"
-            "verdict). Annotate it in Raven and keep the column: it is how a\n"
-            "reviewed table comes back.\n"
-        )
 
     @app.get("/admin/replays", response_class=HTMLResponse)
     def admin_replays(
