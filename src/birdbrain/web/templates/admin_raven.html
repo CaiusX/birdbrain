@@ -68,12 +68,16 @@
            class="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium">
           Download {{ preview | length }} clips + selection table
         </a>
+        <a href="/admin/raven/export?{{ qs }}&fmt=wav"
+           class="text-xs text-zinc-400 hover:text-zinc-100 underline decoration-dotted">
+          as WAV
+        </a>
         <a href="/admin/raven/export?{{ qs }}&audio=false"
            class="text-xs text-zinc-400 hover:text-zinc-100 underline decoration-dotted">
           table only
         </a>
         <span class="text-xs text-zinc-500">
-          band {{ band[0] | int }}–{{ band[1] | int }} Hz · each row boxes the last 3 s of its clip
+          FLAC · band {{ band[0] | int }}–{{ band[1] | int }} Hz · each row boxes the last 3 s of its clip
         </span>
       {% else %}
         <p class="text-zinc-500 text-sm">No clips match — try a lower confidence or a different label filter.</p>
@@ -110,7 +114,13 @@
 
 <section class="bg-zinc-900 border border-zinc-800 rounded-xl px-5 py-4 text-xs text-zinc-400 leading-relaxed">
   <h3 class="text-sm uppercase tracking-wider text-zinc-400 mb-2">Opening it in Raven</h3>
-  <p>The zip holds a tab-delimited sound selection table and an <code>audio/</code> folder.
+  <p>The zip holds a tab-delimited sound selection table and an <code>audio/</code> folder
+     of FLAC. Raven reads WAVE, AIFF, FLAC and MP3 — <em>not</em> the OGG Vorbis we store —
+     so the clips are transcoded on the way out. FLAC is lossless and about a third the size
+     of WAV; the <em>as WAV</em> link is there if a particular Raven build objects.
+     The stored clips are Vorbis, so its artefacts are already in the audio: the transcode
+     preserves them exactly rather than adding more.</p>
+  <p class="mt-2">The zip holds a tab-delimited sound selection table and an <code>audio/</code> folder.
      In Raven Pro: <em>File &gt; Open Sound Files…</em>, select everything in
      <code>audio/</code> and open them as a single sequence, then
      <em>File &gt; Open Selection Table…</em> and pick the <code>.selections.txt</code>.</p>

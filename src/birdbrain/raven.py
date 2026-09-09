@@ -23,6 +23,14 @@ Two facts about our clips decide the geometry, and both are easy to get wrong:
 Times are seconds, frequencies Hz, and the file is tab-delimited — Raven
 rejects a header without real delimiters between the column names, which is the
 bug that makes BirdNET-Analyzer's own Raven export unreadable in Raven 1.6.
+
+Audio is transcoded on the way out. Raven reads WAVE, AIFF, FLAC and MP3; it
+does not read the OGG Vorbis we store, so an export of the raw clips opens as
+a folder of errors. FLAC is the target: lossless, about half the size of WAV,
+and the one supported format Cornell lists no caveats against (they warn off
+"extensible" WAVE, and MP3 would pile a second lossy pass on audio that is
+already Vorbis). Transcoding restores nothing — the Vorbis artefacts are in
+the stored clip and will be visible in Raven's spectrogram — but it adds none.
 """
 
 from __future__ import annotations
@@ -33,6 +41,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from birdbrain.audio.locator import DEFAULT_BAND, SPECIES_FREQ_BANDS
+
+#: What Raven can open, and what we hand it. FLAC by default; WAV as an escape
+#: hatch if a particular Raven build is unhappy with our FLAC.
+EXPORT_FORMATS = {"flac": ("FLAC", ".flac"), "wav": ("WAV", ".wav")}
+DEFAULT_EXPORT_FORMAT = "flac"
 
 #: Raven's required columns, then the file-linking ones, then ours. Raven shows
 #: unknown columns verbatim and keeps them on save, which is how the operator's
@@ -74,6 +87,14 @@ class Clip:
     source_name: str
     started_at: str
     label: str | None = None
+    #: Name the audio takes inside the export. Differs from ``path.name``
+    #: because the clip is transcoded out of OGG, which Raven cannot read, and
+    #: the selection table has to name the file the reviewer actually opens.
+    export_name: str | None = None
+
+    @property
+    def audio_name(self) -> str:
+        return self.export_name or self.path.name
 
 
 def band_for(scientific_name: str) -> tuple[float, float]:
@@ -106,7 +127,7 @@ def selection_table(clips: list[Clip]) -> str:
             f"{cursor + offset + c.window_s:.4f}",
             f"{lo:.1f}",
             f"{hi:.1f}",
-            c.path.name,
+            c.audio_name,
             f"{offset:.4f}",
             c.scientific_name,
             c.common_name,
@@ -118,3 +139,20 @@ def selection_table(clips: list[Clip]) -> str:
         ])
         cursor += c.duration_s
     return out.getvalue()
+
+
+def transcode(path: Path, fmt: str = DEFAULT_EXPORT_FORMAT) -> tuple[str, bytes]:
+    """(filename, bytes) of one clip in a format Raven can open.
+
+    Decoded and re-encoded in memory rather than through a temp file: the
+    clips are seconds long, and an export is hundreds of them.
+    """
+    import soundfile as sf  # noqa: PLC0415 - keeps libsndfile off the import path
+
+    subtype, suffix = EXPORT_FORMATS.get(fmt, EXPORT_FORMATS[DEFAULT_EXPORT_FORMAT])
+    data, sr = sf.read(str(path), dtype="float32", always_2d=False)
+    buf = io.BytesIO()
+    # PCM_16 for both: FLAC has no float subtype in libsndfile, and 16-bit is
+    # what the source Vorbis decodes to any useful precision anyway.
+    sf.write(buf, data, sr, format=subtype, subtype="PCM_16")
+    return path.with_suffix(suffix).name, buf.getvalue()

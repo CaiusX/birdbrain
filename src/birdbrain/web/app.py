@@ -142,9 +142,11 @@ from birdbrain.ingest import (
     ingest_clips,
     store_node_health,
 )
+from birdbrain.raven import DEFAULT_EXPORT_FORMAT, EXPORT_FORMATS
 from birdbrain.raven import Clip as RavenClip
 from birdbrain.raven import band_for as raven_band_for
 from birdbrain.raven import selection_table as raven_selection_table
+from birdbrain.raven import transcode as raven_transcode
 from birdbrain.site_resolver import state_to_resolved
 from birdbrain.wire import WireClipManifest, WireNodeHealth
 from birdbrain.sites import Site, load_sites
@@ -4581,6 +4583,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         label_filter: str = Query(default="all"),
         limit: int = Query(default=200, ge=1, le=500),
         audio: bool = Query(default=True),
+        fmt: str = Query(default=DEFAULT_EXPORT_FORMAT),
     ) -> Response:
         """The export itself: a zip of the selection table and its clips.
 
@@ -4589,6 +4592,8 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         are unique (they are microsecond timestamps), so they flatten into one
         directory without collision.
         """
+        if fmt not in EXPORT_FORMATS:
+            raise HTTPException(400, f"fmt must be one of {sorted(EXPORT_FORMATS)}")
         rows = db.clips_for_export(
             sci, source, min_conf=min_conf, label_filter=label_filter, limit=limit,
         )
@@ -4611,6 +4616,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 confidence=float(r.confidence), source_name=r.source_name,
                 started_at=r.started_at.isoformat() if r.started_at else "",
                 label=r.label,
+                export_name=path.with_suffix(EXPORT_FORMATS[fmt][1]).name,
             ))
         if not clips:
             raise HTTPException(404, "every clip for that selection has been pruned")
@@ -4621,10 +4627,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             z.writestr(f"{stem}.selections.txt", raven_selection_table(clips))
             z.writestr(f"{stem}.README.txt", _raven_readme(sci, source, clips, stem))
             if audio:
+                # Transcoded, not copied: Raven cannot open the OGG we store.
                 for c in clips:
-                    z.write(c.path, f"audio/{c.path.name}")
+                    name, blob = raven_transcode(c.path, fmt)
+                    z.writestr(f"audio/{name}", blob)
         buf.seek(0)
-        log.info("raven.exported", species=sci, source=source, clips=len(clips), audio=audio)
+        log.info("raven.exported", species=sci, source=source, clips=len(clips),
+                 audio=audio, fmt=fmt, bytes=buf.getbuffer().nbytes)
         return Response(
             buf.getvalue(),
             media_type="application/zip",
@@ -4654,6 +4663,9 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             f"  2. File > Open Selection Table..., pick {stem}.selections.txt\n\n"
             "Each row boxes the 3 s window BirdNET fired on — the last 3 s of\n"
             "each clip; the first 3 s is pre-roll context, deliberately included.\n"
+            "Audio is FLAC because Raven does not read the OGG Vorbis we store.\n"
+            "The clips were Vorbis on disk, so its artefacts are in the\n"
+            "spectrogram; the transcode is lossless and adds none of its own.\n"
             "Frequency bounds are the species' typical band, the same one the\n"
             "review page draws.\n\n"
             "The Label column is ours and starts empty (or carries an existing\n"

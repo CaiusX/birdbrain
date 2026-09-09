@@ -19,7 +19,14 @@ from fastapi.testclient import TestClient
 from birdbrain.audio.locator import DEFAULT_BAND, SPECIES_FREQ_BANDS
 from birdbrain.config import AppConfig
 from birdbrain.detector.birdnet import Detection
-from birdbrain.raven import COLUMNS, Clip, band_for, selection_table
+from birdbrain.raven import (
+    COLUMNS,
+    EXPORT_FORMATS,
+    Clip,
+    band_for,
+    selection_table,
+    transcode,
+)
 from birdbrain.storage import Database, DetectionRow
 from birdbrain.web.app import create_app
 
@@ -201,7 +208,7 @@ def test_a_pruned_clip_is_left_out_rather_than_pointed_at(tmp_path):
     z = zipfile.ZipFile(io.BytesIO(
         TestClient(app).get(f"/admin/raven/export?sci={SCI}&source=Twin Pan").content))
     audio = [n for n in z.namelist() if n.startswith("audio/")]
-    assert audio == [f"audio/{keep.name}"]
+    assert audio == [f"audio/{keep.with_suffix('.flac').name}"]
 
 
 def test_an_empty_selection_is_a_404_not_an_empty_zip(tmp_path):
@@ -226,3 +233,68 @@ def test_the_admin_page_loads_with_nothing_chosen(tmp_path):
     r = TestClient(app).get("/admin/raven")
     assert r.status_code == 200
     assert "pick a species" in r.text
+
+
+# --- the format Raven can actually open ------------------------------------
+
+
+def test_clips_are_transcoded_out_of_ogg(tmp_path):
+    """Raven reads WAVE, AIFF, FLAC and MP3 — not the OGG Vorbis we store. An
+    export of the raw clips opens as a folder of errors."""
+    app, db, cfg = _app(tmp_path)
+    _add(db, cfg, name="c.ogg")
+    z = zipfile.ZipFile(io.BytesIO(
+        TestClient(app).get(f"/admin/raven/export?sci={SCI}&source=Twin Pan").content))
+    audio = [n for n in z.namelist() if n.startswith("audio/")]
+    assert audio and all(n.endswith(".flac") for n in audio)
+    assert not any(n.endswith(".ogg") for n in z.namelist())
+
+
+def test_the_table_names_the_file_the_reviewer_actually_opens(tmp_path):
+    """The selection table's Begin File must be the transcoded name, or every
+    row points at a file that is not in the zip."""
+    app, db, cfg = _app(tmp_path)
+    _add(db, cfg, name="c.ogg")
+    z = zipfile.ZipFile(io.BytesIO(
+        TestClient(app).get(f"/admin/raven/export?sci={SCI}&source=Twin Pan").content))
+    table = next(n for n in z.namelist() if n.endswith(".selections.txt"))
+    for row in _rows(z.read(table).decode()):
+        assert row["Begin File"].endswith(".flac")
+        assert f"audio/{row['Begin File']}" in z.namelist()
+
+
+def test_wav_is_available_as_an_escape_hatch(tmp_path):
+    app, db, cfg = _app(tmp_path)
+    _add(db, cfg, name="c.ogg")
+    z = zipfile.ZipFile(io.BytesIO(
+        TestClient(app).get(f"/admin/raven/export?sci={SCI}&source=Twin Pan&fmt=wav").content))
+    assert all(n.endswith(".wav") for n in z.namelist() if n.startswith("audio/"))
+    table = next(n for n in z.namelist() if n.endswith(".selections.txt"))
+    assert all(r["Begin File"].endswith(".wav") for r in _rows(z.read(table).decode()))
+
+
+def test_an_unknown_format_is_refused(tmp_path):
+    app, db, cfg = _app(tmp_path)
+    _add(db, cfg, name="c.ogg")
+    r = TestClient(app).get(f"/admin/raven/export?sci={SCI}&source=Twin Pan&fmt=ogg")
+    assert r.status_code == 400
+
+
+def test_the_transcode_preserves_the_audio(tmp_path):
+    """Lossless: the point of FLAC over MP3 is not piling a second lossy pass
+    on clips that are already Vorbis."""
+    _, _, cfg = _app(tmp_path)
+    rng = np.random.default_rng(0)
+    tone = (rng.standard_normal(24000) * 0.1).astype("float32")
+    src = cfg.clips_dir / "t.ogg"
+    sf.write(src, tone, 24000, format="OGG", subtype="VORBIS")
+    original, sr = sf.read(src, dtype="float32")
+
+    for fmt in EXPORT_FORMATS:
+        name, blob = transcode(src, fmt)
+        assert name.endswith(EXPORT_FORMATS[fmt][1])
+        got, got_sr = sf.read(io.BytesIO(blob), dtype="float32")
+        assert got_sr == sr
+        assert len(got) == len(original)
+        # Only 16-bit quantisation should separate them.
+        assert float(np.abs(got - original).max()) < 1e-3
