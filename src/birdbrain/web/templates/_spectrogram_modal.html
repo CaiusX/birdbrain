@@ -1818,7 +1818,13 @@
   // pattern to find drill-through links, and a copy of it sitting in script
   // source reads to them as a link that is not there.
   function reviewUrl(sci, sourceName) {
-    const q = new URLSearchParams({ tab: 'detections', sci: sci });
+    // label_filter=all, not the page's "unreviewed" default. This link means
+    // "show me this species' clips", and a species whose few clips have all
+    // been scored — which is common for the rare ones a comparison sends you
+    // to — would otherwise land on an empty queue.
+    const q = new URLSearchParams({
+      tab: 'detections', sci: sci, label_filter: 'all',
+    });
     if (sourceName) q.set('source', sourceName);
     return '/review?' + q.toString();
   }

@@ -333,3 +333,74 @@ def test_sites_for_species_is_scoped_and_sorted(tmp_path):
     _add(db, sci="B", common="Other", source="Mike", n=1)
     assert db.sites_for_species("A") == ["Alpha", "Zulu"]
     assert db.sites_for_species("Nothing") == []
+
+
+# --- the blank-queue hint --------------------------------------------------
+
+
+def _empty_state(html: str) -> str:
+    """The message the detections tab shows when it has no rows."""
+    m = re.search(r'<p class="text-zinc-500 text-sm px-5 py-6">(.*?)</p>', html, re.S)
+    return " ".join(re.sub(r"<[^>]+>", "", m.group(1)).split()) if m else ""
+
+
+def test_a_queue_emptied_by_the_show_filter_says_so(tmp_path):
+    """THE regression. A species whose only clips are already scored rendered
+    a bare "No detections match these filters" under the default unreviewed
+    filter, which reads as "we have nothing" when we have something. Rare
+    birds hit this constantly -- one clip, already looked at."""
+    app, db = _app(tmp_path)
+    _add(db, sci="Zosterops eurycricotus", common="Kilimanjaro White-eye",
+         conf=0.51, label="good")
+
+    html = TestClient(app).get("/review?tab=detections&sci=Zosterops eurycricotus").text
+    msg = _empty_state(html)
+    assert "1 clip at another review state" in msg
+    assert "show all" in msg
+    assert "label_filter=all" in html
+
+
+def test_the_hint_offers_a_link_that_actually_shows_them(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="Zosterops eurycricotus", common="Kilimanjaro White-eye",
+         conf=0.51, label="good")
+    c = TestClient(app)
+
+    assert c.get("/review?tab=detections&sci=Zosterops eurycricotus").text.count(
+        'id="audit-') == 0
+    shown = c.get(
+        "/review?tab=detections&label_filter=all&sci=Zosterops eurycricotus").text
+    assert shown.count('id="audit-') == 1
+
+
+def test_a_genuinely_empty_queue_does_not_claim_hidden_clips(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="Zosterops virens", common="Cape White-eye", conf=0.9)
+
+    msg = _empty_state(
+        TestClient(app).get("/review?tab=detections&sci=Nothing here").text)
+    assert msg == "No detections match these filters."
+
+
+def test_the_hint_counts_only_clips_matching_the_other_filters(tmp_path):
+    """The count is the same query minus the label filter -- not a bare
+    species total. Offering "show all" has to lead somewhere non-empty."""
+    app, db = _app(tmp_path)
+    _add(db, sci="Zosterops eurycricotus", common="Kilimanjaro White-eye",
+         source="Tortilis", conf=0.51, label="good")
+    _add(db, sci="Zosterops eurycricotus", common="Kilimanjaro White-eye",
+         source="Elsewhere", conf=0.51, label="good", n=4)
+
+    msg = _empty_state(TestClient(app).get(
+        "/review?tab=detections&sci=Zosterops eurycricotus&source=Tortilis").text)
+    assert "1 clip at another review state" in msg, msg
+
+
+def test_unreviewed_clips_still_render_normally(tmp_path):
+    """The hint must not fire when the default filter is doing its job."""
+    app, db = _app(tmp_path)
+    _add(db, sci="Zosterops eurycricotus", common="Kilimanjaro White-eye", n=2)
+
+    html = TestClient(app).get("/review?tab=detections&sci=Zosterops eurycricotus").text
+    assert html.count('id="audit-') == 2
+    assert "at another review state" not in html

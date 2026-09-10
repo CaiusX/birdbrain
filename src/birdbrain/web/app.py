@@ -4955,18 +4955,24 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 stmt = stmt.where(DetectionRow.scientific_name == sci)
             elif species:
                 stmt = stmt.where(DetectionRow.common_name.ilike(f"%{species}%"))
+            # Built now but applied last, so the empty-state hint below can run
+            # the identical query without it. A blank review page is nearly
+            # always this filter rather than the confidence one, and saying so
+            # is the difference between "there is nothing here" and "there is
+            # something here you have already scored".
+            label_cond = None
             if user_id is not None:
                 # Per-user queue: scored-by-me vs not.
                 if label_filter == "unreviewed":
-                    stmt = stmt.where(~_user_score_exists())
+                    label_cond = ~_user_score_exists()
                 elif label_filter in ("good", "bad", "unsure"):
-                    stmt = stmt.where(_user_score_exists(label_filter))
+                    label_cond = _user_score_exists(label_filter)
             else:
                 # Anonymous/LAN-not-logged-in: fall back to consensus.
                 if label_filter == "unreviewed":
-                    stmt = stmt.where(DetectionRow.label.is_(None))
+                    label_cond = DetectionRow.label.is_(None)
                 elif label_filter in ("good", "bad", "unsure"):
-                    stmt = stmt.where(DetectionRow.label == label_filter)
+                    label_cond = DetectionRow.label == label_filter
             # 'all' adds no filter
 
             if note_tag in ("reliable", "suspect", "rare"):
@@ -4988,6 +4994,12 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 )
             # 'any' adds no filter
 
+            # Everything except the label filter — the denominator for the
+            # empty-state hint.
+            stmt_any_label = stmt
+            if label_cond is not None:
+                stmt = stmt.where(label_cond)
+
             if order == "conf_asc":
                 stmt = stmt.order_by(DetectionRow.confidence.asc())
             elif order == "recent":
@@ -4995,6 +5007,16 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             else:
                 stmt = stmt.order_by(desc(DetectionRow.confidence))
             rows = list(s.scalars(stmt.limit(limit)))
+
+            # Only when the page would otherwise be blank: how many clips these
+            # same filters hold at some other review state. One extra count,
+            # and only on the empty path, so it costs nothing in normal use.
+            hidden_by_label = 0
+            if not rows and label_cond is not None:
+                hidden_by_label = int(
+                    s.scalar(select(func.count()).select_from(
+                        stmt_any_label.subquery())) or 0
+                )
 
             all_sources, all_species = _review_dropdowns()
             if sci:
@@ -5019,6 +5041,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
         return {
             "rows": rows,
+            "hidden_by_label": hidden_by_label,
             "all_sources": all_sources,
             "all_species": all_species,
             "note_tag_by_sci": note_tag_by_sci,
