@@ -25,7 +25,7 @@ from pathlib import Path
 
 import structlog
 
-from birdbrain.audio.youtube import resolve_args
+from birdbrain.audio.youtube import PLAYER_CLIENT_ACCEPTS_COOKIES, resolve_args
 from birdbrain.config import AppConfig, load_sources
 from birdbrain.storage import Database
 
@@ -113,6 +113,14 @@ def refresh(
 ) -> dict:
     """Re-export the cookies file from Firefox if a cam is bot-gated (or
     ``force``). Returns a small result dict describing what happened."""
+    if not PLAYER_CLIENT_ACCEPTS_COOKIES:
+        # The pinned player client resolves anonymously and is *refused* when
+        # handed cookies, so there is nothing a fresh export could fix. Probing
+        # anyway would burn Firefox exports and YouTube requests on a question
+        # the pipeline no longer asks. `force` doesn't override this — it's a
+        # property of the client, not a debounce.
+        return {"action": "skip", "reason": "player client resolves without cookies"}
+
     cookies_file, url = _youtube_targets(cfg, db)
     if cookies_file is None or url is None:
         return {"action": "skip", "reason": "no youtube source with a cookies file"}
@@ -120,10 +128,13 @@ def refresh(
     gated = bot_gated_sources(db)
     stamp = cookies_file.with_suffix(cookies_file.suffix + ".refreshed")
     if not force:
+        skip = ""
         if not gated:
-            return {"action": "skip", "reason": "no bot-gated cams"}
-        if stamp.exists() and (time.time() - stamp.stat().st_mtime) < min_interval_h * 3600:
-            return {"action": "skip", "reason": "debounced", "gated": gated}
+            skip = "no bot-gated cams"
+        elif stamp.exists() and (time.time() - stamp.stat().st_mtime) < min_interval_h * 3600:
+            skip = "debounced"
+        if skip:
+            return {"action": "skip", "reason": skip, "gated": gated}
 
     prof = Path(profile) if profile else find_firefox_profile()
     if prof is None or not prof.exists():

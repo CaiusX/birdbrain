@@ -88,6 +88,10 @@ class TestCookieRefreshDebounce:
         profile = tmp_path / "profile"
         profile.mkdir()
 
+        # These tests are about the debounce, which only runs when the pinned
+        # player client takes cookies at all. Pin that on so the suite keeps
+        # covering the debounce after the client rotates to an anonymous one.
+        monkeypatch.setattr(mod, "PLAYER_CLIENT_ACCEPTS_COOKIES", True)
         monkeypatch.setattr(
             mod, "_youtube_targets", lambda cfg, db: (cookies_file, "https://y/watch?v=a")
         )
@@ -143,4 +147,15 @@ class TestCookieRefreshDebounce:
     def test_no_gated_cams_means_no_probe(self, tmp_path, monkeypatch):
         mod, _, calls = self._stub(tmp_path, monkeypatch, [])
         assert mod.refresh(cfg=None, db=None)["action"] == "skip"
+        assert calls == []
+
+    def test_anonymous_player_client_stands_down(self, tmp_path, monkeypatch):
+        """When the pinned player client is refused *with* cookies, no export
+        can help — refresh must not probe, even under force."""
+        mod, _, calls = self._stub(tmp_path, monkeypatch, ["Tembe"])
+        monkeypatch.setattr(mod, "PLAYER_CLIENT_ACCEPTS_COOKIES", False)
+
+        res = mod.refresh(cfg=None, db=None, force=True)
+        assert res["action"] == "skip"
+        assert res["reason"] == "player client resolves without cookies"
         assert calls == []

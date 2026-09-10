@@ -25,12 +25,26 @@ def _detect_js_runtime() -> str | None:
 # The single player client used for live-stream format resolution. YouTube
 # rotates which clients publish a working HLS manifest, so this needs revisiting
 # whenever every source starts failing "No video formats found!": first
-# `uv run yt-dlp -U`, then re-test clients against a live cam with *fresh*
-# cookies (`--extractor-args youtube:player_client=<name>`) and update this.
+# `uv run yt-dlp -U`, then re-test clients against a live cam
+# (`--extractor-args youtube:player_client=<name>`), *both* with and without
+# cookies, and update both constants below.
 #   2026-08 (yt-dlp 2026.07.04): android_vr → mweb. android_vr, tv, web,
 #   web_safari and ios all return "No video formats found!"; mweb resolves.
 #   Cookies are required — mweb without them is bot-gated.
-PLAYER_CLIENT = "mweb"
+#   2026-09 (yt-dlp 2026.07.04): mweb → android. mweb, web, web_safari and ios
+#   all went to "No video formats found!" and tv to "The page needs to be
+#   reloaded"; android resolves all 43 cams. Note the inversion from mweb:
+#   android only works *anonymously* — hand it the cookies file and YouTube
+#   refuses the account-bound request with the same "No video formats found!".
+PLAYER_CLIENT = "android"
+
+# Whether PLAYER_CLIENT may be given the YouTube cookies file. Some clients
+# (mweb) are bot-gated without cookies; others (android) are refused *with*
+# them. Getting this wrong looks identical either way — "No video formats
+# found!" on every source — so it travels with PLAYER_CLIENT rather than being
+# inferred at the call site. When False the cookie refresher stands down too:
+# no export can fix a failure that cookies cause.
+PLAYER_CLIENT_ACCEPTS_COOKIES = False
 
 
 def resolve_args() -> list[str]:
@@ -92,7 +106,13 @@ class YouTubeSource(AudioSource):
         # path: yt-dlp can write to its heart's content, the canonical export
         # at self.cookies_file stays pristine for the next call.
         tmp_cookies: Path | None = None
-        if self.cookies_file:
+        if not PLAYER_CLIENT_ACCEPTS_COOKIES:
+            # Deliberately anonymous — see PLAYER_CLIENT_ACCEPTS_COOKIES. Passing
+            # cookies to a client YouTube won't accept them from fails every
+            # resolve, so drop them rather than let a configured cookies_file
+            # silently break the source.
+            pass
+        elif self.cookies_file:
             src = Path(self.cookies_file)
             if src.is_file():
                 fd, tmp_path = tempfile.mkstemp(suffix=".cookies.txt")

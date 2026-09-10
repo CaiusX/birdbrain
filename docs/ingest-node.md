@@ -87,13 +87,26 @@ trusted.
 
 ### 4. YouTube cookies
 
-Mandatory, not optional. `audio/youtube.py` pins `player_client=mweb`, and mweb
-without cookies is bot-gated ("Sign in to confirm you're not a bot"). A node
-needs its own logged-in Firefox profile and its own `refresh-cookies` timer.
+**Whether cookies are needed depends on the pinned player client**, and the two
+are pinned together in `audio/youtube.py` as `PLAYER_CLIENT` and
+`PLAYER_CLIENT_ACCEPTS_COOKIES`. YouTube rotates which client publishes a
+working manifest, and the cookie half flips with it:
 
-Use a **different Google account from central's**. Re-exporting cookies makes
-YouTube rotate the session, so two hosts sharing one account invalidate each
-other's cookies and both end up bot-gated.
+- **`mweb` (until 2026-09)** — cookies *mandatory*; without them it is bot-gated
+  ("Sign in to confirm you're not a bot").
+- **`android` (current)** — cookies *must not be sent*. It resolves anonymously
+  and YouTube refuses the account-bound request, failing with the same
+  "No video formats found!" a wrong client gives.
+
+While `PLAYER_CLIENT_ACCEPTS_COOKIES` is false the resolver drops any configured
+`cookies_file` and the `refresh-cookies` timer stands down, so a node needs
+neither a logged-in Firefox profile nor its own Google account. Leave the
+`cookies_file` entries in `sources.node.toml` — they cost nothing and are live
+again the moment the pin rotates back to a cookie-taking client.
+
+If it does rotate back: use a **different Google account from central's**.
+Re-exporting cookies makes YouTube rotate the session, so two hosts sharing one
+account invalidate each other's cookies and both end up bot-gated.
 
 A node also needs a JS runtime on `PATH` (deno or node) for YouTube's n-sig
 challenge — `_detect_js_runtime` finds it, and without one yt-dlp warns and some
