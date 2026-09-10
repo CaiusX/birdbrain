@@ -338,6 +338,50 @@ class TestSoundsLike:
         assert by_name["Cape Sparrow"]["sounds_like"] is False
         assert by_name["Cape Sparrow"]["same_genus"] is True
 
+    def test_a_short_name_resolves_when_it_is_unambiguous(self, tmp_path):
+        """THE gap. The Pied Barbet's description says "Hoopoe sounds similar"
+        and the roster calls that bird "Eurasian Hoopoe", so exact-name
+        matching read straight past the one confusion the sentence exists to
+        warn about."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Tricholaema leucomelas", common="Pied Barbet",
+                   source="Cam")
+        _add(db, sci="Upupa epops", common="Eurasian Hoopoe", source="Cam")
+        db.set_species_call_description(
+            "Tricholaema leucomelas", "Hollow hoop notes; Hoopoe sounds similar.")
+
+        cands = _similar(c, det)["candidates"]
+        assert [x["common_name"] for x in cands] == ["Eurasian Hoopoe"]
+        assert cands[0]["sounds_like"] is True
+
+    def test_a_short_name_shared_by_several_birds_is_ignored(self, tmp_path):
+        """The other half of that rule, and the reason it is safe: "unlike a
+        typical sparrow" must not become an edge to whichever sparrow sorted
+        first."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Tricholaema leucomelas", common="Pied Barbet",
+                   source="Cam")
+        _add(db, sci="Passer melanurus", common="Cape Sparrow", source="Cam")
+        _add(db, sci="Passer domesticus", common="House Sparrow", source="Cam")
+        db.set_species_call_description(
+            "Tricholaema leucomelas", "Chirps, not unlike a Sparrow.")
+
+        assert _similar(c, det)["candidates"] == []
+
+    def test_the_full_name_still_wins_over_its_own_suffix(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Tricholaema leucomelas", common="Pied Barbet",
+                   source="Cam")
+        _add(db, sci="Upupa epops", common="Eurasian Hoopoe", source="Cam")
+        db.set_species_call_description(
+            "Tricholaema leucomelas", "Compare the Eurasian Hoopoe.")
+
+        assert [x["common_name"] for x in _similar(c, det)["candidates"]] == [
+            "Eurasian Hoopoe"]
+
     def test_a_species_naming_itself_is_not_its_own_candidate(self, tmp_path):
         app, db = _app(tmp_path)
         c = TestClient(app)

@@ -6177,7 +6177,33 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         }
         if not by_common:
             return {}
-        ordered = sorted(by_common, key=len, reverse=True)
+
+        # Descriptions use the short name a person would say. The Acacia Pied
+        # Barbet's says "Hoopoe sounds similar", and our roster calls that bird
+        # "Eurasian Hoopoe", so exact-name matching alone read straight past
+        # the one confusion that description exists to warn about.
+        #
+        # So allow a name with leading words dropped -- but only where exactly
+        # one species' name ends that way. "Hoopoe" resolves; "Sparrow",
+        # "Barbet" and "Striped Swallow" are each shared by several birds and
+        # stay rejected, which is what keeps "unlike a typical sparrow" from
+        # becoming an edge. 121 aliases over this roster, and the ambiguous
+        # ones fail closed.
+        ends: dict[str, int] = {}
+        for common in by_common:
+            words = common.split()
+            for i in range(1, len(words)):
+                suffix = " ".join(words[i:])
+                ends[suffix] = ends.get(suffix, 0) + 1
+        lookup = dict(by_common)
+        for common, sci_name in by_common.items():
+            words = common.split()
+            for i in range(1, len(words)):
+                suffix = " ".join(words[i:])
+                if ends[suffix] == 1 and suffix not in by_common:
+                    lookup[suffix] = sci_name
+
+        ordered = sorted(lookup, key=len, reverse=True)
         pattern = re.compile(
             r"(?<![\w-])(" + "|".join(re.escape(n) for n in ordered) + r")(?![\w-])"
         )
@@ -6187,7 +6213,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         # edit here acquires a very confusing bug.
         for sci, description in db.species_call_descriptions():
             for mention in pattern.findall(description or ""):
-                other = by_common[mention]
+                other = lookup[mention]
                 if other == sci:
                     continue
                 adj.setdefault(sci, set()).add(other)
