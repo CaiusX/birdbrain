@@ -1796,6 +1796,25 @@ class Database:
             ), {"sci": scientific_name, "lim": limit}).scalars().all()
         return list(rows)
 
+    def confidences_by_species(self) -> dict[str, list[float]]:
+        """Every detection's confidence, grouped by species.
+
+        The denominator for a proposed confidence floor: what fraction of a
+        species' own detections a given cutoff would discard. Coarse but
+        honest -- these are recorded detections, false positives included, so
+        "kept" means kept, not "correct".
+
+        A full column scan of a large table; call it once and reuse.
+        """
+        out: dict[str, list[float]] = {}
+        with self._Session() as s:
+            for sci, conf in s.execute(
+                select(DetectionRow.scientific_name, DetectionRow.confidence)
+            ):
+                if sci is not None and conf is not None:
+                    out.setdefault(sci, []).append(float(conf))
+        return out
+
     def species_call_descriptions(self) -> list[tuple[str, str]]:
         """(scientific_name, call description) for every species that has one.
 

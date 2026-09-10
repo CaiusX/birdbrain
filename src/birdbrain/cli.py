@@ -1010,7 +1010,8 @@ def build_confusions(
     ] = 25,
     min_detections: Annotated[
         int,
-        typer.Option("--min-detections", help="Skip species with fewer clips than this."),
+        typer.Option("--min-detections",
+                     help="Skip species with fewer clips than this."),
     ] = 5,
     species: Annotated[
         str | None,
@@ -1114,3 +1115,158 @@ def build_confusions(
         f"({skipped} missing audio, {failed} failed) — "
         f"{len(edges)} confusion pairs at >=2 clips"
     )
+
+
+def _pick_floor(
+    own: list[float],
+    wrong: list[tuple[float, int]],
+    baseline: float,
+    keep_own: float,
+    suppress: float,
+) -> tuple[float, float, float] | None:
+    """The smallest floor above ``baseline`` that keeps ``keep_own`` of a
+    species' own detections while removing ``suppress`` of its wrong firings,
+    or None when no such floor exists.
+
+    Strictly above the baseline, never at or below it. The baseline is the
+    floor already in force, so a "proposal" beneath it would be a proposal to
+    record *more* of what we are trying to suppress -- which is what came back
+    the first time this was measured against re-analysis' 0.05 rather than
+    against what capture actually keeps.
+
+    Returns (floor, fraction of own kept, fraction of wrong removed).
+    """
+    if not own or not wrong:
+        return None
+    obs = sum(n for _c, n in wrong)
+    if obs <= 0:
+        return None
+    for step in range(int(baseline / 0.05) + 1, 20):
+        f = round(step * 0.05, 2)
+        kept = sum(1 for x in own if x >= f) / len(own)
+        gone = sum(n for c, n in wrong if c < f) / obs
+        if kept >= keep_own and gone >= suppress:
+            return (f, kept, gone)
+    return None
+
+
+@app.command(name="suggest-floors")
+def suggest_floors(
+    apply_: Annotated[
+        bool,
+        typer.Option("--apply", help="Write the floors. Without this, only prints them."),
+    ] = False,
+    keep_own: Annotated[
+        float,
+        typer.Option("--keep-own",
+                     help="Fraction of a species' own detections a floor must keep."),
+    ] = 0.95,
+    suppress: Annotated[
+        float,
+        typer.Option("--suppress",
+                     help="Fraction of its wrong firings a floor must remove."),
+    ] = 0.70,
+    min_obs: Annotated[
+        int,
+        typer.Option("--min-obs", help="Wrong firings required before a species is considered."),
+    ] = 15,
+    min_genera: Annotated[
+        int,
+        typer.Option("--min-genera", help="Distinct genera it must fire across."),
+    ] = 5,
+) -> None:
+    """Propose per-species confidence floors for false-positive attractors.
+
+    An attractor is a label BirdNET reaches for when it is unsure: it turns up
+    on many other species' clips, across many genera, rather than being
+    confused with one particular bird. Egyptian Goose fires on 54 genera at a
+    mean of 0.42 while its own detections sit at 0.95 and up -- so a floor
+    around 0.9 costs almost nothing and removes the lot.
+
+    A floor is only proposed where that gap exists: it must remove most of the
+    species' wrong firings while keeping nearly all of its own detections. Many
+    attractors have no such floor, because they fire wrongly at the same
+    confidences they fire rightly, and those are reported and left alone.
+
+    Prints the trade-off and changes nothing unless --apply is given. The
+    floors take effect at capture (pipeline and ingest), so they suppress
+    future detections rather than hiding existing ones.
+
+    Reads the confusion matrix, so run `build-confusions` first.
+    """
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    db = Database(cfg.db_url)
+
+    def genus(s: str) -> str:
+        return s.partition(" ")[0]
+
+    # Wrong firings, approximated at pair granularity: each pair contributes
+    # its clip count at its mean confidence. We store sums rather than every
+    # observation, so this is a histogram of pair means, not of firings.
+    wrong: dict[str, list[tuple[float, int]]] = {}
+    spread: dict[str, set[str]] = {}
+    for subj, other, clips, mean_conf in db.confusion_edges(min_clips=1):
+        if genus(subj) == genus(other):
+            continue          # congener overlap is real ambiguity, not an attractor
+        wrong.setdefault(other, []).append((mean_conf, clips))
+        spread.setdefault(other, set()).add(genus(subj))
+
+    own_conf = db.confidences_by_species()
+    existing = db.species_min_confidence_map()
+    names = {sci: common for sci, common, _n, _c in db.species_catalog()}
+
+    # Re-analysis runs at 0.05 so runners-up surface; capture never did. A
+    # species' own lowest recorded confidence is therefore the exact floor its
+    # sources were applying, override included — nothing below it was ever
+    # going to become a detection. Counting those firings would propose floors
+    # that suppress nothing, and for a species already floored, propose
+    # lowering it: Egyptian Goose sits at 0.90 and, measured against 0.05,
+    # looked like it wanted 0.55.
+
+    proposals: list[tuple] = []
+    no_gap: list[tuple] = []
+    for sci, hits in wrong.items():
+        if len(spread.get(sci, ())) < min_genera:
+            continue
+        own_all = own_conf.get(sci) or []
+        if len(own_all) < 50:
+            continue
+        baseline = max(existing.get(sci) or 0.0, min(own_all))
+        # Only firings that would actually have been recorded.
+        live = [(c, n) for c, n in hits if c >= baseline]
+        obs = sum(n for _c, n in live)
+        if obs < min_obs:
+            continue
+        own = sorted(own_all)
+        chosen = _pick_floor(own, live, baseline, keep_own, suppress)
+        row = (sci, names.get(sci, sci), obs, len(spread[sci]), len(own))
+        if chosen:
+            proposals.append((*row, *chosen))
+        else:
+            no_gap.append(row)
+
+    proposals.sort(key=lambda r: -r[2])
+    console.print(f"\n[bold]{len(proposals)} floors proposed[/] "
+                  f"({len(no_gap)} attractors have no safe floor)\n")
+    console.print(f"  {'species':30s} {'wrong':>6s} {'gen':>4s} {'floor':>6s} "
+                  f"{'own kept':>9s} {'wrong gone':>11s} {'current':>8s}")
+    for sci, common, obs, gen, _n, f, kept, gone in proposals:
+        cur = existing.get(sci)
+        console.print(f"  {common[:30]:30s} {obs:6d} {gen:4d} {f:6.2f} "
+                      f"{kept*100:8.1f}% {gone*100:10.1f}% "
+                      f"{(f'{cur:.2f}' if cur is not None else '—'):>8s}")
+
+    if no_gap:
+        console.print(f"\n[yellow]no safe floor[/] (fires wrongly at the "
+                      f"confidences it fires rightly): "
+                      f"{', '.join(n for _s, n, *_ in no_gap[:8])}"
+                      f"{' …' if len(no_gap) > 8 else ''}")
+
+    if not apply_:
+        console.print("\n[dim]nothing written — pass --apply to set these[/]")
+        return
+    for sci, _common, _o, _g, _n, f, _k, _s in proposals:
+        db.set_species_min_confidence(sci, f)
+    console.print(f"\n[green]applied {len(proposals)} floors[/] — "
+                  f"they take effect at capture within a few minutes")
