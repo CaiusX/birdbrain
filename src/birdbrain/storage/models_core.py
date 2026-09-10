@@ -56,6 +56,8 @@ class DetectionRow(Base):
     # Free-text (auto-completed from species we've already detected). NULL
     # whenever label is anything other than 'bad'.
     suggested_species: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Consensus of the per-user ``nonbird`` votes; see DetectionScoreRow.
+    nonbird: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Manual sound-quality rating from the review popup: 1 (faint/noisy) – 5
     # (crisp). Independent of ``label`` — a correct ID can still sound poor.
     # NULL when the rater didn't give one.

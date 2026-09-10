@@ -52,14 +52,16 @@
     {% if lbl == 'good' %}
       <span class="px-2 py-0.5 rounded text-xs font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/40">✓ good</span>
     {% elif lbl == 'bad' %}
+      {# A rejection carries its reason: a species it looked more like, or the
+         kind of thing it was when it wasn't a bird at all. #}
       <span class="px-2 py-0.5 rounded text-xs font-medium bg-rose-500/15 text-rose-300 border border-rose-500/40 truncate"
-            {% if r.suggested_species %}title="suggested: {{ r.suggested_species }}"{% endif %}>
-        ✗ bad{% if r.suggested_species %} → <span class="text-rose-200">{{ r.suggested_species }}</span>{% endif %}
+            {% if r.suggested_species %}title="suggested: {{ r.suggested_species }}"{% elif r.nonbird %}title="not a bird: {{ r.nonbird }}"{% endif %}>
+        ✗ bad{% if r.suggested_species %} → <span class="text-rose-200">{{ r.suggested_species }}</span>{% elif r.nonbird %} → <span class="text-rose-200">≠ {{ r.nonbird }}</span>{% endif %}
       </span>
     {% elif lbl == 'unsure' %}
       <span class="px-2 py-0.5 rounded text-xs font-medium bg-amber-500/15 text-amber-300 border border-amber-500/40 truncate"
-            {% if r.suggested_species %}title="suggested: {{ r.suggested_species }}"{% endif %}>
-        ? unsure{% if r.suggested_species %} → <span class="text-amber-200">{{ r.suggested_species }}</span>{% endif %}
+            {% if r.suggested_species %}title="suggested: {{ r.suggested_species }}"{% elif r.nonbird %}title="not a bird: {{ r.nonbird }}"{% endif %}>
+        ? unsure{% if r.suggested_species %} → <span class="text-amber-200">{{ r.suggested_species }}</span>{% elif r.nonbird %} → <span class="text-amber-200">≠ {{ r.nonbird }}</span>{% endif %}
       </span>
     {% else %}
       <span class="text-xs text-zinc-600">unreviewed</span>

@@ -162,6 +162,8 @@ class Database:
             ("detections", "label", "TEXT"),
             ("detections", "labeled_at", "TIMESTAMP"),
             ("detections", "suggested_species", "TEXT"),
+            ("detections", "nonbird", "TEXT"),
+            ("detection_scores", "nonbird", "TEXT"),
             ("detections", "sound_rating", "INTEGER"),
             ("detections", "audio_hash", "TEXT"),
             ("detections", "client_id", "TEXT"),
@@ -923,6 +925,11 @@ class Database:
             self._op_id_cache = oid
         return oid
 
+    #: What a non-bird sound was. Fixed and short on purpose: a reviewer picks
+    #: from it in one tap, and every value stays countable afterwards. Anything
+    #: finer belongs in the free-text suggestion beside it.
+    NONBIRD_KINDS = ("frog", "insect", "mammal", "human", "machine", "weather", "other")
+
     def _recompute_consensus(
         self, s: Session, detection_id: int, operator_id: int | None
     ) -> None:
@@ -948,6 +955,7 @@ class Database:
         if not labelled:
             det.label = None
             det.suggested_species = None
+            det.nonbird = None
             det.labeled_at = None
         else:
             counts = Counter(sc.label for sc in labelled)
@@ -982,6 +990,26 @@ class Database:
                     )
             else:
                 det.suggested_species = None
+            # Same rule for "what was it, if not a bird": most common among the
+            # scorers who rejected it, operator breaking a tie.
+            nb = [sc for sc in scores
+                  if sc.label in ("bad", "unsure") and sc.nonbird]
+            if nb:
+                ncnt = Counter(sc.nonbird for sc in nb)
+                ntop = max(ncnt.values())
+                ntied = [v for v, c in ncnt.items() if c == ntop]
+                if len(ntied) == 1:
+                    det.nonbird = ntied[0]
+                else:
+                    op_n = next(
+                        (sc.nonbird for sc in nb if sc.user_id == operator_id), None
+                    )
+                    det.nonbird = (
+                        op_n if op_n in ntied
+                        else max(nb, key=lambda sc: _aware(sc.scored_at)).nonbird
+                    )
+            else:
+                det.nonbird = None
         ratings = [sc.sound_rating for sc in scores if sc.sound_rating]
         det.sound_rating = (
             max(1, min(5, round(sum(ratings) / len(ratings)))) if ratings else None
@@ -990,6 +1018,7 @@ class Database:
     def upsert_detection_score(
         self, detection_id: int, user_id: int, label: str | None,
         *, suggested: Any = _UNSET, sound_rating: Any = _UNSET,
+        nonbird: Any = _UNSET,
     ) -> bool:
         """Set/clear one user's score of a detection, then recompute the
         consensus onto DetectionRow. Returns False if the detection is gone.
@@ -998,6 +1027,8 @@ class Database:
             raise ValueError(f"invalid label: {label!r}")
         if sound_rating not in (_UNSET, None) and sound_rating not in (1, 2, 3, 4, 5):
             raise ValueError(f"invalid sound_rating: {sound_rating!r}")
+        if nonbird not in (_UNSET, None) and nonbird not in self.NONBIRD_KINDS:
+            raise ValueError(f"invalid nonbird: {nonbird!r}")
         now = datetime.now(UTC)
         with self._Session() as s, s.begin():
             if s.get(DetectionRow, detection_id) is None:
@@ -1016,9 +1047,14 @@ class Database:
             sc.label = label
             sc.scored_at = now
             if label not in ("bad", "unsure"):
+                # A clip accepted as correct has no rejection to explain.
                 sc.suggested_species = None
-            elif suggested is not _UNSET:
-                sc.suggested_species = (suggested or None)
+                sc.nonbird = None
+            else:
+                if suggested is not _UNSET:
+                    sc.suggested_species = (suggested or None)
+                if nonbird is not _UNSET:
+                    sc.nonbird = (nonbird or None)
             if sound_rating is not _UNSET:
                 sc.sound_rating = sound_rating
             s.flush()

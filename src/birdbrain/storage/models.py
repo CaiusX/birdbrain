@@ -447,6 +447,11 @@ class DetectionScoreRow(Base):
     # 'good' | 'bad' | 'unsure' | NULL (cleared).
     label: Mapped[str | None] = mapped_column(String(16), nullable=True)
     suggested_species: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # What made the sound, when it wasn't a bird at all. One of a fixed
+    # vocabulary (see NONBIRD_KINDS) rather than free text: the free-text
+    # suggestion box has collected "Insects", "Hippo" and "Train", each true
+    # about the clip and useless as data.
+    nonbird: Mapped[str | None] = mapped_column(String(16), nullable=True)
     sound_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

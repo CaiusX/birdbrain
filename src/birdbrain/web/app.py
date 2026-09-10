@@ -5956,6 +5956,17 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             kwargs["suggested"] = s_raw.strip() or None
         # sound_rating: absent → leave untouched; present-but-empty → clear;
         # "1".."5" → set. Anything else is a bad request.
+        # nonbird: absent → untouched; present-but-empty → clear; a known kind
+        # → set. Validated against the vocabulary here so a stray value from a
+        # hand-rolled request cannot get into the column the reports count.
+        if "nonbird" in form:
+            n_raw = (form.get("nonbird") or "").strip()
+            if n_raw == "":
+                kwargs["nonbird"] = None
+            elif n_raw in Database.NONBIRD_KINDS:
+                kwargs["nonbird"] = n_raw
+            else:
+                raise HTTPException(400, "unknown nonbird kind")
         if "sound_rating" in form:
             r_raw = (form.get("sound_rating") or "").strip()
             if r_raw == "":
@@ -6008,6 +6019,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return JSONResponse({
             "authed": uid is not None,
             "label": sc.label if sc else None,
+            "nonbird": sc.nonbird if sc else None,
             "suggested": (sc.suggested_species if sc else None) or "",
             "sound_rating": (sc.sound_rating if sc else None) or "",
             "tally": tally,

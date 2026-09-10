@@ -302,6 +302,31 @@
             class="hidden absolute left-0 right-0 top-full mt-1 z-10 max-h-56 overflow-y-auto
                    rounded border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/50"></ul>
       </div>
+
+      {# …or it was not a bird at all. BirdNET has no label for an African frog
+         — 41 amphibian classes, every one North American — so every frog,
+         insect and passing vehicle currently lands on a bird. Typing that into
+         the box above is what produced "Insects", "Hippo" and "Train": true
+         about the clip and uncountable afterwards. A fixed vocabulary is one
+         tap and stays queryable, and it is the only way the archive starts
+         accumulating labelled non-bird audio. #}
+      <div class="mt-3">
+        <div class="text-xs uppercase tracking-wider text-zinc-500">…or it wasn't a bird</div>
+        <div id="spec-confirm-nonbird" class="mt-1.5 flex flex-wrap gap-1.5">
+          {# Words, not emoji: this Pi has no emoji font installed, and the
+             rest of the UI stays inside the dingbats a normal face carries
+             (✓ ✗ ★ ♪). Boxes where a frog should be is not a trade worth
+             making for a decoration. #}
+          {% for kind in ["frog", "insect", "mammal", "human",
+                          "machine", "weather", "other"] %}
+            <button type="button" data-nonbird="{{ kind }}"
+                    class="px-2.5 py-1.5 rounded text-xs border border-zinc-700 text-zinc-400
+                           hover:text-zinc-100 hover:border-zinc-500">
+              {{ kind }}
+            </button>
+          {% endfor %}
+        </div>
+      </div>
     </div>
 
     <div class="mt-4">
@@ -515,6 +540,7 @@
           verdictEl.classList.remove('hidden');
           loginEl.classList.add('hidden');
           currentSuggested = d.suggested || '';
+          currentNonbird = d.nonbird || null;
           currentSoundRating = parseInt(d.sound_rating, 10) || null;
           paintActiveLabel(d.label || null);
         } else {
@@ -531,6 +557,7 @@
   const confirmVerdict = document.getElementById('spec-confirm-verdict');
   const confirmSuggestWrap = document.getElementById('spec-confirm-suggest-wrap');
   const confirmSuggest = document.getElementById('spec-confirm-suggest');
+  const confirmNonbird = document.getElementById('spec-confirm-nonbird');
   const confirmStars   = document.getElementById('spec-confirm-stars');
   const confirmStarsReadout = document.getElementById('spec-confirm-stars-readout');
   const confirmStarsClear = document.getElementById('spec-confirm-stars-clear');
@@ -657,6 +684,7 @@
   // spectrogram endpoint applies when no palette is given.
   let currentPalette = 'fire';
   let currentSoundRating = null;
+  let currentNonbird = null;
   // Scientific name we've already fetched XC data for in this modal session.
   // Reset on every openFor so a new detection re-fetches when expanded.
   let xcLoadedFor = null;
@@ -1386,7 +1414,7 @@
     return li;
   }
 
-  async function postLabel(value, suggested, soundRating) {
+  async function postLabel(value, suggested, soundRating, nonbird) {
     if (currentId == null) return;
     const params = new URLSearchParams();
     params.set('value', value);
@@ -1395,6 +1423,7 @@
     if (soundRating !== undefined) {
       params.set('sound_rating', soundRating == null ? '' : String(soundRating));
     }
+    if (nonbird !== undefined) params.set('nonbird', nonbird || '');
     const resp = await fetch(`/api/detections/${currentId}/label`, {
       method: 'POST',
       headers: {
@@ -1421,6 +1450,7 @@
     }
     if (suggested !== undefined) currentSuggested = suggested || '';
     if (soundRating !== undefined) currentSoundRating = soundRating;
+    if (nonbird !== undefined) currentNonbird = nonbird || null;
     paintActiveLabel(value || null);
   }
 
@@ -1534,6 +1564,32 @@
     confirmStarsReadout.textContent = n != null ? `${n}/5` : 'not rated';
   }
 
+  let pendingNonbird = null;
+  function paintNonbird() {
+    confirmNonbird.querySelectorAll('[data-nonbird]').forEach((b) => {
+      const on = b.dataset.nonbird === pendingNonbird;
+      b.className =
+        'px-2.5 py-1.5 rounded text-xs border ' +
+        (on ? 'border-sky-400 text-sky-300 bg-sky-500/10'
+            : 'border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500');
+    });
+  }
+  confirmNonbird.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-nonbird]');
+    if (!b) return;
+    // Second tap on the active chip clears it.
+    pendingNonbird = (pendingNonbird === b.dataset.nonbird) ? null : b.dataset.nonbird;
+    if (pendingNonbird) confirmSuggest.value = '';
+    paintNonbird();
+  });
+  confirmSuggest.addEventListener('input', () => {
+    // Naming a species answers the same question the other way.
+    if (confirmSuggest.value.trim() && pendingNonbird) {
+      pendingNonbird = null;
+      paintNonbird();
+    }
+  });
+
   function openConfirm(value) {
     if (currentId == null || !value) return;
     // Silence the comparison before asking for a decision — an A/B loop still
@@ -1548,6 +1604,8 @@
     const needSuggest = (value === 'bad' || value === 'unsure');
     confirmSuggestWrap.classList.toggle('hidden', !needSuggest);
     confirmSuggest.value = needSuggest ? currentSuggested : '';
+    pendingNonbird = needSuggest ? currentNonbird : null;
+    paintNonbird();
     hideSuggest();
     if (needSuggest) ensureSpeciesCatalog();
     paintStars(confirmRating);
@@ -1642,7 +1700,8 @@
   confirmCancel.addEventListener('click', closeConfirm);
   confirmOk.addEventListener('click', () => {
     const needSuggest = (pendingLabel === 'bad' || pendingLabel === 'unsure');
-    postLabel(pendingLabel, needSuggest ? confirmSuggest.value : undefined, confirmRating);
+    postLabel(pendingLabel, needSuggest ? confirmSuggest.value : undefined,
+              confirmRating, needSuggest ? (pendingNonbird || '') : undefined);
     closeConfirm();
   });
   confirmSuggest.addEventListener('keydown', (e) => {
