@@ -377,6 +377,34 @@
            class="mt-1.5 block w-full h-28 object-fill rounded bg-zinc-950">
       <audio id="spec-compare-a-audio" src="" controls preload="metadata"
              class="w-full h-8 mt-1.5"></audio>
+      {# Score A against A, inside A's own box. The comparison is what produces
+         the verdict, so the verdict belongs beside the clip it judges rather
+         than at the foot of a popup showing two species. Same data-label-btn
+         contract as the main modal, so one handler and one painter drive both
+         sets and they cannot disagree; the confirm popup opens on top and this
+         stays put underneath, ready for the next candidate. #}
+      <div class="mt-2 pt-2 border-t border-emerald-500/20 flex items-center gap-1.5 flex-wrap">
+        <div id="spec-compare-verdict"
+             class="{% if not request.state.user %}hidden {% endif %}flex items-center gap-1.5 flex-wrap">
+          <span class="text-[11px] uppercase tracking-wider text-zinc-500 mr-0.5">
+            score <span id="spec-compare-verdict-species" class="normal-case text-zinc-400"></span>
+          </span>
+          <button type="button" data-label-btn="bad"
+                  class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
+                  title="False positive">✗ bad</button>
+          <button type="button" data-label-btn="unsure"
+                  class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
+                  title="Can't tell">? unsure</button>
+          <button type="button" data-label-btn="good"
+                  class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
+                  title="Correct ID">✓ good</button>
+          <button type="button" data-label-btn=""
+                  class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                  title="Clear label">↺</button>
+        </div>
+        <a id="spec-compare-login" href="/login"
+           class="{% if request.state.user %}hidden {% endif %}text-sm text-emerald-300 hover:text-emerald-200">log in to score →</a>
+      </div>
     </div>
 
     {# B — the candidate, as one of our OWN recordings of it. Same pipeline,
@@ -428,43 +456,7 @@
       <span id="spec-compare-b-where" class="ml-auto text-[11px] text-zinc-500 truncate"></span>
     </div>
 
-    {# Score A from here. The comparison is what produces the verdict, so
-       making the reviewer close this popup to record it puts the decision one
-       step away from the evidence. Same data-label-btn contract as the main
-       modal, so the same handler drives both and the two stay in sync; the
-       confirm popup opens on top and this stays put underneath, ready for the
-       next candidate. "A" is named because two species are on screen and it
-       must be unambiguous which one is being judged. #}
-    <div class="flex items-center gap-2 flex-wrap pt-2 border-t border-zinc-800">
-      <div id="spec-compare-verdict"
-           class="{% if not request.state.user %}hidden {% endif %}flex items-center gap-1.5 flex-wrap">
-        <span class="text-[11px] uppercase tracking-wider text-zinc-500 mr-0.5">
-          score A · <span id="spec-compare-verdict-species" class="normal-case text-zinc-400"></span>
-        </span>
-        <button type="button" data-label-btn="bad"
-                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
-                title="False positive">✗ bad</button>
-        <button type="button" data-label-btn="unsure"
-                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
-                title="Can't tell">? unsure</button>
-        <button type="button" data-label-btn="good"
-                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
-                title="Correct ID">✓ good</button>
-        <button type="button" data-label-btn=""
-                class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
-                title="Clear label">↺</button>
-      </div>
-      <a id="spec-compare-login" href="/login"
-         class="{% if request.state.user %}hidden {% endif %}text-sm text-emerald-300 hover:text-emerald-200">log in to score →</a>
-    </div>
-
-    <div class="flex items-center justify-between gap-2 flex-wrap pt-1">
-      {# The other payoff. Having decided it is really B, the reviewer should
-         not have to close, re-open the verdict and retype the name. #}
-      <button type="button" id="spec-compare-suggest"
-              class="px-3 py-1.5 rounded text-sm border border-amber-500/50 text-amber-300 hover:bg-amber-500/10">
-        it's more like B →
-      </button>
+    <div class="flex items-center justify-end gap-2 flex-wrap pt-1">
       <button type="button" id="spec-compare-dismiss"
               class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800">Close</button>
     </div>
@@ -1710,7 +1702,6 @@
   const cmpPlayB   = document.getElementById('spec-compare-play-b');
   const cmpAbBtn   = document.getElementById('spec-compare-ab');
   const cmpBWhere  = document.getElementById('spec-compare-b-where');
-  const cmpSuggest = document.getElementById('spec-compare-suggest');
   const cmpVerdictSpecies = document.getElementById('spec-compare-verdict-species');
 
   // Detection id whose candidate list is already rendered. Reset per openFor.
@@ -1995,16 +1986,6 @@
   }
   cmpAbBtn.addEventListener('click', () => { if (abOn) { stopAb(); cmpAAudio.pause(); cmpBAudio.pause(); } else startAb(); });
 
-  // Carry the conclusion back into the verdict rather than making the reviewer
-  // retype it: prefill the suggestion and open the confirm popup on "unsure",
-  // which is the honest default — deciding it resembles B is not the same as
-  // knowing it is B.
-  cmpSuggest.addEventListener('click', () => {
-    if (!cmpCandidate) return;
-    currentSuggested = cmpCandidate.common_name;
-    closeCompare();
-    openConfirm('unsure');
-  });
 
   document.getElementById('spec-compare-close').addEventListener('click', closeCompare);
   document.getElementById('spec-compare-dismiss').addEventListener('click', closeCompare);
