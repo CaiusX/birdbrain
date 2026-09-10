@@ -376,3 +376,110 @@ class TestSoundsLike:
         c0 = _similar(c, det)["candidates"][0]
         assert c0["sounds_like"] and c0["same_genus"] and c0["here"]
         assert c0["reason"] == "sounds like · same genus · heard at this site"
+
+
+class TestConfusionMatrix:
+    """Candidates measured from re-analysis rather than asserted.
+
+    The genus rule asks what is related and the call descriptions ask what
+    somebody wrote down; this asks what the model actually gets wrong.
+    """
+
+    def _seen(self, db, det_id, subject, pairs):
+        return db.record_reanalysis(det_id, subject, pairs)
+
+    def test_a_measured_pair_becomes_a_candidate(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Cam")
+        # Two clips of the subject on which BirdNET also proposed griseus.
+        for i in range(2):
+            self._seen(db, 9000 + i, "Passer diffusus", [("Passer griseus", 0.7)])
+
+        cand = _similar(c, det)["candidates"][0]
+        assert cand["common_name"] == "Northern Gray-headed Sparrow"
+        assert cand["confused"] is True
+        assert cand["confused_clips"] == 2
+        assert "BirdNET confuses these (2 clips)" in cand["reason"]
+
+    def test_one_sighting_is_noise_and_does_not_qualify(self, tmp_path):
+        """BirdNET emits a long tail at the 0.05 floor re-analysis uses. A
+        species proposed on a single clip is that tail, not a confusion."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Streptopelia capicola", common="Ring-necked Dove", source="Cam")
+        self._seen(db, 9100, "Passer diffusus", [("Streptopelia capicola", 0.05)])
+
+        assert _similar(c, det)["candidates"] == []
+
+    def test_a_measured_pair_outranks_a_written_one(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Cecropis abyssinica", common="Lesser Striped Swallow",
+                   source="Cam")
+        _add(db, sci="Hirundo rustica", common="Barn Swallow", source="Far", n=50)
+        _add(db, sci="Cecropis cucullata", common="Greater Striped Swallow",
+             source="Far", n=2)
+        db.set_species_call_description(
+            "Cecropis abyssinica", "The Barn Swallow is the usual trap.")
+        for i in range(3):
+            self._seen(db, 9200 + i, "Cecropis abyssinica",
+                       [("Cecropis cucullata", 0.6)])
+
+        names = [x["common_name"] for x in _similar(c, det)["candidates"]]
+        assert names[0] == "Greater Striped Swallow", names
+
+    def test_re_analysing_one_clip_twice_does_not_double_count(self, tmp_path):
+        """THE bookkeeping rule. The panel re-runs on every expansion, and the
+        counts are sums, so this has to be idempotent or simply looking at a
+        clip repeatedly would manufacture a confusion."""
+        _app_unused, db = _app(tmp_path)
+        _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+             source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Cam")
+
+        assert self._seen(db, 9300, "Passer diffusus", [("Passer griseus", 0.7)])
+        assert not self._seen(db, 9300, "Passer diffusus", [("Passer griseus", 0.9)])
+        edges = {(a, b): (n, m) for a, b, n, m in db.confusion_edges(min_clips=1)}
+        assert edges[("Passer diffusus", "Passer griseus")][0] == 1
+
+    def test_windows_within_one_clip_count_once(self, tmp_path):
+        """THE counting bug. BirdNET scores a 3-second window at a time, so a
+        6-second clip returns the same species twice and twelve clips banked
+        eighteen. "clips" has to mean clips."""
+        _app_unused, db = _app(tmp_path)
+        _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+             source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Cam")
+
+        self._seen(db, 9400, "Passer diffusus",
+                   [("Passer griseus", 0.4), ("Passer griseus", 0.9)])
+        edges = {(a, b): (n, m) for a, b, n, m in db.confusion_edges(min_clips=1)}
+        clips, mean_conf = edges[("Passer diffusus", "Passer griseus")]
+        assert clips == 1
+        assert mean_conf == 0.9, "the clip's best window is the one that counts"
+
+    def test_the_subject_is_never_its_own_confusion(self, tmp_path):
+        _app_unused, db = _app(tmp_path)
+        _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+             source="Cam")
+        self._seen(db, 9500, "Passer diffusus",
+                   [("Passer diffusus", 0.9), ("Passer griseus", 0.5)])
+        pairs = {(a, b) for a, b, _n, _m in db.confusion_edges(min_clips=1)}
+        assert ("Passer diffusus", "Passer diffusus") not in pairs
+
+    def test_direction_is_kept(self, tmp_path):
+        """Being called a Cape Sparrow when a House Sparrow called is not the
+        same event as the reverse, and the rates differ."""
+        _app_unused, db = _app(tmp_path)
+        self._seen(db, 9600, "Passer melanurus", [("Passer domesticus", 0.8)])
+        pairs = {(a, b) for a, b, _n, _m in db.confusion_edges(min_clips=1)}
+        assert ("Passer melanurus", "Passer domesticus") in pairs
+        assert ("Passer domesticus", "Passer melanurus") not in pairs

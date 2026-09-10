@@ -47,10 +47,12 @@ from birdbrain.storage.models import (
     HighlightIntervalRow,
     PageViewRow,
     PlaybackStateRow,
+    ReanalysisRunRow,
     RuntimeSourceRow,
     SiteNoteRow,
     SourceDisableRow,
     SourceStateRow,
+    SpeciesConfusionRow,
     SpeciesNoteRow,
     SpeciesSiteNoteRow,
     SpeciesSuppressionRow,
@@ -1686,6 +1688,113 @@ class Database:
             (sci, common or sci, int(n), int(clips or 0))
             for sci, common, n, clips in rows
         ]
+
+    def record_reanalysis(
+        self,
+        detection_id: int,
+        subject_sci: str,
+        candidates: Iterable[tuple[str, float]],
+    ) -> bool:
+        """Bank one clip's re-analysis into the confusion counts.
+
+        ``candidates`` is (scientific_name, confidence) for everything BirdNET
+        proposed *except* the clip's own species. Returns False and changes
+        nothing if this clip has already been counted -- the counts are sums,
+        so a second pass over the same audio would invent agreement that isn't
+        there. That makes this safe to call from the review endpoint on every
+        expansion of the re-analyze panel.
+
+        Candidates are collapsed to one row per species first, keeping its best
+        confidence. BirdNET scores a 3-second window at a time, so a 6-second
+        clip returns two or more verdicts and a species heard throughout is
+        proposed in each of them -- counted raw, twelve clips produced eighteen
+        "clips" of one species. ``clips`` has to mean clips or the rate beside
+        it in the UI is a fiction.
+        """
+        now = datetime.now(UTC)
+        best: dict[str, float] = {}
+        for other_sci, conf in candidates:
+            if not other_sci or other_sci == subject_sci:
+                continue
+            c = float(conf)
+            if c > best.get(other_sci, -1.0):
+                best[other_sci] = c
+
+        with self._Session() as s, s.begin():
+            if s.get(ReanalysisRunRow, detection_id) is not None:
+                return False
+            s.add(ReanalysisRunRow(
+                detection_id=detection_id,
+                scientific_name=subject_sci,
+                analyzed_at=now,
+            ))
+            for other_sci, conf in best.items():
+                row = s.get(SpeciesConfusionRow, (subject_sci, other_sci))
+                if row is None:
+                    row = SpeciesConfusionRow(
+                        subject_sci=subject_sci, other_sci=other_sci,
+                        clips=0, sum_conf=0.0, max_conf=0.0, updated_at=now,
+                    )
+                    s.add(row)
+                row.clips += 1
+                row.sum_conf += float(conf)
+                row.max_conf = max(row.max_conf, float(conf))
+                row.updated_at = now
+        return True
+
+    def reanalysis_counts(self) -> dict[str, int]:
+        """How many clips of each species have been re-analysed. The
+        denominator for a confusion rate, and what the batch builder uses to
+        decide who still needs sampling."""
+        with self._Session() as s:
+            rows = s.execute(
+                select(ReanalysisRunRow.scientific_name, func.count())
+                .group_by(ReanalysisRunRow.scientific_name)
+            ).all()
+        return {sci: int(n) for sci, n in rows}
+
+    def confusion_edges(self, min_clips: int = 2) -> list[tuple[str, str, int, float]]:
+        """(subject, other, clips, mean confidence) above a recurrence floor.
+
+        The floor matters: BirdNET emits a long tail at the 0.05 threshold
+        re-analysis uses, and a species proposed once on one clip is noise, not
+        a confusion. Requiring it to happen repeatedly is what separates the
+        two, and is cheaper than trying to pick a confidence cutoff that means
+        the same thing for a wren and a hornbill.
+        """
+        with self._Session() as s:
+            rows = s.execute(
+                select(
+                    SpeciesConfusionRow.subject_sci,
+                    SpeciesConfusionRow.other_sci,
+                    SpeciesConfusionRow.clips,
+                    SpeciesConfusionRow.sum_conf,
+                )
+                .where(SpeciesConfusionRow.clips >= min_clips)
+            ).all()
+        return [
+            (subj, other, int(n), (float(total) / n) if n else 0.0)
+            for subj, other, n, total in rows
+        ]
+
+    def clips_needing_reanalysis(
+        self, scientific_name: str, limit: int,
+    ) -> list[int]:
+        """Detection ids of this species with a clip and no re-analysis yet.
+
+        Highest confidence first: a confusion matrix built from the clips the
+        model was least sure about would describe its worst moments rather
+        than its habitual mistakes.
+        """
+        with self._Session() as s:
+            rows = s.execute(text(
+                "SELECT d.id FROM detections d"
+                " LEFT JOIN reanalysis_runs r ON r.detection_id = d.id"
+                " WHERE d.scientific_name = :sci AND d.clip_path IS NOT NULL"
+                "   AND r.detection_id IS NULL"
+                " ORDER BY d.confidence DESC LIMIT :lim"
+            ), {"sci": scientific_name, "lim": limit}).scalars().all()
+        return list(rows)
 
     def species_call_descriptions(self) -> list[tuple[str, str]]:
         """(scientific_name, call description) for every species that has one.

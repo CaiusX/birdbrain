@@ -6134,6 +6134,25 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         return db.species_for_source(source_name)
 
     @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=1)
+    def _confusion_map() -> dict[str, dict[str, tuple[int, float]]]:
+        """subject -> {other: (clips, mean confidence)}, measured.
+
+        Built from re-analysis: every clip put back through BirdNET says what
+        else the model heard in it. Where the genus rule asks what is related
+        and the call descriptions ask what somebody wrote down, this asks what
+        actually goes wrong -- in our audio, at our cameras, with the model we
+        run.
+
+        Directed, and left that way. Being called a Cape Sparrow when a House
+        Sparrow called is a different event from the reverse and the two rates
+        differ, so the subject's own row is the honest one to show.
+        """
+        out: dict[str, dict[str, tuple[int, float]]] = {}
+        for subj, other, clips, mean_conf in db.confusion_edges(min_clips=2):
+            out.setdefault(subj, {})[other] = (clips, mean_conf)
+        return out
+
+    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=1)
     def _sounds_like_map() -> dict[str, set[str]]:
         """Which species each species is said to *sound* like.
 
@@ -6256,6 +6275,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
 
         genus = sci.split()[0] if " " in sci else ""
         sounds_like = _sounds_like_map().get(sci, set())
+        confused = _confusion_map().get(sci, {})
         here = _species_for_source_cached(source_name) if source_name else set()
 
         candidates: list[dict] = []
@@ -6264,10 +6284,13 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                 continue
             kin = bool(genus) and cand_sci.startswith(genus + " ")
             alike = cand_sci in sounds_like
-            if not (kin or alike):
+            mix = confused.get(cand_sci)
+            if not (kin or alike or mix):
                 continue
             at_site = cand_sci in here
             why = []
+            if mix:
+                why.append(f"BirdNET confuses these ({mix[0]} clips)")
             if alike:
                 why.append("sounds like")
             if kin:
@@ -6287,20 +6310,25 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                     "here": at_site,
                     "sounds_like": alike,
                     "same_genus": kin,
+                    "confused": bool(mix),
+                    "confused_clips": mix[0] if mix else 0,
+                    "confused_conf": round(mix[1], 3) if mix else 0.0,
                     "reason": " · ".join(why),
                 }
             )
 
-        # Tiers, strongest first: a species someone wrote down as sounding
-        # like this one beats a congener nobody has ever confused it with,
-        # and within either, one we have actually heard at this camera beats
-        # one we have not. Abundance only breaks ties inside a tier.
+        # Tiers, strongest evidence first. A pair the model has actually been
+        # measured mixing up beats one somebody wrote down as similar, which in
+        # turn beats a congener nobody has ever confused it with. Within any of
+        # those, a species we have heard at this camera beats one we have not.
+        # Abundance only breaks ties inside a tier -- and for measured pairs it
+        # is how often the mix-up happened, not how common the bird is.
         def rank(c: dict) -> tuple:
+            if c["confused"]:
+                return (0 if c["here"] else 1, -c["confused_clips"], c["common_name"])
             if c["sounds_like"]:
-                tier = 0 if c["here"] else 1
-            else:
-                tier = 2 if c["here"] else 3
-            return (tier, -c["n"], c["common_name"])
+                return (2 if c["here"] else 3, -c["n"], c["common_name"])
+            return (4 if c["here"] else 5, -c["n"], c["common_name"])
 
         candidates.sort(key=rank)
 
@@ -6402,6 +6430,32 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
             for d in detections[:10]
         ]
+        # Bank it. Every expansion of the re-analyze panel is a free
+        # observation of what this model mistakes this species for, in our
+        # audio -- the one similarity signal that measures the actual failure
+        # rather than standing in for it. Idempotent per clip, so repeated
+        # expansions cost nothing and cannot inflate the counts.
+        #
+        # Whole-clip runs only. A dragged region answers "what is that sound at
+        # 1.5 s", which is a question about a fragment, not about what the clip
+        # was filed as.
+        if analyzed_window is None and orig_sci:
+            try:
+                db.record_reanalysis(
+                    detection_id,
+                    orig_sci,
+                    [
+                        (d["scientific_name"], d["confidence"])
+                        for d in top
+                        if not d["is_original"]
+                    ],
+                )
+            except Exception:
+                # Never fail a review on bookkeeping: the reviewer asked what
+                # BirdNET hears, and they should get the answer whether or not
+                # we managed to write it down.
+                log.exception("reanalysis.record_failed", detection_id=detection_id)
+
         return JSONResponse(
             {
                 "detections": top,

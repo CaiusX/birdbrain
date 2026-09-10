@@ -273,11 +273,16 @@ def test_models_core_holds_exactly_the_units_tables():
 
 
 def test_central_still_sees_every_table():
-    """The split must be invisible to central: one Base, all 23 tables, and
-    `from birdbrain.storage.models import X` unchanged for every X."""
+    """The split must be invisible to central: one Base, every table, and
+    `from birdbrain.storage.models import X` unchanged for every X.
+
+    The count is a tripwire for a second Base quietly splitting the metadata,
+    so it moves whenever central legitimately gains a table — 23 at the split,
+    25 once the confusion matrix added reanalysis_runs and species_confusions.
+    """
 
     assert models.Base is models_core.Base, "a second Base would split the metadata"
-    assert len(models.Base.metadata.tables) == 23
+    assert len(models.Base.metadata.tables) == 25
     # A representative from each side, imported the way callers already do.
     assert models.DetectionRow.__tablename__ == "detections"
     assert models.UserRow.__tablename__ == "users"

@@ -1000,3 +1000,117 @@ def set_role(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command(name="build-confusions")
+def build_confusions(
+    per_species: Annotated[
+        int,
+        typer.Option("--per-species", help="Clips to sample per species."),
+    ] = 25,
+    min_detections: Annotated[
+        int,
+        typer.Option("--min-detections", help="Skip species with fewer clips than this."),
+    ] = 5,
+    species: Annotated[
+        str | None,
+        typer.Option("--species", help="Scientific name; default is every species."),
+    ] = None,
+    max_clips: Annotated[
+        int,
+        typer.Option("--max-clips", help="Stop after this many clips overall."),
+    ] = 2000,
+) -> None:
+    """Build the empirical confusion matrix by re-running BirdNET on stored clips.
+
+    For each clip it records everything BirdNET proposes besides the species
+    the clip is filed as. Enough of those and you have measured what this model
+    actually mistakes for what, in our audio, at our cameras -- which is a
+    different and better answer than "what is related to it" or "what has
+    somebody written that it resembles".
+
+    Resumable and idempotent: clips already analysed are skipped, so this can
+    be run in short bursts and interrupted freely. The review page's re-analyze
+    panel feeds the same table, so the matrix also improves on its own as
+    people use it.
+
+    Highest-confidence clips are sampled first -- a matrix built from the ones
+    the model was least sure about would describe its worst moments rather than
+    its habitual mistakes.
+    """
+    import librosa
+    import numpy as np
+
+    from birdbrain.audio.source import AudioChunk
+    from birdbrain.detector.birdnet import BirdNetDetector
+
+    cfg = AppConfig()
+    configure_logging(cfg.log_level)
+    db = Database(cfg.db_url)
+
+    if species:
+        targets = [(species, per_species)]
+    else:
+        targets = [
+            (sci, per_species)
+            for sci, _common, _n, clips in db.species_catalog()
+            if clips >= min_detections
+        ]
+    if not targets:
+        console.print("[yellow]no species with enough clips[/]")
+        return
+
+    detector = BirdNetDetector()
+    done = skipped = failed = 0
+    console.print(f"{len(targets)} species, up to {per_species} clips each")
+
+    for sci, want in targets:
+        if done >= max_clips:
+            break
+        for det_id in db.clips_needing_reanalysis(sci, want):
+            if done >= max_clips:
+                break
+            with db.session() as s:
+                row = s.get(DetectionRow, det_id)
+                if row is None or not row.clip_path:
+                    continue
+                wav_path = Path(row.clip_path)
+                lat, lon = row.latitude, row.longitude
+                started = row.started_at
+                source_name = row.source_name
+            if not wav_path.is_file():
+                # Retention pruned the audio out from under the row.
+                skipped += 1
+                continue
+            try:
+                samples, sr = librosa.load(str(wav_path), sr=48_000, mono=True)
+                chunk = AudioChunk(
+                    samples=np.asarray(samples, dtype=np.float32),
+                    sample_rate=int(sr),
+                    started_at=started or datetime.now(UTC),
+                    source_name=source_name,
+                )
+                # Same low floor the review panel uses, so both paths bank
+                # comparable observations into one table.
+                found = detector.analyze(
+                    chunk, lat=lat, lon=lon, week=None, min_confidence=0.05
+                )
+            except Exception as e:
+                failed += 1
+                console.print(f"[red]{det_id}: {e}[/]")
+                continue
+            db.record_reanalysis(
+                det_id, sci,
+                [(d.scientific_name, d.confidence) for d in found
+                 if d.scientific_name != sci],
+            )
+            done += 1
+            if done % 50 == 0:
+                console.print(f"  {done} clips…")
+
+    edges = db.confusion_edges(min_clips=2)
+    console.print(
+        f"[green]analysed {done}[/] clips "
+        f"({skipped} missing audio, {failed} failed) — "
+        f"{len(edges)} confusion pairs at >=2 clips"
+    )

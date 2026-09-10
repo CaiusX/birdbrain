@@ -370,6 +370,52 @@ class SourceStateRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ReanalysisRunRow(Base):
+    """One clip that has been put back through BirdNET, and when.
+
+    Exists for idempotency rather than history: the confusion counts it feeds
+    are sums, so re-analysing a clip a second time would double-count it. The
+    stored species is kept alongside because the counts are keyed on what the
+    clip was *filed as*, and a later relabel must not silently re-attribute
+    observations that were already banked under the old name.
+
+    Only whole-clip runs are recorded. Re-analysing a dragged region answers a
+    different question -- "what is that sound at 1.5 s" -- and its runners-up
+    are not evidence about the clip's species.
+    """
+
+    __tablename__ = "reanalysis_runs"
+
+    detection_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scientific_name: Mapped[str] = mapped_column(String(128), index=True)
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SpeciesConfusionRow(Base):
+    """How often BirdNET proposes ``other`` on clips filed as ``subject``.
+
+    An empirical confusion matrix, accumulated from re-analysis rather than
+    asserted. It answers the question the taxonomic and the written-note rules
+    can only approximate: not "what is related to this" or "what has somebody
+    said it resembles", but "what does this model actually mistake it for, in
+    our recordings, at our cameras".
+
+    Directed on purpose. Being called a Cape Sparrow when a House Sparrow
+    called is not the same event as the reverse, and the rates usually differ.
+    """
+
+    __tablename__ = "species_confusions"
+
+    subject_sci: Mapped[str] = mapped_column(String(128), primary_key=True)
+    other_sci: Mapped[str] = mapped_column(String(128), primary_key=True)
+    #: Clips filed as subject on which BirdNET also proposed other.
+    clips: Mapped[int] = mapped_column(Integer, default=0)
+    #: Running total of other's confidence, for a mean without a second pass.
+    sum_conf: Mapped[float] = mapped_column(Float, default=0.0)
+    max_conf: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class UserRow(Base):
     """A registered reviewer. ``role`` is 'tester' (default) or 'operator'
     (the original LAN operator; the old global label is migrated in as this

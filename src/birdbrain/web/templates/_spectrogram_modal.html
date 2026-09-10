@@ -147,7 +147,7 @@
           <span class="inline-block w-3 text-zinc-500 transition-transform group-open:rotate-90">▸</span>
           Similar species · A/B compare
         </h4>
-        <span class="text-[11px] text-zinc-500">congeners and known sound-alikes — pick one to hear ours against this clip</span>
+        <span class="text-[11px] text-zinc-500">what BirdNET mixes this up with, plus sound-alikes and congeners</span>
       </summary>
       <div class="mt-2">
         <p id="spec-modal-similar-status" class="text-xs text-zinc-500"></p>
@@ -1801,21 +1801,40 @@
     sci.className = 'text-[11px] italic text-zinc-500 truncate';
     sci.textContent = c.scientific_name;
     btn.appendChild(sci);
-    // "Sounds like" is somebody's written judgement that these two are
-    // confusable, and it carries further than the genus rule -- a Hadada Ibis
-    // is confused with an Egyptian Goose across three families. Give it its
-    // own badge rather than burying it in the run-on reason string.
-    if (c.sounds_like) {
-      const badge = document.createElement('span');
-      badge.className =
+    // Two badges, strongest first. "Confused" is measured — BirdNET actually
+    // proposed this species on clips filed as the one under review — so it
+    // carries the rate with it and outranks the written judgement. "Sounds
+    // like" is somebody's written judgement, and it reaches further than the
+    // genus rule: a Hadada Ibis is confused with an Egyptian Goose across
+    // three families. Either beats burying the fact in a run-on string.
+    let badged = false;
+    if (c.confused) {
+      const b = document.createElement('span');
+      b.className =
         'ml-auto shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider ' +
+        'border border-rose-500/50 text-rose-300 tabular-nums';
+      b.textContent = `⚠ birdnet mixes up · ${c.confused_clips}`;
+      b.title =
+        `BirdNET proposed this species on ${c.confused_clips} re-analysed clip` +
+        `${c.confused_clips === 1 ? '' : 's'} filed as the one under review` +
+        `, mean confidence ${Number(c.confused_conf).toFixed(2)}.`;
+      btn.appendChild(b);
+      badged = true;
+    }
+    if (c.sounds_like) {
+      const b = document.createElement('span');
+      b.className =
+        (badged ? '' : 'ml-auto ') +
+        'shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider ' +
         'border border-amber-500/50 text-amber-300';
-      badge.textContent = '♪ sounds like';
-      btn.appendChild(badge);
+      b.textContent = '♪ sounds like';
+      b.title = 'Named as a confusion in one of the two call descriptions.';
+      btn.appendChild(b);
+      badged = true;
     }
     const why = document.createElement('span');
     why.className =
-      (c.sounds_like ? '' : 'ml-auto ') +
+      (badged ? '' : 'ml-auto ') +
       'text-[10px] uppercase tracking-wider text-zinc-500 shrink-0';
     const rest = [];
     if (c.same_genus) rest.push('same genus');
