@@ -6096,6 +6096,80 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             },
         )
 
+    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=1)
+    def _species_catalog_cached() -> list[tuple[str, str, int]]:
+        """Every species with its detection count. A ~3 s whole-table group-by
+        for a roster that grows by one species every few days, so serving it
+        stale for a few minutes is invisible — and the audition modal asks for
+        it on every clip whose similar-species panel is opened."""
+        return db.species_catalog()
+
+    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=64)
+    def _species_for_source_cached(source_name: str) -> set[str]:
+        """Which species this source has ever heard. ~0.2 s, and constant
+        across the run of clips a reviewer works through at one site."""
+        return db.species_for_source(source_name)
+
+    @app.get("/api/detections/{detection_id}/similar")
+    def similar_species(detection_id: int) -> JSONResponse:
+        """Confusion candidates for a detection — the species a reviewer should
+        A/B this clip against before accepting the ID.
+
+        Candidates are genus-mates we have actually recorded. Two reasons for
+        that rule rather than a hand-kept confusion table: congeners are where
+        acoustic ID genuinely goes wrong, and 79% of our species have at least
+        one genus-mate on file, so the rule earns its keep without curation.
+        Review history looked like a better source — reviewers can suggest what
+        a bad clip really was — but those 21 suggestions are mostly ``Insects``,
+        ``Hippo`` and ``Train``: real about the clip, useless as a species.
+
+        Ranked by whether the candidate has been heard *at this source* first
+        and its overall count second. A genus-mate recorded at the same camera
+        is a live hypothesis; one from the other end of the country is trivia.
+
+        BirdNET's own runners-up are the other half of the answer, and the
+        modal folds those in client-side from the re-analyze panel — they cost
+        a model run, so they stay on the existing on-demand path.
+        """
+        with db.session() as s:
+            row = s.get(DetectionRow, detection_id)
+            if row is None:
+                raise HTTPException(404, "no such detection")
+            sci = (row.scientific_name or "").strip()
+            common = row.common_name or sci
+            source_name = row.source_name
+
+        genus = sci.split()[0] if " " in sci else ""
+        candidates: list[dict] = []
+        if genus:
+            here = _species_for_source_cached(source_name) if source_name else set()
+            for cand_sci, cand_common, n in _species_catalog_cached():
+                if cand_sci == sci or not cand_sci.startswith(genus + " "):
+                    continue
+                at_site = cand_sci in here
+                candidates.append(
+                    {
+                        "scientific_name": cand_sci,
+                        "common_name": cand_common,
+                        "n": n,
+                        "here": at_site,
+                        "reason": (
+                            "same genus · heard at this site" if at_site
+                            else "same genus"
+                        ),
+                    }
+                )
+            candidates.sort(key=lambda c: (not c["here"], -c["n"], c["common_name"]))
+
+        return JSONResponse(
+            {
+                "species": {"scientific_name": sci, "common_name": common},
+                "genus": genus,
+                "source_name": source_name,
+                "candidates": candidates,
+            }
+        )
+
     @app.get("/api/detections/{detection_id}/reanalyze")
     def reanalyze(
         detection_id: int,

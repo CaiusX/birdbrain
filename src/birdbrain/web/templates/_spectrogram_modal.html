@@ -246,6 +246,24 @@
         <ul id="spec-modal-xc-list" class="space-y-2 mt-2"></ul>
       </div>
     </details>
+
+    {# Similar species: the confusion candidates worth ruling out before
+       accepting the ID. The list is genus-mates we have actually recorded
+       (ranked site-first), plus whatever BirdNET itself put second when the
+       re-analyze panel above has been run. Picking one opens the A/B popup. #}
+    <details id="spec-modal-similar" class="group mt-4 border-t border-zinc-800 pt-3">
+      <summary class="flex items-center justify-between gap-3 flex-wrap cursor-pointer list-none">
+        <h4 class="text-xs uppercase tracking-wider text-zinc-400 flex items-center gap-1">
+          <span class="inline-block w-3 text-zinc-500 transition-transform group-open:rotate-90">▸</span>
+          Similar species · A/B compare
+        </h4>
+        <span class="text-[11px] text-zinc-500">pick one to hear it against this clip</span>
+      </summary>
+      <div class="mt-2">
+        <p id="spec-modal-similar-status" class="text-xs text-zinc-500"></p>
+        <ul id="spec-modal-similar-list" class="mt-2 space-y-1"></ul>
+      </div>
+    </details>
   </div>
 </dialog>
 
@@ -317,6 +335,112 @@
               class="px-4 py-2.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-zinc-800">Cancel</button>
       <button type="button" id="spec-confirm-ok"
               class="px-5 py-2.5 rounded text-sm font-semibold bg-emerald-500 text-zinc-900 hover:bg-emerald-400">Confirm</button>
+    </div>
+  </div>
+</dialog>
+
+{# A/B comparison popup. Sibling of the main dialog, not a child, for the same
+   reason spec-confirm is: a nested <dialog> puts its backdrop in the top layer
+   and clicks meant for it land on the parent instead.
+
+   The two panes are deliberately the same shape — sonogram above, transport
+   below — because the comparison being made is visual as much as aural, and a
+   reviewer flicking between them should not have to re-find the controls. Our
+   clip is A and never moves; the candidate is B and swaps as they work down
+   the list. #}
+<dialog id="spec-compare"
+        style="touch-action: manipulation;"
+        class="bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-0 max-w-2xl w-full max-h-[92vh] overflow-y-auto backdrop:bg-black/80">
+  <div class="flex items-start justify-between gap-4 px-5 py-3 border-b border-zinc-800">
+    <div class="min-w-0">
+      <div class="text-xs uppercase tracking-wider text-zinc-500">A/B compare</div>
+      <div class="mt-0.5 text-sm text-zinc-300 truncate">
+        <span id="spec-compare-a-name" class="text-emerald-300"></span>
+        <span class="text-zinc-600 mx-1">vs</span>
+        <span id="spec-compare-b-name" class="text-sky-300"></span>
+      </div>
+    </div>
+    <button type="button" id="spec-compare-close"
+            class="text-zinc-400 hover:text-zinc-100 text-2xl leading-none shrink-0">×</button>
+  </div>
+
+  <div class="p-5 space-y-3">
+    {# A — the clip under review. #}
+    <div class="rounded border border-emerald-500/30 bg-emerald-500/5 p-2">
+      <div class="flex items-center justify-between gap-2 text-xs">
+        <span class="font-medium text-emerald-300">A · this clip</span>
+        <span id="spec-compare-a-meta" class="text-zinc-500 truncate"></span>
+      </div>
+      <img id="spec-compare-a-img" src="" alt=""
+           class="mt-1.5 block w-full h-28 object-fill rounded bg-zinc-950">
+      <audio id="spec-compare-a-audio" src="" controls preload="metadata"
+             class="w-full h-8 mt-1.5"></audio>
+    </div>
+
+    {# B — the candidate, as a reference recording from xeno-canto. #}
+    <div class="rounded border border-sky-500/30 bg-sky-500/5 p-2">
+      <div class="flex items-center justify-between gap-2 text-xs">
+        <span class="font-medium text-sky-300">B · <span id="spec-compare-b-label"></span></span>
+        <a id="spec-compare-b-link" href="#" target="_blank" rel="noopener"
+           class="text-zinc-500 hover:text-zinc-300 truncate">open on xeno-canto ↗</a>
+      </div>
+      <p id="spec-compare-b-status" class="mt-1 text-xs text-zinc-500"></p>
+      <img id="spec-compare-b-img" src="" alt=""
+           class="hidden mt-1.5 block w-full h-28 object-fill rounded bg-zinc-950">
+      {# Pane A is our own render on a known 80 Hz-12 kHz log axis; pane B is
+         xeno-canto's, on whatever axis and duration they chose. So the two
+         pictures are not measurable against each other the way the main
+         spectrogram's gridlines are, and saying so is cheaper than a reviewer
+         concluding a bird calls higher than it does. Shape and rhythm compare
+         fine; absolute height does not. #}
+      <p id="spec-compare-b-axis-note"
+         class="hidden mt-1 text-[10px] text-zinc-600 leading-snug">
+        xeno-canto's own sonogram — its axes and duration differ from pane A,
+        so compare shape and rhythm, not absolute height.
+      </p>
+      <audio id="spec-compare-b-audio" src="" controls preload="none"
+             class="hidden w-full h-8 mt-1.5"></audio>
+      {# More than one reference is common and they vary a lot — song vs call,
+         clean vs distant. Let the reviewer step through rather than judging
+         the candidate on whichever recording happened to sort first. #}
+      <div id="spec-compare-b-picker" class="hidden mt-1.5 flex items-center gap-1 flex-wrap"></div>
+    </div>
+
+    <div class="flex items-center gap-2 flex-wrap">
+      <button type="button" id="spec-compare-play-a"
+              class="px-3 py-1.5 rounded text-sm border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/10">
+        ▶ A
+      </button>
+      <button type="button" id="spec-compare-play-b"
+              class="px-3 py-1.5 rounded text-sm border border-sky-500/50 text-sky-300 hover:bg-sky-500/10">
+        ▶ B
+      </button>
+      {# The actual comparison instrument: alternate the two on a loop so the
+         ear hears them back to back instead of separated by a click and a
+         hunt for the other play button. B is cut to A's length so the two
+         turns are like for like. #}
+      <button type="button" id="spec-compare-ab"
+              class="px-3 py-1.5 rounded text-sm border border-zinc-600 text-zinc-200 hover:bg-zinc-800">
+        ⇄ auto A/B
+      </button>
+      <label class="flex items-center gap-1.5 text-[11px] text-zinc-500 ml-auto"
+             title="XC recordings are professionally mastered; lower this to match ambient livestream level.">
+        B volume
+        <input id="spec-compare-vol" type="range" min="0" max="1" step="0.05" value="0.3"
+               class="w-20 accent-sky-500">
+        <span id="spec-compare-vol-pct" class="tabular-nums text-zinc-400 w-8 text-right">30%</span>
+      </label>
+    </div>
+
+    <div class="flex items-center justify-between gap-2 flex-wrap pt-1">
+      {# The payoff. Having decided it is really B, the reviewer should not have
+         to close, re-open the verdict and retype the name. #}
+      <button type="button" id="spec-compare-suggest"
+              class="px-3 py-1.5 rounded text-sm border border-amber-500/50 text-amber-300 hover:bg-amber-500/10">
+        it's more like B →
+      </button>
+      <button type="button" id="spec-compare-dismiss"
+              class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-200 hover:bg-zinc-800">Close</button>
     </div>
   </div>
 </dialog>
@@ -569,6 +693,13 @@
     xcLoadedFor = null;
     xcListEl.innerHTML = '';
     xcStatusEl.textContent = '';
+    // Reset the similar-species panel; candidates are per-detection (the site
+    // ranking and BirdNET's runners-up both are), so nothing survives a clip.
+    simDetailsEl.open = false;
+    similarLoadedFor = null;
+    simListEl.innerHTML = '';
+    simStatusEl.textContent = '';
+    reanalyzeCandidates = [];
     // Reset re-analyze rolldown to collapsed; loads lazily on first expand.
     reanalyzeEl.open = false;
     reanalyzeLoadedFor = null;
@@ -1092,6 +1223,11 @@
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const data = await resp.json();
       const dets = data.detections || [];
+      // Keep them for the similar-species panel: what the model itself heard in
+      // this audio is the sharpest confusion signal available, and it is only
+      // ever computed here.
+      reanalyzeCandidates = dets;
+      if (simDetailsEl.open && similarLoadedFor === detectionId) loadSimilar(detectionId);
       if (!dets.length) {
         reanalyzeStatus.textContent = 'BirdNET returned no candidates above 0.05 confidence.';
         return;
@@ -1400,6 +1536,7 @@
   function closeIt() {
     audio.pause();
     stopTick();
+    closeCompare();
     xcListEl.querySelectorAll('audio').forEach((a) => a.pause());
     if (typeof dialog.close === 'function') dialog.close();
     else dialog.removeAttribute('open');
@@ -1511,6 +1648,312 @@
   dialog.addEventListener('close',  () => { audio.pause(); stopTick(); _hideCursor(); });
   dialog.addEventListener('cancel', closeIt);
   dialog.addEventListener('click', (e) => { if (e.target === dialog) closeIt(); });
+
+  // ---- Similar species + A/B compare -------------------------------------
+  const simDetailsEl = document.getElementById('spec-modal-similar');
+  const simStatusEl  = document.getElementById('spec-modal-similar-status');
+  const simListEl    = document.getElementById('spec-modal-similar-list');
+
+  const cmpDlg     = document.getElementById('spec-compare');
+  const cmpANameEl = document.getElementById('spec-compare-a-name');
+  const cmpBNameEl = document.getElementById('spec-compare-b-name');
+  const cmpAMetaEl = document.getElementById('spec-compare-a-meta');
+  const cmpAImg    = document.getElementById('spec-compare-a-img');
+  const cmpAAudio  = document.getElementById('spec-compare-a-audio');
+  const cmpBLabel  = document.getElementById('spec-compare-b-label');
+  const cmpBLink   = document.getElementById('spec-compare-b-link');
+  const cmpBStatus = document.getElementById('spec-compare-b-status');
+  const cmpBImg    = document.getElementById('spec-compare-b-img');
+  const cmpBAxisNote = document.getElementById('spec-compare-b-axis-note');
+  const cmpBAudio  = document.getElementById('spec-compare-b-audio');
+  const cmpBPicker = document.getElementById('spec-compare-b-picker');
+  const cmpPlayA   = document.getElementById('spec-compare-play-a');
+  const cmpPlayB   = document.getElementById('spec-compare-play-b');
+  const cmpAbBtn   = document.getElementById('spec-compare-ab');
+  const cmpVolEl   = document.getElementById('spec-compare-vol');
+  const cmpVolPct  = document.getElementById('spec-compare-vol-pct');
+  const cmpSuggest = document.getElementById('spec-compare-suggest');
+
+  // Detection id whose candidate list is already rendered. Reset per openFor.
+  let similarLoadedFor = null;
+  // BirdNET's runners-up for this clip, harvested from the re-analyze panel
+  // when the user expands it. Empty until then — they cost a model run, so
+  // they are not fetched just to populate a list.
+  let reanalyzeCandidates = [];
+  // The candidate currently loaded into pane B.
+  let cmpCandidate = null;
+
+  simDetailsEl.addEventListener('toggle', () => {
+    if (simDetailsEl.open && currentId != null && similarLoadedFor !== currentId) {
+      similarLoadedFor = currentId;
+      loadSimilar(currentId);
+    }
+  });
+
+  async function loadSimilar(detectionId) {
+    simListEl.innerHTML = '';
+    simStatusEl.textContent = 'loading…';
+    let cands = [];
+    try {
+      const resp = await fetch(`/api/detections/${encodeURIComponent(detectionId)}/similar`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const body = await resp.json();
+      cands = body.candidates || [];
+    } catch (e) {
+      simStatusEl.textContent = 'fetch failed: ' + e.message;
+      return;
+    }
+    // Fold in BirdNET's runners-up. They answer a different question from the
+    // genus rule — "what else did the model hear in THIS audio" rather than
+    // "what could this species be confused with" — so a name appearing in both
+    // is the strongest candidate there is, and gets both reasons.
+    const bySci = new Map(cands.map((c) => [c.scientific_name, c]));
+    for (const r of reanalyzeCandidates) {
+      if (r.is_original) continue;
+      const conf = Number(r.confidence).toFixed(2);
+      const hit = bySci.get(r.scientific_name);
+      if (hit) {
+        hit.reason += ` · BirdNET ${conf}`;
+        hit.birdnet = Number(r.confidence);
+      } else {
+        const add = {
+          scientific_name: r.scientific_name,
+          common_name: r.common_name,
+          n: 0,
+          here: false,
+          reason: `BirdNET runner-up ${conf}`,
+          birdnet: Number(r.confidence),
+        };
+        bySci.set(r.scientific_name, add);
+        cands.push(add);
+      }
+    }
+    // A name BirdNET itself proposed outranks a genus-mate it did not.
+    cands.sort((a, b) =>
+      (b.birdnet || 0) - (a.birdnet || 0) ||
+      (a.here === b.here ? 0 : (a.here ? -1 : 1)) ||
+      (b.n - a.n));
+
+    if (!cands.length) {
+      simStatusEl.textContent =
+        'No other species of this genus on record here. Expand "Re-analyze" ' +
+        'above to see what else BirdNET heard in this clip, then reopen this panel.';
+      return;
+    }
+    simStatusEl.textContent = '';
+    for (const c of cands) simListEl.appendChild(renderSimilarRow(c));
+  }
+
+  function renderSimilarRow(c) {
+    const li = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className =
+      'w-full flex items-center gap-2 text-left px-2 py-1.5 rounded border ' +
+      (c.here ? 'border-sky-500/40 bg-sky-500/5' : 'border-zinc-800') +
+      ' hover:border-sky-400 hover:bg-sky-500/10';
+    const name = document.createElement('span');
+    name.className = 'text-sm text-zinc-100 truncate';
+    name.textContent = c.common_name;
+    btn.appendChild(name);
+    const sci = document.createElement('span');
+    sci.className = 'text-[11px] italic text-zinc-500 truncate';
+    sci.textContent = c.scientific_name;
+    btn.appendChild(sci);
+    const why = document.createElement('span');
+    why.className = 'ml-auto text-[10px] uppercase tracking-wider text-zinc-500 shrink-0';
+    why.textContent = c.reason + (c.n ? ` · ${c.n}` : '');
+    btn.appendChild(why);
+    btn.addEventListener('click', () => openCompare(c));
+    li.appendChild(btn);
+    return li;
+  }
+
+  // --- the A/B popup ---
+
+  // Pane B borrows the XC volume the user already set on the rolldown above,
+  // so the two controls agree rather than fighting each other.
+  const savedCmpVol = parseFloat(localStorage.getItem(XC_VOL_KEY) || '');
+  if (!Number.isNaN(savedCmpVol) && savedCmpVol >= 0 && savedCmpVol <= 1) {
+    cmpVolEl.value = String(savedCmpVol);
+  }
+  function paintCmpVol() {
+    const v = Number(cmpVolEl.value);
+    cmpVolPct.textContent = Math.round(v * 100) + '%';
+    cmpBAudio.volume = v;
+  }
+  cmpVolEl.addEventListener('input', () => {
+    localStorage.setItem(XC_VOL_KEY, cmpVolEl.value);
+    paintCmpVol();
+  });
+  paintCmpVol();
+
+  function openCompare(c) {
+    cmpCandidate = c;
+    stopAb();
+    // A is whatever the modal is already showing — same clip, same palette.
+    cmpANameEl.textContent = speciesEl.textContent || currentSci || 'this clip';
+    cmpAMetaEl.textContent = metaEl.textContent || '';
+    cmpAImg.src = img.src;
+    cmpAAudio.src = audio.src;
+    cmpBNameEl.textContent = c.common_name;
+    cmpBLabel.textContent = c.common_name;
+    cmpBImg.classList.add('hidden');
+    cmpBAxisNote.classList.add('hidden');
+    cmpBAudio.classList.add('hidden');
+    cmpBAudio.removeAttribute('src');
+    cmpBPicker.classList.add('hidden');
+    cmpBPicker.innerHTML = '';
+    cmpBLink.href = 'https://xeno-canto.org/explore?query=' +
+      encodeURIComponent(c.scientific_name);
+    cmpBStatus.textContent = 'loading reference recordings…';
+    if (typeof cmpDlg.showModal === 'function') cmpDlg.showModal();
+    else cmpDlg.setAttribute('open', '');
+    loadCompareReference(c.scientific_name);
+  }
+
+  function closeCompare() {
+    stopAb();
+    cmpAAudio.pause();
+    cmpBAudio.pause();
+    if (typeof cmpDlg.close === 'function') cmpDlg.close();
+    else cmpDlg.removeAttribute('open');
+  }
+
+  async function loadCompareReference(sci) {
+    try {
+      const resp = await fetch(`/api/xeno_canto?species=${encodeURIComponent(sci)}&limit=4`);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const body = await resp.json();
+      if (body.needs_key) {
+        cmpBStatus.innerHTML =
+          'Set <code class="text-zinc-300">BIRDBRAIN_XENO_CANTO_KEY</code> to load ' +
+          'reference audio for comparison.';
+        return;
+      }
+      const recs = body.recordings || [];
+      if (!recs.length) {
+        cmpBStatus.textContent = 'no reference recordings found on xeno-canto';
+        return;
+      }
+      cmpBStatus.textContent = '';
+      if (recs.length > 1) {
+        cmpBPicker.classList.remove('hidden');
+        recs.forEach((r, i) => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.dataset.cmpRec = String(i);
+          b.className =
+            'px-1.5 py-0.5 rounded text-[10px] border border-zinc-700 text-zinc-400 hover:text-zinc-100';
+          b.textContent = [r.type || 'rec', r.length].filter(Boolean).join(' ');
+          b.title = [r.en, r.cnt, r.loc, r.q ? 'q:' + r.q : ''].filter(Boolean).join(' · ');
+          b.addEventListener('click', () => selectReference(recs, i));
+          cmpBPicker.appendChild(b);
+        });
+      }
+      selectReference(recs, 0);
+    } catch (e) {
+      cmpBStatus.textContent = 'fetch failed: ' + e.message;
+    }
+  }
+
+  function selectReference(recs, i) {
+    const r = recs[i];
+    if (!r) return;
+    stopAb();
+    cmpBAudio.pause();
+    if (r.sono_med || r.sono_small) {
+      cmpBImg.src = r.sono_med || r.sono_small;
+      cmpBImg.classList.remove('hidden');
+      cmpBAxisNote.classList.remove('hidden');
+    } else {
+      cmpBImg.classList.add('hidden');
+      cmpBAxisNote.classList.add('hidden');
+    }
+    if (r.file) {
+      cmpBAudio.src = r.file;
+      cmpBAudio.volume = Number(cmpVolEl.value);
+      cmpBAudio.classList.remove('hidden');
+    } else {
+      cmpBAudio.classList.add('hidden');
+    }
+    if (r.url) cmpBLink.href = r.url;
+    cmpBStatus.textContent =
+      [r.en, r.type, r.cnt, r.q ? 'quality ' + r.q : ''].filter(Boolean).join(' · ');
+    cmpBPicker.querySelectorAll('[data-cmp-rec]').forEach((b) => {
+      const on = Number(b.dataset.cmpRec) === i;
+      b.className =
+        'px-1.5 py-0.5 rounded text-[10px] border ' +
+        (on ? 'border-sky-400 text-sky-300' : 'border-zinc-700 text-zinc-400 hover:text-zinc-100');
+    });
+  }
+
+  // Exclusive playback: two clips talking at once is noise, not a comparison.
+  cmpAAudio.addEventListener('play', () => { cmpBAudio.pause(); });
+  cmpBAudio.addEventListener('play', () => { cmpAAudio.pause(); });
+
+  cmpPlayA.addEventListener('click', () => { stopAb(); playFromStart(cmpAAudio); });
+  cmpPlayB.addEventListener('click', () => { stopAb(); playFromStart(cmpBAudio); });
+
+  function playFromStart(el) {
+    if (!el.src) return;
+    try { el.currentTime = 0; } catch (_) { /* not seekable yet */ }
+    el.play().catch(() => {});
+  }
+
+  // Auto A/B: alternate the two on a loop until stopped.
+  let abTimer = null;
+  let abOn = false;
+  function stopAb() {
+    abOn = false;
+    if (abTimer) { clearTimeout(abTimer); abTimer = null; }
+    cmpAbBtn.className =
+      'px-3 py-1.5 rounded text-sm border border-zinc-600 text-zinc-200 hover:bg-zinc-800';
+    cmpAbBtn.textContent = '⇄ auto A/B';
+  }
+  function startAb() {
+    if (!cmpAAudio.src || !cmpBAudio.src) return;
+    abOn = true;
+    cmpAbBtn.className =
+      'px-3 py-1.5 rounded text-sm border border-amber-400 text-amber-300 bg-amber-500/10';
+    cmpAbBtn.textContent = '⇄ stop A/B';
+    abStep('a');
+  }
+  function abStep(which) {
+    if (!abOn) return;
+    const el = which === 'a' ? cmpAAudio : cmpBAudio;
+    const other = which === 'a' ? 'b' : 'a';
+    playFromStart(el);
+    // Both turns last A's duration: that is A's natural end, and it crops B,
+    // which is the point — an XC recording can run a minute against our 6 s
+    // clip, and by its end the reviewer has lost what they were comparing.
+    // Fall back to the 6 s our clips are if A's metadata hasn't arrived.
+    const aDur = Number(cmpAAudio.duration);
+    const span = (Number.isFinite(aDur) && aDur > 0) ? aDur : 6;
+    abTimer = setTimeout(() => {
+      if (!abOn) return;
+      el.pause();
+      abStep(other);
+    }, Math.max(1000, span * 1000 + 250));
+  }
+  cmpAbBtn.addEventListener('click', () => { if (abOn) { stopAb(); cmpAAudio.pause(); cmpBAudio.pause(); } else startAb(); });
+
+  // Carry the conclusion back into the verdict rather than making the reviewer
+  // retype it: prefill the suggestion and open the confirm popup on "unsure",
+  // which is the honest default — deciding it resembles B is not the same as
+  // knowing it is B.
+  cmpSuggest.addEventListener('click', () => {
+    if (!cmpCandidate) return;
+    currentSuggested = cmpCandidate.common_name;
+    closeCompare();
+    openConfirm('unsure');
+  });
+
+  document.getElementById('spec-compare-close').addEventListener('click', closeCompare);
+  document.getElementById('spec-compare-dismiss').addEventListener('click', closeCompare);
+  cmpDlg.addEventListener('cancel', (e) => { e.preventDefault(); closeCompare(); });
+  cmpDlg.addEventListener('click', (e) => { if (e.target === cmpDlg) closeCompare(); });
+  cmpDlg.addEventListener('close', () => { stopAb(); cmpAAudio.pause(); cmpBAudio.pause(); });
 
   // The axis never changes, so the gridlines are drawn once rather than on
   // every open.

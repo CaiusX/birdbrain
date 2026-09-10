@@ -1593,6 +1593,40 @@ class Database:
             ), {"sci": scientific_name}).scalars().all()
         return list(rows)
 
+    def species_catalog(self) -> list[tuple[str, str, int]]:
+        """Every species ever detected as (scientific, common, count).
+
+        A whole-table group-by (~3 s) — cache it at the call site. Feeds the
+        similar-species candidates in the audition modal, where the count is
+        the prior that decides ordering: a confusion candidate we hear a
+        thousand times is a likelier answer than one heard twice.
+        """
+        with self._Session() as s:
+            rows = s.execute(
+                select(
+                    DetectionRow.scientific_name,
+                    func.min(DetectionRow.common_name),
+                    func.count(),
+                )
+                .group_by(DetectionRow.scientific_name)
+            ).all()
+        return [(sci, common or sci, int(n)) for sci, common, n in rows]
+
+    def species_for_source(self, source_name: str) -> set[str]:
+        """Scientific names ever recorded at one source.
+
+        Served by ix_detections_source_name (~0.2 s). Used to mark which
+        confusion candidates have actually occurred at the site being
+        reviewed -- a genus-mate heard here is a far stronger hypothesis than
+        one that has never turned up.
+        """
+        with self._Session() as s:
+            rows = s.execute(text(
+                "SELECT DISTINCT scientific_name FROM detections "
+                " WHERE source_name = :src"
+            ), {"src": source_name}).scalars().all()
+        return {r for r in rows if r}
+
     def set_species_call_description(self, scientific_name: str, text_: str) -> None:
         """Store the call description, creating a minimal note row if needed —
         same shape as the confidence floor and retention overrides."""

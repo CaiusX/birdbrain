@@ -189,7 +189,10 @@ def test_a_species_nobody_has_touched_shows_no_done_count(tmp_path):
     app, db = _app(tmp_path)
     _add(db, sci="A", common="Bird", n=2)
     assert db.reviewed_counts_by_species() == {}
-    assert "done" not in TestClient(app).get("/review").text
+    # Match the "<n> done" badge its sibling test asserts, not a bare "done":
+    # the modal markup on this page carries ids and labels of its own, and a
+    # substring search over the whole document fails on any of them.
+    assert not re.search(r"\d+ done", TestClient(app).get("/review").text)
 
 
 def test_clicking_a_species_lands_on_its_sites_not_its_clips(tmp_path):
