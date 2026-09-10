@@ -387,8 +387,13 @@
     <div class="rounded border border-sky-500/30 bg-sky-500/5 p-2">
       <div class="flex items-center justify-between gap-2 text-xs">
         <span class="font-medium text-sky-300">B · <span id="spec-compare-b-label"></span></span>
-        <a id="spec-compare-b-link" href="#"
-           class="text-zinc-500 hover:text-zinc-300 truncate">species page →</a>
+        {# Straight into B's review queue, scoped to the camera the reference
+           clip came from, so the reviewer lands on the clips they are hearing
+           rather than a species overview. New tab: this is a side-trip from
+           the comparison, and navigating in place would throw away the
+           reviewer's place in the queue behind the modal. #}
+        <a id="spec-compare-b-link" href="#" target="_blank" rel="noopener"
+           class="text-zinc-500 hover:text-zinc-300 truncate">review B →</a>
       </div>
       <p id="spec-compare-b-status" class="mt-1 text-xs text-zinc-500"></p>
       <img id="spec-compare-b-img" src="" alt=""
@@ -423,9 +428,39 @@
       <span id="spec-compare-b-where" class="ml-auto text-[11px] text-zinc-500 truncate"></span>
     </div>
 
+    {# Score A from here. The comparison is what produces the verdict, so
+       making the reviewer close this popup to record it puts the decision one
+       step away from the evidence. Same data-label-btn contract as the main
+       modal, so the same handler drives both and the two stay in sync; the
+       confirm popup opens on top and this stays put underneath, ready for the
+       next candidate. "A" is named because two species are on screen and it
+       must be unambiguous which one is being judged. #}
+    <div class="flex items-center gap-2 flex-wrap pt-2 border-t border-zinc-800">
+      <div id="spec-compare-verdict"
+           class="{% if not request.state.user %}hidden {% endif %}flex items-center gap-1.5 flex-wrap">
+        <span class="text-[11px] uppercase tracking-wider text-zinc-500 mr-0.5">
+          score A · <span id="spec-compare-verdict-species" class="normal-case text-zinc-400"></span>
+        </span>
+        <button type="button" data-label-btn="bad"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-rose-500/10 hover:border-rose-500"
+                title="False positive">✗ bad</button>
+        <button type="button" data-label-btn="unsure"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-amber-500/10 hover:border-amber-500"
+                title="Can't tell">? unsure</button>
+        <button type="button" data-label-btn="good"
+                class="px-3 py-1.5 rounded text-sm border border-zinc-700 text-zinc-300 hover:bg-emerald-500/10 hover:border-emerald-500"
+                title="Correct ID">✓ good</button>
+        <button type="button" data-label-btn=""
+                class="px-2.5 py-1.5 rounded text-sm border border-zinc-800 text-zinc-500 hover:text-zinc-300"
+                title="Clear label">↺</button>
+      </div>
+      <a id="spec-compare-login" href="/login"
+         class="{% if request.state.user %}hidden {% endif %}text-sm text-emerald-300 hover:text-emerald-200">log in to score →</a>
+    </div>
+
     <div class="flex items-center justify-between gap-2 flex-wrap pt-1">
-      {# The payoff. Having decided it is really B, the reviewer should not have
-         to close, re-open the verdict and retype the name. #}
+      {# The other payoff. Having decided it is really B, the reviewer should
+         not have to close, re-open the verdict and retype the name. #}
       <button type="button" id="spec-compare-suggest"
               class="px-3 py-1.5 rounded text-sm border border-amber-500/50 text-amber-300 hover:bg-amber-500/10">
         it's more like B →
@@ -455,7 +490,11 @@
   const sciEl     = document.getElementById('spec-modal-scientific');
   const metaEl   = document.getElementById('spec-modal-meta');
   const closeBtn = document.getElementById('spec-modal-close');
-  const labelBtns = dialog.querySelectorAll('[data-label-btn]');
+  // Both dialogs carry verdict buttons — the main modal's and the A/B
+  // popup's — and they score the same detection, so they share one
+  // handler and one painter and can never disagree about the label.
+  const labelBtns = document.querySelectorAll(
+    '#spec-modal [data-label-btn], #spec-compare [data-label-btn]');
   const verdictEl = document.getElementById('spec-modal-verdict');
   const loginEl   = document.getElementById('spec-modal-login');
   const tallyEl   = document.getElementById('spec-modal-tally');
@@ -1505,6 +1544,11 @@
 
   function openConfirm(value) {
     if (currentId == null || !value) return;
+    // Silence the comparison before asking for a decision — an A/B loop still
+    // alternating underneath the confirm popup is just noise at that point.
+    stopAb();
+    cmpAAudio.pause();
+    cmpBAudio.pause();
     pendingLabel = value;
     confirmRating = currentSoundRating;
     confirmVerdict.textContent = verdictText[value] || value;
@@ -1667,6 +1711,7 @@
   const cmpAbBtn   = document.getElementById('spec-compare-ab');
   const cmpBWhere  = document.getElementById('spec-compare-b-where');
   const cmpSuggest = document.getElementById('spec-compare-suggest');
+  const cmpVerdictSpecies = document.getElementById('spec-compare-verdict-species');
 
   // Detection id whose candidate list is already rendered. Reset per openFor.
   let similarLoadedFor = null;
@@ -1776,6 +1821,17 @@
 
   // --- the A/B popup ---
 
+  // Built with URLSearchParams rather than string concatenation: it gets the
+  // encoding right for free, and it keeps a literal "tab=detections&sci=" out
+  // of this file — the review page's own tests scrape rendered pages for that
+  // pattern to find drill-through links, and a copy of it sitting in script
+  // source reads to them as a link that is not there.
+  function reviewUrl(sci, sourceName) {
+    const q = new URLSearchParams({ tab: 'detections', sci: sci });
+    if (sourceName) q.set('source', sourceName);
+    return '/review?' + q.toString();
+  }
+
   function openCompare(c) {
     cmpCandidate = c;
     stopAb();
@@ -1792,7 +1848,10 @@
     cmpBPicker.classList.add('hidden');
     cmpBPicker.innerHTML = '';
     cmpBWhere.textContent = '';
-    cmpBLink.href = '/species/' + encodeURIComponent(c.scientific_name);
+    cmpVerdictSpecies.textContent = speciesEl.textContent || currentSci || '';
+    // Species-wide until a reference is picked; selectReference narrows it to
+    // that clip's camera.
+    cmpBLink.href = reviewUrl(c.scientific_name, null);
     cmpBStatus.textContent = 'finding our recordings of this species…';
     if (typeof cmpDlg.showModal === 'function') cmpDlg.showModal();
     else cmpDlg.setAttribute('open', '');
@@ -1875,6 +1934,9 @@
     ].filter(Boolean).join(' · ');
     cmpBWhere.textContent =
       (cl.same_source ? 'same camera as A · ' : '') + (cl.source_name || '');
+    // Every reference clip is of the candidate, so the species is fixed; what
+    // the selection changes is which camera's queue to land in.
+    cmpBLink.href = reviewUrl(cmpCandidate.scientific_name, cl.source_name);
     cmpBPicker.querySelectorAll('[data-cmp-rec]').forEach((b) => {
       const on = Number(b.dataset.cmpRec) === i;
       b.className =

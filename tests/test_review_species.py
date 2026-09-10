@@ -24,6 +24,18 @@ def _app(tmp_path):
     return create_app(cfg), Database(cfg.db_url)
 
 
+def _strip_scripts(html: str) -> str:
+    """Rendered markup with <script> blocks removed.
+
+    Same reasoning as ``_listed`` below, one layer further out: these helpers
+    look for links, and script source is not a link. The spectrogram modal
+    builds review URLs client-side, so its JavaScript can hold the very
+    patterns these regexes hunt for, and a page that renders no drill-through
+    at all would still appear to.
+    """
+    return re.sub(r"<script\b.*?</script>", "", html, flags=re.S | re.I)
+
+
 def _listed(html: str) -> list[str]:
     """Scientific names the species index actually lists.
 
@@ -31,6 +43,7 @@ def _listed(html: str) -> list[str]:
     species search datalist holding every name ever heard, so a naive
     ``"X" in html`` is true for species the queue is not offering at all.
     """
+    html = _strip_scripts(html)
     return re.findall(r"tab=(?:sites|detections)&(?:amp;)?sci=([^\"&]+)", html)
 
 
@@ -170,7 +183,8 @@ def test_legacy_audition_still_lands_on_the_flat_list(tmp_path):
 def _sites_listed(html: str) -> list[str]:
     """Site names the by-site level lists, read off the drill-through links."""
     return re.findall(
-        r"tab=detections&(?:amp;)?sci=[^\"&]+&(?:amp;)?source=([^\"&]+)", html
+        r"tab=detections&(?:amp;)?sci=[^\"&]+&(?:amp;)?source=([^\"&]+)",
+        _strip_scripts(html),
     )
 
 
