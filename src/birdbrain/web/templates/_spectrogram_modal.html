@@ -257,7 +257,7 @@
           <span class="inline-block w-3 text-zinc-500 transition-transform group-open:rotate-90">▸</span>
           Similar species · A/B compare
         </h4>
-        <span class="text-[11px] text-zinc-500">pick one to hear it against this clip</span>
+        <span class="text-[11px] text-zinc-500">pick one to hear our recordings of it against this clip</span>
       </summary>
       <div class="mt-2">
         <p id="spec-modal-similar-status" class="text-xs text-zinc-500"></p>
@@ -377,32 +377,27 @@
              class="w-full h-8 mt-1.5"></audio>
     </div>
 
-    {# B — the candidate, as a reference recording from xeno-canto. #}
+    {# B — the candidate, as one of our OWN recordings of it. Same pipeline,
+       same 6 s window, same renderer, same palette as pane A, so the two
+       pictures are measurable against each other and the two sounds carry the
+       same stream artefacts. A mastered reference from elsewhere would put a
+       confound in the middle of the comparison. #}
     <div class="rounded border border-sky-500/30 bg-sky-500/5 p-2">
       <div class="flex items-center justify-between gap-2 text-xs">
         <span class="font-medium text-sky-300">B · <span id="spec-compare-b-label"></span></span>
-        <a id="spec-compare-b-link" href="#" target="_blank" rel="noopener"
-           class="text-zinc-500 hover:text-zinc-300 truncate">open on xeno-canto ↗</a>
+        <a id="spec-compare-b-link" href="#"
+           class="text-zinc-500 hover:text-zinc-300 truncate">species page →</a>
       </div>
       <p id="spec-compare-b-status" class="mt-1 text-xs text-zinc-500"></p>
       <img id="spec-compare-b-img" src="" alt=""
            class="hidden mt-1.5 block w-full h-28 object-fill rounded bg-zinc-950">
-      {# Pane A is our own render on a known 80 Hz-12 kHz log axis; pane B is
-         xeno-canto's, on whatever axis and duration they chose. So the two
-         pictures are not measurable against each other the way the main
-         spectrogram's gridlines are, and saying so is cheaper than a reviewer
-         concluding a bird calls higher than it does. Shape and rhythm compare
-         fine; absolute height does not. #}
-      <p id="spec-compare-b-axis-note"
-         class="hidden mt-1 text-[10px] text-zinc-600 leading-snug">
-        xeno-canto's own sonogram — its axes and duration differ from pane A,
-        so compare shape and rhythm, not absolute height.
-      </p>
       <audio id="spec-compare-b-audio" src="" controls preload="none"
              class="hidden w-full h-8 mt-1.5"></audio>
-      {# More than one reference is common and they vary a lot — song vs call,
-         clean vs distant. Let the reviewer step through rather than judging
-         the candidate on whichever recording happened to sort first. #}
+      {# Our recordings of one species vary a lot — distance, wind, whether the
+         bird was actually the loudest thing in the window. Let the reviewer
+         step through rather than judging the candidate on whichever clip
+         happened to sort first. Half these slots are the same camera as pane
+         A, the rest the best we have anywhere. #}
       <div id="spec-compare-b-picker" class="hidden mt-1.5 flex items-center gap-1 flex-wrap"></div>
     </div>
 
@@ -423,13 +418,7 @@
               class="px-3 py-1.5 rounded text-sm border border-zinc-600 text-zinc-200 hover:bg-zinc-800">
         ⇄ auto A/B
       </button>
-      <label class="flex items-center gap-1.5 text-[11px] text-zinc-500 ml-auto"
-             title="XC recordings are professionally mastered; lower this to match ambient livestream level.">
-        B volume
-        <input id="spec-compare-vol" type="range" min="0" max="1" step="0.05" value="0.3"
-               class="w-20 accent-sky-500">
-        <span id="spec-compare-vol-pct" class="tabular-nums text-zinc-400 w-8 text-right">30%</span>
-      </label>
+      <span id="spec-compare-b-where" class="ml-auto text-[11px] text-zinc-500 truncate"></span>
     </div>
 
     <div class="flex items-center justify-between gap-2 flex-wrap pt-1">
@@ -630,6 +619,10 @@
   let currentId = null;
   let currentLabel = null;
   let currentSuggested = '';
+  // Pane A's colour ramp, so pane B can be forced to match it. Comes from
+  // the row, which gets it from the species' note tag — the same rule the
+  // spectrogram endpoint applies when no palette is given.
+  let currentPalette = 'fire';
   let currentSoundRating = null;
   // Scientific name we've already fetched XC data for in this modal session.
   // Reset on every openFor so a new detection re-fetches when expanded.
@@ -681,7 +674,8 @@
     speciesEl.href = currentSci ? `/species/${encodeURIComponent(currentSci)}` : '#';
     sciEl.textContent     = currentSci;
     metaEl.textContent    = btn.dataset.meta || '';
-    img.src = `/spectrograms/${currentId}.png?size=large&p=${encodeURIComponent(btn.dataset.palette || 'fire')}`;
+    currentPalette = btn.dataset.palette || 'fire';
+    img.src = `/spectrograms/${currentId}.png?size=large&p=${encodeURIComponent(currentPalette)}`;
     audio.src = `/clips/${currentId}`;
     playhead.style.left = '0%';
     playhead.style.display = 'block';
@@ -1664,14 +1658,12 @@
   const cmpBLink   = document.getElementById('spec-compare-b-link');
   const cmpBStatus = document.getElementById('spec-compare-b-status');
   const cmpBImg    = document.getElementById('spec-compare-b-img');
-  const cmpBAxisNote = document.getElementById('spec-compare-b-axis-note');
   const cmpBAudio  = document.getElementById('spec-compare-b-audio');
   const cmpBPicker = document.getElementById('spec-compare-b-picker');
   const cmpPlayA   = document.getElementById('spec-compare-play-a');
   const cmpPlayB   = document.getElementById('spec-compare-play-b');
   const cmpAbBtn   = document.getElementById('spec-compare-ab');
-  const cmpVolEl   = document.getElementById('spec-compare-vol');
-  const cmpVolPct  = document.getElementById('spec-compare-vol-pct');
+  const cmpBWhere  = document.getElementById('spec-compare-b-where');
   const cmpSuggest = document.getElementById('spec-compare-suggest');
 
   // Detection id whose candidate list is already rendered. Reset per openFor.
@@ -1748,10 +1740,19 @@
     const li = document.createElement('li');
     const btn = document.createElement('button');
     btn.type = 'button';
+    // A candidate with no surviving clip stays on the list -- it is still what
+    // the bird might be -- but there is nothing to A/B, so say so up front
+    // rather than opening the popup onto an empty player. `clips` is absent on
+    // a BirdNET-only candidate we have never recorded; treat that as playable
+    // and let the popup report what it finds.
+    const playable = (c.clips === undefined) || c.clips > 0;
+    btn.disabled = !playable;
     btn.className =
       'w-full flex items-center gap-2 text-left px-2 py-1.5 rounded border ' +
       (c.here ? 'border-sky-500/40 bg-sky-500/5' : 'border-zinc-800') +
-      ' hover:border-sky-400 hover:bg-sky-500/10';
+      (playable
+        ? ' hover:border-sky-400 hover:bg-sky-500/10'
+        : ' opacity-50 cursor-not-allowed');
     const name = document.createElement('span');
     name.className = 'text-sm text-zinc-100 truncate';
     name.textContent = c.common_name;
@@ -1762,31 +1763,16 @@
     btn.appendChild(sci);
     const why = document.createElement('span');
     why.className = 'ml-auto text-[10px] uppercase tracking-wider text-zinc-500 shrink-0';
-    why.textContent = c.reason + (c.n ? ` · ${c.n}` : '');
+    why.textContent = playable
+      ? c.reason + (c.clips ? ` · ${c.clips} clips` : '')
+      : c.reason + ' · no clip';
     btn.appendChild(why);
-    btn.addEventListener('click', () => openCompare(c));
+    if (playable) btn.addEventListener('click', () => openCompare(c));
     li.appendChild(btn);
     return li;
   }
 
   // --- the A/B popup ---
-
-  // Pane B borrows the XC volume the user already set on the rolldown above,
-  // so the two controls agree rather than fighting each other.
-  const savedCmpVol = parseFloat(localStorage.getItem(XC_VOL_KEY) || '');
-  if (!Number.isNaN(savedCmpVol) && savedCmpVol >= 0 && savedCmpVol <= 1) {
-    cmpVolEl.value = String(savedCmpVol);
-  }
-  function paintCmpVol() {
-    const v = Number(cmpVolEl.value);
-    cmpVolPct.textContent = Math.round(v * 100) + '%';
-    cmpBAudio.volume = v;
-  }
-  cmpVolEl.addEventListener('input', () => {
-    localStorage.setItem(XC_VOL_KEY, cmpVolEl.value);
-    paintCmpVol();
-  });
-  paintCmpVol();
 
   function openCompare(c) {
     cmpCandidate = c;
@@ -1799,14 +1785,13 @@
     cmpBNameEl.textContent = c.common_name;
     cmpBLabel.textContent = c.common_name;
     cmpBImg.classList.add('hidden');
-    cmpBAxisNote.classList.add('hidden');
     cmpBAudio.classList.add('hidden');
     cmpBAudio.removeAttribute('src');
     cmpBPicker.classList.add('hidden');
     cmpBPicker.innerHTML = '';
-    cmpBLink.href = 'https://xeno-canto.org/explore?query=' +
-      encodeURIComponent(c.scientific_name);
-    cmpBStatus.textContent = 'loading reference recordings…';
+    cmpBWhere.textContent = '';
+    cmpBLink.href = '/species/' + encodeURIComponent(c.scientific_name);
+    cmpBStatus.textContent = 'finding our recordings of this species…';
     if (typeof cmpDlg.showModal === 'function') cmpDlg.showModal();
     else cmpDlg.setAttribute('open', '');
     loadCompareReference(c.scientific_name);
@@ -1821,69 +1806,77 @@
   }
 
   async function loadCompareReference(sci) {
+    if (currentId == null) return;
     try {
-      const resp = await fetch(`/api/xeno_canto?species=${encodeURIComponent(sci)}&limit=4`);
+      const resp = await fetch(
+        `/api/detections/${encodeURIComponent(currentId)}/reference-clips` +
+        `?sci=${encodeURIComponent(sci)}&limit=6`);
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const body = await resp.json();
-      if (body.needs_key) {
-        cmpBStatus.innerHTML =
-          'Set <code class="text-zinc-300">BIRDBRAIN_XENO_CANTO_KEY</code> to load ' +
-          'reference audio for comparison.';
-        return;
-      }
-      const recs = body.recordings || [];
-      if (!recs.length) {
-        cmpBStatus.textContent = 'no reference recordings found on xeno-canto';
+      const clips = (await resp.json()).clips || [];
+      if (!clips.length) {
+        // Expected, not exceptional: retention keeps a clip for about 38% of
+        // detections, so a species can be on the candidate list -- we have
+        // heard it -- with nothing left to play.
+        cmpBStatus.textContent =
+          'We have detections of this species but no saved clip to play — ' +
+          'retention has pruned them.';
         return;
       }
       cmpBStatus.textContent = '';
-      if (recs.length > 1) {
+      if (clips.length > 1) {
         cmpBPicker.classList.remove('hidden');
-        recs.forEach((r, i) => {
+        clips.forEach((cl, i) => {
           const b = document.createElement('button');
           b.type = 'button';
           b.dataset.cmpRec = String(i);
-          b.className =
-            'px-1.5 py-0.5 rounded text-[10px] border border-zinc-700 text-zinc-400 hover:text-zinc-100';
-          b.textContent = [r.type || 'rec', r.length].filter(Boolean).join(' ');
-          b.title = [r.en, r.cnt, r.loc, r.q ? 'q:' + r.q : ''].filter(Boolean).join(' · ');
-          b.addEventListener('click', () => selectReference(recs, i));
+          b.textContent =
+            (cl.label === 'good' ? '✓ ' : '') +
+            Number(cl.confidence).toFixed(2) +
+            (cl.same_source ? ' · here' : '');
+          b.title = [
+            cl.source_name,
+            cl.site,
+            'confidence ' + Number(cl.confidence).toFixed(2),
+            cl.label ? 'reviewed ' + cl.label : 'unreviewed',
+            cl.sound_rating ? '★'.repeat(cl.sound_rating) : '',
+          ].filter(Boolean).join(' · ');
+          b.addEventListener('click', () => selectReference(clips, i));
           cmpBPicker.appendChild(b);
         });
       }
-      selectReference(recs, 0);
+      selectReference(clips, 0);
     } catch (e) {
       cmpBStatus.textContent = 'fetch failed: ' + e.message;
     }
   }
 
-  function selectReference(recs, i) {
-    const r = recs[i];
-    if (!r) return;
+  function selectReference(clips, i) {
+    const cl = clips[i];
+    if (!cl) return;
     stopAb();
     cmpBAudio.pause();
-    if (r.sono_med || r.sono_small) {
-      cmpBImg.src = r.sono_med || r.sono_small;
-      cmpBImg.classList.remove('hidden');
-      cmpBAxisNote.classList.remove('hidden');
-    } else {
-      cmpBImg.classList.add('hidden');
-      cmpBAxisNote.classList.add('hidden');
-    }
-    if (r.file) {
-      cmpBAudio.src = r.file;
-      cmpBAudio.volume = Number(cmpVolEl.value);
-      cmpBAudio.classList.remove('hidden');
-    } else {
-      cmpBAudio.classList.add('hidden');
-    }
-    if (r.url) cmpBLink.href = r.url;
-    cmpBStatus.textContent =
-      [r.en, r.type, r.cnt, r.q ? 'quality ' + r.q : ''].filter(Boolean).join(' · ');
+    // Force pane A's ramp. Left alone the server picks the colour from each
+    // species' note tag, so a reliable-tagged bird renders green and an
+    // untagged one orange — meaningful in a list, useless in a pair, because
+    // intensity cannot be read across two different ramps. Note this is
+    // `palette=`, which the endpoint acts on; the `p=` elsewhere in this file
+    // is only a cache-buster.
+    cmpBImg.src =
+      `/spectrograms/${cl.id}.png?size=large&palette=${encodeURIComponent(currentPalette)}`;
+    cmpBImg.classList.remove('hidden');
+    cmpBAudio.src = `/clips/${cl.id}`;
+    cmpBAudio.classList.remove('hidden');
+    cmpBStatus.textContent = [
+      cl.label === 'good' ? '✓ confirmed by a reviewer' : null,
+      'confidence ' + Number(cl.confidence).toFixed(2),
+      cl.sound_rating ? '★'.repeat(cl.sound_rating) : null,
+    ].filter(Boolean).join(' · ');
+    cmpBWhere.textContent =
+      (cl.same_source ? 'same camera as A · ' : '') + (cl.source_name || '');
     cmpBPicker.querySelectorAll('[data-cmp-rec]').forEach((b) => {
       const on = Number(b.dataset.cmpRec) === i;
       b.className =
-        'px-1.5 py-0.5 rounded text-[10px] border ' +
+        'px-1.5 py-0.5 rounded text-[10px] tabular-nums border ' +
         (on ? 'border-sky-400 text-sky-300' : 'border-zinc-700 text-zinc-400 hover:text-zinc-100');
     });
   }

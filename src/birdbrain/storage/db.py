@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import (
     Integer,
+    case,
     create_engine,
     delete,
     func,
@@ -1593,13 +1594,81 @@ class Database:
             ), {"sci": scientific_name}).scalars().all()
         return list(rows)
 
-    def species_catalog(self) -> list[tuple[str, str, int]]:
-        """Every species ever detected as (scientific, common, count).
+    def reference_clips(
+        self,
+        scientific_name: str,
+        *,
+        source_name: str | None = None,
+        exclude_id: int | None = None,
+        limit: int = 6,
+    ) -> list[dict]:
+        """Our own best recordings of a species, to play against a clip under
+        review.
+
+        "Best" is review state first, then the sound rating, then confidence --
+        a clip a human confirmed is worth more as a reference than a clip the
+        model merely liked. Rows without a stored clip are excluded outright:
+        retention has pruned about 62% of detections, so a species with
+        thousands of rows can still have nothing to play.
+
+        When ``source_name`` is given, up to half the slots are reserved for
+        that camera's own clips and the rest go to the best anywhere. A
+        reference recorded through the same stream -- same distance, same
+        background, same codec -- removes a confound from the comparison, but
+        letting it take every slot would hide a cleaner or human-confirmed
+        example from another site, and the reviewer wants both on hand.
+        """
+        order = (
+            " ORDER BY (label = 'good') DESC, sound_rating DESC,"
+            " confidence DESC, id DESC"
+        )
+        cols = (
+            "id, source_name, site, confidence, label, sound_rating,"
+            " started_at, duration_s"
+        )
+        where = "scientific_name = :sci AND clip_path IS NOT NULL"
+        params: dict = {"sci": scientific_name, "lim": limit}
+        if exclude_id is not None:
+            where += " AND id != :excl"
+            params["excl"] = exclude_id
+
+        out: list[dict] = []
+        seen: set[int] = set()
+
+        with self._Session() as s:
+            def _run(extra: str, args: dict, take: int) -> None:
+                sql = f"SELECT {cols} FROM detections WHERE {where}{extra}{order} LIMIT :lim"
+                got = 0
+                for r in s.execute(text(sql), {**args, "lim": take}).mappings():
+                    if got >= take:
+                        break
+                    if r["id"] in seen:
+                        continue
+                    seen.add(r["id"])
+                    row = dict(r)
+                    row["same_source"] = row["source_name"] == source_name
+                    out.append(row)
+                    got += 1
+
+            if source_name:
+                _run(" AND source_name = :src", {**params, "src": source_name},
+                     max(1, limit // 2))
+            # Ask for the full limit here: the same-source pass may have
+            # returned nothing, and these are deduplicated against it anyway.
+            _run("", params, limit)
+        return out[:limit]
+
+    def species_catalog(self) -> list[tuple[str, str, int, int]]:
+        """Every species ever detected as (scientific, common, count, clips).
 
         A whole-table group-by (~3 s) — cache it at the call site. Feeds the
         similar-species candidates in the audition modal, where the count is
         the prior that decides ordering: a confusion candidate we hear a
         thousand times is a likelier answer than one heard twice.
+
+        ``clips`` is how many of those rows still have a stored clip, which is
+        a different question — retention keeps roughly 38% — and decides
+        whether a candidate can be played against the clip under review at all.
         """
         with self._Session() as s:
             rows = s.execute(
@@ -1607,10 +1676,16 @@ class Database:
                     DetectionRow.scientific_name,
                     func.min(DetectionRow.common_name),
                     func.count(),
+                    func.sum(
+                        case((DetectionRow.clip_path.is_not(None), 1), else_=0)
+                    ),
                 )
                 .group_by(DetectionRow.scientific_name)
             ).all()
-        return [(sci, common or sci, int(n)) for sci, common, n in rows]
+        return [
+            (sci, common or sci, int(n), int(clips or 0))
+            for sci, common, n, clips in rows
+        ]
 
     def species_for_source(self, source_name: str) -> set[str]:
         """Scientific names ever recorded at one source.

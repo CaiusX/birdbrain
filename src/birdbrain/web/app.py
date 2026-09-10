@@ -6097,7 +6097,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         )
 
     @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=1)
-    def _species_catalog_cached() -> list[tuple[str, str, int]]:
+    def _species_catalog_cached() -> list[tuple[str, str, int, int]]:
         """Every species with its detection count. A ~3 s whole-table group-by
         for a roster that grows by one species every few days, so serving it
         stale for a few minutes is invisible — and the audition modal asks for
@@ -6109,6 +6109,56 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         """Which species this source has ever heard. ~0.2 s, and constant
         across the run of clips a reviewer works through at one site."""
         return db.species_for_source(source_name)
+
+    @app.get("/api/detections/{detection_id}/reference-clips")
+    def reference_clips(
+        detection_id: int,
+        sci: str = Query(..., min_length=2, max_length=200),
+        limit: int = Query(default=6, ge=1, le=12),
+    ) -> JSONResponse:
+        """Our own recordings of ``sci``, to play against this detection.
+
+        Both sides of the comparison are then the same kind of thing: same
+        pipeline, same 6 s window, same spectrogram renderer on the same
+        80 Hz-12 kHz log axis. A reference from elsewhere sounds mastered and
+        plots on its own axes, which is a comparison with a confound in it.
+
+        The trade is that we can only offer species we have already recorded,
+        and only while a clip survives retention -- so the list can come back
+        empty and the UI has to say so rather than showing an empty player.
+        """
+        with db.session() as s:
+            row = s.get(DetectionRow, detection_id)
+            if row is None:
+                raise HTTPException(404, "no such detection")
+            source_name = row.source_name
+
+        found: list[dict] = []
+        for c in db.reference_clips(
+            sci, source_name=source_name, exclude_id=detection_id, limit=limit
+        ):
+            # A raw text() query hands back whatever SQLite stored, so this is
+            # a string here and a datetime on rows that came through the ORM.
+            started = c.get("started_at")
+            started_iso = (
+                started.isoformat() if hasattr(started, "isoformat")
+                else (str(started) if started else None)
+            )
+            found.append(
+                {
+                    "id": c["id"],
+                    "source_name": c["source_name"],
+                    "site": c["site"],
+                    "confidence": round(float(c["confidence"] or 0.0), 3),
+                    "label": c["label"],
+                    "sound_rating": c["sound_rating"],
+                    "same_source": bool(c.get("same_source")),
+                    "started_at": started_iso,
+                }
+            )
+            if len(found) >= limit:
+                break
+        return JSONResponse({"scientific_name": sci, "clips": found})
 
     @app.get("/api/detections/{detection_id}/similar")
     def similar_species(detection_id: int) -> JSONResponse:
@@ -6143,7 +6193,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         candidates: list[dict] = []
         if genus:
             here = _species_for_source_cached(source_name) if source_name else set()
-            for cand_sci, cand_common, n in _species_catalog_cached():
+            for cand_sci, cand_common, n, n_clips in _species_catalog_cached():
                 if cand_sci == sci or not cand_sci.startswith(genus + " "):
                     continue
                 at_site = cand_sci in here
@@ -6152,6 +6202,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
                         "scientific_name": cand_sci,
                         "common_name": cand_common,
                         "n": n,
+                        # Whether there is anything left to play. A candidate
+                        # with none is still worth listing -- it is still what
+                        # the bird might be -- but the UI should not offer it
+                        # as an A/B and then come up empty.
+                        "clips": n_clips,
                         "here": at_site,
                         "reason": (
                             "same genus · heard at this site" if at_site
@@ -6363,6 +6418,11 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         "rare":     "cool",   # blues
         None:       "fire",
     }
+    #: What ``/spectrograms/...?palette=`` will accept. Derived from the map
+    #: above rather than listed again so an added tag colour is renderable on
+    #: demand without a second edit -- and so the value can never be anything
+    #: but a ramp we already generate.
+    SPEC_PALETTES: frozenset[str] = frozenset(SPEC_PALETTE_FOR_TAG.values())
 
     # Xeno-Canto reference fetch (proxied + cached so the browser doesn't hit
     # the public API directly — gives us caching, error normalization, and no
@@ -7581,14 +7641,27 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
     def spectrogram(
         detection_id: int,
         size: str = Query(default="small"),
+        palette: str | None = Query(default=None),
     ) -> Response:
         """PNG spectrogram of a detection's clip. Generated lazily on first
         request via ffmpeg's showspectrumpic filter and cached next to the
         WAV. ``size=small`` is used inline; ``large`` for the popout view.
         For push-fed (TBB) detections the clip is fetched from the unit on the
-        first request, then this works exactly as for a local clip."""
+        first request, then this works exactly as for a local clip.
+
+        The colour ramp normally comes from the species' note tag, so the
+        picture carries that judgement without a legend. ``palette`` overrides
+        it, which the A/B comparison needs: two clips of different species are
+        two different tags and so two different ramps, and a reader cannot
+        compare intensity across ramps -- the one thing that view exists to
+        do. Values are restricted to the ramps we already use, both because
+        this reaches an ffmpeg argument and so the on-disk cache stays a small
+        fixed set per clip.
+        """
         if size not in SPEC_SIZES:
             raise HTTPException(400, "size must be 'small' or 'large'")
+        if palette is not None and palette not in SPEC_PALETTES:
+            raise HTTPException(400, "unknown palette")
         with db.session() as s:
             row = s.get(DetectionRow, detection_id)
             if row is None:
@@ -7609,7 +7682,7 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         if not wav.is_file():
             raise HTTPException(404, "clip file missing")
 
-        palette = SPEC_PALETTE_FOR_TAG.get(tag, "fire")
+        palette = palette or SPEC_PALETTE_FOR_TAG.get(tag, "fire")
         size_suffix = "" if size == "small" else f".{size}"
         # Cache by palette so re-tagging a species regenerates the colour
         # without colliding with the old file.

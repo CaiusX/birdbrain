@@ -29,7 +29,8 @@ def _app(tmp_path):
     return create_app(cfg), Database(cfg.db_url)
 
 
-def _add(db, *, sci, common, source, n=1):
+def _add(db, *, sci, common, source, n=1, clip=True, label=None,
+         confidence=0.8, rating=None):
     """Insert n detections and return the id of the last one.
 
     ``insert_detections`` returns a row *count*, not ids, so read the id back
@@ -42,14 +43,22 @@ def _add(db, *, sci, common, source, n=1):
         db.insert_detections(
             [Detection(source_name=source, started_at=base + timedelta(seconds=3 * i),
                        duration_s=3.0, scientific_name=sci, common_name=common,
-                       confidence=0.8)],
-            clip_path=f"/c/{source}-{sci}-{i}.ogg",
+                       confidence=confidence)],
+            clip_path=f"/c/{source}-{sci}-{i}.ogg" if clip else None,
         )
     with db.session() as s:
-        return s.execute(
+        last = s.execute(
             sa_text("SELECT MAX(id) FROM detections WHERE scientific_name = :sci"),
             {"sci": sci},
         ).scalar_one()
+        if label is not None or rating is not None:
+            s.execute(
+                sa_text("UPDATE detections SET label = :l, sound_rating = :r"
+                        " WHERE id = :i"),
+                {"l": label, "r": rating, "i": last},
+            )
+            s.commit()
+    return last
 
 
 def _similar(client, det_id):
@@ -147,3 +156,125 @@ class TestEdges:
         body = _similar(c, det)
         assert body["candidates"] == []
         assert body["species"]["common_name"] == "African Scops-Owl"
+
+
+class TestClipAvailability:
+    def test_candidates_report_how_many_clips_survive(self, tmp_path):
+        """Retention prunes most clips, so "we have heard it" and "we can play
+        it" are different questions and the panel has to distinguish them."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Cam", n=3)
+        _add(db, sci="Passer melanurus", common="Cape Sparrow", source="Cam",
+             n=2, clip=False)
+
+        by_name = {x["common_name"]: x for x in _similar(c, det)["candidates"]}
+        assert by_name["Northern Gray-headed Sparrow"]["clips"] == 3
+        assert by_name["Cape Sparrow"]["n"] == 2
+        assert by_name["Cape Sparrow"]["clips"] == 0
+
+
+class TestReferenceClips:
+    def test_returns_our_own_clips_of_the_candidate(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Cam", n=2)
+
+        r = c.get(f"/api/detections/{det}/reference-clips?sci=Passer%20griseus")
+        assert r.status_code == 200
+        clips = r.json()["clips"]
+        assert len(clips) == 2
+        assert all(x["same_source"] for x in clips)
+
+    def test_the_clip_under_review_is_never_its_own_reference(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+                   source="Cam", n=2)
+
+        r = c.get(f"/api/detections/{det}/reference-clips?sci=Passer%20griseus")
+        assert det not in [x["id"] for x in r.json()["clips"]]
+
+    def test_rows_without_a_clip_are_not_offered(self, tmp_path):
+        """A player pointed at a pruned clip is a dead end, so these must not
+        reach the picker at all."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Cam", n=3, clip=False)
+
+        r = c.get(f"/api/detections/{det}/reference-clips?sci=Passer%20griseus")
+        assert r.json()["clips"] == []
+
+    def test_a_confirmed_clip_outranks_a_more_confident_one(self, tmp_path):
+        """THE ranking rule: a human said yes to this one. That is worth more
+        as a reference than a higher number from the same model whose output
+        is the thing under review."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Far", confidence=0.99)
+        good = _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+                    source="Far", confidence=0.40, label="good")
+
+        clips = c.get(
+            f"/api/detections/{det}/reference-clips?sci=Passer%20griseus"
+        ).json()["clips"]
+        assert clips[0]["id"] == good
+        assert clips[0]["label"] == "good"
+
+    def test_the_same_camera_keeps_slots_from_the_global_best(self, tmp_path):
+        """Half the slots are reserved for the reviewer's own camera; without
+        that the louder sites take every one and the same-stream comparison --
+        same distance, same background, same codec -- is never offered."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Cam", n=2, confidence=0.30)
+        _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+             source="Far", n=10, confidence=0.99)
+
+        clips = c.get(
+            f"/api/detections/{det}/reference-clips?sci=Passer%20griseus&limit=4"
+        ).json()["clips"]
+        assert any(x["same_source"] for x in clips), "the local camera lost every slot"
+        assert any(not x["same_source"] for x in clips), "the global best lost every slot"
+
+
+class TestPaletteOverride:
+    """The A/B view forces one colour ramp across both panes. Without it the
+    server picks each species' ramp from its note tag, and two spectrograms in
+    different ramps cannot be compared by eye -- which is what that view is
+    for."""
+
+    def test_an_unknown_palette_is_rejected(self, tmp_path):
+        app, db = _app(tmp_path)
+        det = _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+                   source="Cam")
+        r = TestClient(app).get(f"/spectrograms/{det}.png?palette=../../etc/passwd")
+        assert r.status_code == 400
+
+    def test_known_palettes_are_accepted(self, tmp_path):
+        """Every ramp the tag map uses must get past validation. What happens
+        afterwards is this fixture's business -- its clip path is outside the
+        clips root, so the request dies on the path guard -- so assert only
+        that none of them is the 400 an unknown palette earns."""
+        app, db = _app(tmp_path)
+        det = _add(db, sci="Passer griseus", common="Northern Gray-headed Sparrow",
+                   source="Cam")
+        c = TestClient(app)
+        for pal in ("green", "fire", "cool", "fiery"):
+            r = c.get(f"/spectrograms/{det}.png?palette={pal}")
+            assert r.status_code != 400, f"{pal} was rejected"
