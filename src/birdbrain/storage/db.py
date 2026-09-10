@@ -1687,6 +1687,21 @@ class Database:
             for sci, common, n, clips in rows
         ]
 
+    def species_call_descriptions(self) -> list[tuple[str, str]]:
+        """(scientific_name, call description) for every species that has one.
+
+        A few hundred short paragraphs. They are written to answer "what does
+        this sound like", and in doing so they routinely name the birds it is
+        confused with -- which is the only acoustic-similarity signal we hold
+        that did not have to be computed.
+        """
+        with self._Session() as s:
+            rows = s.execute(text(
+                "SELECT scientific_name, call_description FROM species_notes "
+                " WHERE call_description IS NOT NULL AND call_description != ''"
+            )).all()
+        return [(sci, desc) for sci, desc in rows]
+
     def species_for_source(self, source_name: str) -> set[str]:
         """Scientific names ever recorded at one source.
 

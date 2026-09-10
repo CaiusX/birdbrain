@@ -278,3 +278,101 @@ class TestPaletteOverride:
         for pal in ("green", "fire", "cool", "fiery"):
             r = c.get(f"/spectrograms/{det}.png?palette={pal}")
             assert r.status_code != 400, f"{pal} was rejected"
+
+
+class TestSoundsLike:
+    """Acoustic confusions read out of the call descriptions.
+
+    The genus rule cannot reach these: a Hadada Ibis is confused with an
+    Egyptian Goose and a Hamerkop, which is three families and one harsh honk.
+    """
+
+    def _note(self, db, sci, text_):
+        db.set_species_call_description(sci, text_)
+
+    def test_a_named_confusion_becomes_a_candidate_across_genera(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Bostrychia hagedash", common="Hadada Ibis", source="Cam")
+        _add(db, sci="Alopochen aegyptiaca", common="Egyptian Goose", source="Cam")
+        self._note(db, "Bostrychia hagedash",
+                   "A brassy shout, most easily confused with the Egyptian Goose.")
+
+        cands = _similar(c, det)["candidates"]
+        assert [x["common_name"] for x in cands] == ["Egyptian Goose"]
+        assert cands[0]["sounds_like"] is True
+        assert cands[0]["same_genus"] is False
+        assert "sounds like" in cands[0]["reason"]
+
+    def test_the_link_runs_both_ways(self, tmp_path):
+        """Which of a confusable pair got the sentence written into its
+        description is an accident of authorship, not evidence."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        _add(db, sci="Bostrychia hagedash", common="Hadada Ibis", source="Cam")
+        goose = _add(db, sci="Alopochen aegyptiaca", common="Egyptian Goose",
+                     source="Cam")
+        # Only the ibis's description mentions the goose.
+        self._note(db, "Bostrychia hagedash",
+                   "A brassy shout, most easily confused with the Egyptian Goose.")
+
+        cands = _similar(c, goose)["candidates"]
+        assert [x["common_name"] for x in cands] == ["Hadada Ibis"]
+
+    def test_a_longer_name_is_not_matched_as_a_shorter_one(self, tmp_path):
+        """THE parsing trap. "Cape Sparrow" sits inside "Cape Sparrow-Weaver",
+        and matching the short name first would invent a confusion nobody
+        wrote down."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Passer diffusus", common="Southern Gray-headed Sparrow",
+                   source="Cam")
+        _add(db, sci="Passer melanurus", common="Cape Sparrow", source="Cam")
+        _add(db, sci="Plocepasser mahali", common="Cape Sparrow-Weaver", source="Cam")
+        self._note(db, "Passer diffusus", "Chirps, much like the Cape Sparrow-Weaver.")
+
+        by_name = {x["common_name"]: x for x in _similar(c, det)["candidates"]}
+        assert by_name["Cape Sparrow-Weaver"]["sounds_like"] is True
+        # Cape Sparrow is still offered -- it is a congener -- but not as a
+        # sound-alike, because the description never named it.
+        assert by_name["Cape Sparrow"]["sounds_like"] is False
+        assert by_name["Cape Sparrow"]["same_genus"] is True
+
+    def test_a_species_naming_itself_is_not_its_own_candidate(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Bostrychia hagedash", common="Hadada Ibis", source="Cam")
+        self._note(db, "Bostrychia hagedash", "The Hadada Ibis gives a brassy shout.")
+
+        assert _similar(c, det)["candidates"] == []
+
+    def test_a_sound_alike_outranks_a_commoner_congener(self, tmp_path):
+        """THE ranking rule. Somebody wrote down that these two are confusable;
+        the congener is merely related and happens to be abundant."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Cecropis abyssinica", common="Lesser Striped Swallow",
+                   source="Cam")
+        _add(db, sci="Cecropis daurica", common="Red-rumped Swallow",
+             source="Far", n=40)
+        _add(db, sci="Cecropis cucullata", common="Greater Striped Swallow",
+             source="Far", n=2)
+        self._note(db, "Cecropis abyssinica",
+                   "Nasal chatter; the Greater Striped Swallow is the usual trap.")
+
+        names = [x["common_name"] for x in _similar(c, det)["candidates"]]
+        assert names == ["Greater Striped Swallow", "Red-rumped Swallow"], names
+
+    def test_both_reasons_show_when_both_apply(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        det = _add(db, sci="Cecropis abyssinica", common="Lesser Striped Swallow",
+                   source="Cam")
+        _add(db, sci="Cecropis cucullata", common="Greater Striped Swallow",
+             source="Cam")
+        self._note(db, "Cecropis abyssinica",
+                   "The Greater Striped Swallow is the usual trap.")
+
+        c0 = _similar(c, det)["candidates"][0]
+        assert c0["sounds_like"] and c0["same_genus"] and c0["here"]
+        assert c0["reason"] == "sounds like · same genus · heard at this site"

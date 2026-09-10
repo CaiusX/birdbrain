@@ -147,7 +147,7 @@
           <span class="inline-block w-3 text-zinc-500 transition-transform group-open:rotate-90">▸</span>
           Similar species · A/B compare
         </h4>
-        <span class="text-[11px] text-zinc-500">pick one to hear our recordings of it against this clip</span>
+        <span class="text-[11px] text-zinc-500">congeners and known sound-alikes — pick one to hear ours against this clip</span>
       </summary>
       <div class="mt-2">
         <p id="spec-modal-similar-status" class="text-xs text-zinc-500"></p>
@@ -1758,15 +1758,17 @@
         cands.push(add);
       }
     }
-    // A name BirdNET itself proposed outranks a genus-mate it did not.
-    cands.sort((a, b) =>
-      (b.birdnet || 0) - (a.birdnet || 0) ||
-      (a.here === b.here ? 0 : (a.here ? -1 : 1)) ||
-      (b.n - a.n));
+    // A name BirdNET itself proposed outranks everything else; below that,
+    // leave the server's order alone. It has already tiered these by whether
+    // the species is a known sound-alike and whether we have heard it at this
+    // camera, and re-sorting here on raw abundance undid that — a congener
+    // with a thousand detections displaced a sound-alike with twenty. Sort is
+    // stable, so keying on BirdNET alone preserves the rest of the order.
+    cands.sort((a, b) => (b.birdnet || 0) - (a.birdnet || 0));
 
     if (!cands.length) {
       simStatusEl.textContent =
-        'No other species of this genus on record here. Expand "Re-analyze" ' +
+        'No congeners or known sound-alikes on record here. Expand "Re-analyze" ' +
         'below to see what else BirdNET heard in this clip, then reopen this panel.';
       return;
     }
@@ -1799,11 +1801,28 @@
     sci.className = 'text-[11px] italic text-zinc-500 truncate';
     sci.textContent = c.scientific_name;
     btn.appendChild(sci);
+    // "Sounds like" is somebody's written judgement that these two are
+    // confusable, and it carries further than the genus rule -- a Hadada Ibis
+    // is confused with an Egyptian Goose across three families. Give it its
+    // own badge rather than burying it in the run-on reason string.
+    if (c.sounds_like) {
+      const badge = document.createElement('span');
+      badge.className =
+        'ml-auto shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wider ' +
+        'border border-amber-500/50 text-amber-300';
+      badge.textContent = '♪ sounds like';
+      btn.appendChild(badge);
+    }
     const why = document.createElement('span');
-    why.className = 'ml-auto text-[10px] uppercase tracking-wider text-zinc-500 shrink-0';
-    why.textContent = playable
-      ? c.reason + (c.clips ? ` · ${c.clips} clips` : '')
-      : c.reason + ' · no clip';
+    why.className =
+      (c.sounds_like ? '' : 'ml-auto ') +
+      'text-[10px] uppercase tracking-wider text-zinc-500 shrink-0';
+    const rest = [];
+    if (c.same_genus) rest.push('same genus');
+    if (c.here) rest.push('heard here');
+    if (!playable) rest.push('no clip');
+    else if (c.clips) rest.push(`${c.clips} clips`);
+    why.textContent = rest.join(' · ');
     btn.appendChild(why);
     if (playable) btn.addEventListener('click', () => openCompare(c));
     li.appendChild(btn);

@@ -6133,6 +6133,48 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
         across the run of clips a reviewer works through at one site."""
         return db.species_for_source(source_name)
 
+    @_ttl_cache(_PAGE_ROLLUP_TTL, maxsize=1)
+    def _sounds_like_map() -> dict[str, set[str]]:
+        """Which species each species is said to *sound* like.
+
+        Read out of the call descriptions, which name the birds a species is
+        confused with as a matter of course ("most easily confused with the
+        Hamerkop's..."). Matching those mentions against the roster of species
+        we actually record turns prose into a graph -- 236 of its edges cross
+        genus, which is exactly the part the taxonomic rule cannot supply: a
+        Hadada Ibis is confused with an Egyptian Goose and a Hamerkop, three
+        families, one harsh honk.
+
+        Bidirectional on purpose. The claim "A is confused with B" is about a
+        pair, and which of the two happened to get the sentence written into
+        its description is an accident of authorship, not evidence.
+
+        Matching is longest-name-first with word boundaries, so "Cape Sparrow"
+        inside "Cape Sparrow-Weaver" cannot produce a spurious edge. ~230 ms
+        over a few hundred paragraphs, cached like the rest.
+        """
+        by_common = {
+            common: sci for sci, common, _n, _c in _species_catalog_cached() if common
+        }
+        if not by_common:
+            return {}
+        ordered = sorted(by_common, key=len, reverse=True)
+        pattern = re.compile(
+            r"(?<![\w-])(" + "|".join(re.escape(n) for n in ordered) + r")(?![\w-])"
+        )
+        adj: dict[str, set[str]] = {}
+        # Not `desc` -- that is SQLAlchemy's ordering helper, imported at the
+        # top of this module, and shadowing it inside a loop is how a later
+        # edit here acquires a very confusing bug.
+        for sci, description in db.species_call_descriptions():
+            for mention in pattern.findall(description or ""):
+                other = by_common[mention]
+                if other == sci:
+                    continue
+                adj.setdefault(sci, set()).add(other)
+                adj.setdefault(other, set()).add(sci)
+        return adj
+
     @app.get("/api/detections/{detection_id}/reference-clips")
     def reference_clips(
         detection_id: int,
@@ -6213,31 +6255,54 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             source_name = row.source_name
 
         genus = sci.split()[0] if " " in sci else ""
+        sounds_like = _sounds_like_map().get(sci, set())
+        here = _species_for_source_cached(source_name) if source_name else set()
+
         candidates: list[dict] = []
-        if genus:
-            here = _species_for_source_cached(source_name) if source_name else set()
-            for cand_sci, cand_common, n, n_clips in _species_catalog_cached():
-                if cand_sci == sci or not cand_sci.startswith(genus + " "):
-                    continue
-                at_site = cand_sci in here
-                candidates.append(
-                    {
-                        "scientific_name": cand_sci,
-                        "common_name": cand_common,
-                        "n": n,
-                        # Whether there is anything left to play. A candidate
-                        # with none is still worth listing -- it is still what
-                        # the bird might be -- but the UI should not offer it
-                        # as an A/B and then come up empty.
-                        "clips": n_clips,
-                        "here": at_site,
-                        "reason": (
-                            "same genus · heard at this site" if at_site
-                            else "same genus"
-                        ),
-                    }
-                )
-            candidates.sort(key=lambda c: (not c["here"], -c["n"], c["common_name"]))
+        for cand_sci, cand_common, n, n_clips in _species_catalog_cached():
+            if cand_sci == sci:
+                continue
+            kin = bool(genus) and cand_sci.startswith(genus + " ")
+            alike = cand_sci in sounds_like
+            if not (kin or alike):
+                continue
+            at_site = cand_sci in here
+            why = []
+            if alike:
+                why.append("sounds like")
+            if kin:
+                why.append("same genus")
+            if at_site:
+                why.append("heard at this site")
+            candidates.append(
+                {
+                    "scientific_name": cand_sci,
+                    "common_name": cand_common,
+                    "n": n,
+                    # Whether there is anything left to play. A candidate with
+                    # none is still worth listing -- it is still what the bird
+                    # might be -- but the UI should not offer it as an A/B and
+                    # then come up empty.
+                    "clips": n_clips,
+                    "here": at_site,
+                    "sounds_like": alike,
+                    "same_genus": kin,
+                    "reason": " · ".join(why),
+                }
+            )
+
+        # Tiers, strongest first: a species someone wrote down as sounding
+        # like this one beats a congener nobody has ever confused it with,
+        # and within either, one we have actually heard at this camera beats
+        # one we have not. Abundance only breaks ties inside a tier.
+        def rank(c: dict) -> tuple:
+            if c["sounds_like"]:
+                tier = 0 if c["here"] else 1
+            else:
+                tier = 2 if c["here"] else 3
+            return (tier, -c["n"], c["common_name"])
+
+        candidates.sort(key=rank)
 
         return JSONResponse(
             {
