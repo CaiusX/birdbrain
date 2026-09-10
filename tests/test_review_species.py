@@ -404,3 +404,54 @@ def test_unreviewed_clips_still_render_normally(tmp_path):
     html = TestClient(app).get("/review?tab=detections&sci=Zosterops eurycricotus").text
     assert html.count('id="audit-') == 2
     assert "at another review state" not in html
+
+
+# --- confidence filters are per-page, not sticky ---------------------------
+
+
+def test_the_species_drill_through_does_not_carry_the_confidence_filter(tmp_path):
+    """A confidence set on the index used to follow the reviewer down every
+    level, so clips vanished two pages later with nothing on screen saying
+    why. Each level has its own boxes; the filter means "this page"."""
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", conf=0.9, n=2)
+
+    html = TestClient(app).get("/review?min_conf=0.7&max_conf=0.95").text
+    links = re.findall(r'href="(/review\?tab=(?:sites|detections)&sci=[^"]*)"', html)
+    assert links, "expected at least one drill-through link"
+    assert not any("min_conf" in u or "max_conf" in u for u in links), links
+
+
+def test_the_by_site_drill_through_does_not_carry_it_either(tmp_path):
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", conf=0.9, n=2)
+
+    html = TestClient(app).get("/review?tab=sites&sci=A&min_conf=0.7").text
+    links = re.findall(r'href="(/review\?tab=detections&sci=[^"]*)"', html)
+    assert links, "expected at least one site link"
+    assert not any("min_conf" in u or "max_conf" in u for u in links), links
+
+
+def test_the_filter_still_applies_on_the_page_it_is_set_on(tmp_path):
+    """Dropping propagation must not disarm the control itself."""
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", conf=0.95)
+    _add(db, sci="A", common="Bird", source="Cam1", conf=0.40)
+    c = TestClient(app)
+
+    assert c.get("/review?tab=detections&sci=A").text.count('id="audit-') == 2
+    assert c.get("/review?tab=detections&sci=A&min_conf=0.9").text.count(
+        'id="audit-') == 1
+
+
+def test_the_show_all_hint_keeps_the_confidence_filter(tmp_path):
+    """The opposite case: that link is "these same filters, every label", and
+    its count is computed with the confidence filter applied — so it has to
+    carry it or it would advertise a number its destination disagrees with."""
+    app, db = _app(tmp_path)
+    _add(db, sci="A", common="Bird", source="Cam1", conf=0.95, label="good")
+    _add(db, sci="A", common="Bird", source="Cam1", conf=0.10, label="good")
+
+    html = TestClient(app).get("/review?tab=detections&sci=A&min_conf=0.9").text
+    assert "1 clip at another review state" in _empty_state(html)
+    assert "min_conf=0.9" in html

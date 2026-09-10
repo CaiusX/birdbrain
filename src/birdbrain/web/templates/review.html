@@ -92,7 +92,13 @@
         <li>
           {# With a site already chosen there is nothing left to break out, so
              skip the by-site step and go straight to the clips. #}
-          <a href="/review?tab={% if filters.source %}detections{% else %}sites{% endif %}&sci={{ sp.scientific_name | urlencode }}{% if filters.source %}&source={{ filters.source }}{% endif %}{% if filters.min_conf %}&min_conf={{ filters.min_conf }}{% endif %}{% if filters.max_conf != 1.0 %}&max_conf={{ filters.max_conf }}{% endif %}"
+          {# Deliberately does NOT carry min_conf/max_conf. Each level has its
+             own confidence boxes; propagating them made a value set once on
+             the index follow the reviewer silently through every drill-down,
+             so clips went missing two levels later with nothing on screen
+             explaining why. The filter now means "this page", not "the rest
+             of this session". #}
+          <a href="/review?tab={% if filters.source %}detections{% else %}sites{% endif %}&sci={{ sp.scientific_name | urlencode }}{% if filters.source %}&source={{ filters.source }}{% endif %}"
              class="px-5 py-2.5 grid grid-cols-1 md:grid-cols-12 gap-3 items-center hover:bg-zinc-800/40 group">
             <div class="md:col-span-4 min-w-0">
               <div class="text-sm font-medium text-zinc-100 truncate flex items-center gap-1.5 flex-wrap">
@@ -154,7 +160,8 @@
     <ul class="divide-y divide-zinc-800/70">
       {% for st in site_rows %}
         <li>
-          <a href="/review?tab=detections&sci={{ focus_species.scientific | urlencode }}&source={{ st.source_name | urlencode }}{% if filters.min_conf %}&min_conf={{ filters.min_conf }}{% endif %}{% if filters.max_conf != 1.0 %}&max_conf={{ filters.max_conf }}{% endif %}"
+          {# No min_conf/max_conf here either — see the species level above. #}
+          <a href="/review?tab=detections&sci={{ focus_species.scientific | urlencode }}&source={{ st.source_name | urlencode }}"
              class="px-5 py-2.5 grid grid-cols-1 md:grid-cols-12 gap-3 items-center hover:bg-zinc-800/40 group">
             <div class="md:col-span-5 min-w-0">
               <div class="text-sm text-zinc-100 truncate group-hover:text-emerald-300">
