@@ -74,7 +74,7 @@
     <label class="flex flex-col gap-1">
       <span class="text-zinc-500 uppercase tracking-wider">Order</span>
       <select name="order" class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-zinc-100">
-        {% for v, lbl in [('backlog','most waiting'), ('conf_desc','highest conf'), ('conf_asc','lowest conf'), ('recent','most recent'), ('name','A–Z')] %}
+        {% for v, lbl in [('backlog','most waiting'), ('confusable','most confusable'), ('conf_desc','highest conf'), ('conf_asc','lowest conf'), ('recent','most recent'), ('name','A–Z')] %}
           <option value="{{ v }}" {% if filters.order == v %}selected{% endif %}>{{ lbl }}</option>
         {% endfor %}
       </select>
@@ -114,6 +114,17 @@
                 {{ sp.sites }} site{{ '' if sp.sites == 1 else 's' }}
                 {%- if sp.reviewed %} · <span class="text-emerald-500/80">{{ '{:,}'.format(sp.reviewed) }} done</span>{% endif %}
               </div>
+              {# The measured confusion, where there is one. This is where a
+                 label is worth most: the model cannot separate these two, so a
+                 human decision resolves something no amount of confidence
+                 sorting will. #}
+              {% if sp.confusion and sp.confusion.rate >= 0.5 %}
+                <div class="mt-1 text-[11px] text-rose-300/90 truncate"
+                     title="BirdNET also proposed {{ sp.confusion.common_name }} on {{ sp.confusion.clips }} of {{ sp.confusion.analysed }} re-analysed clips of this species.">
+                  ⚠ {{ '%.0f'|format(sp.confusion.rate * 100) }}% also
+                  <span class="text-rose-200">{{ sp.confusion.common_name }}</span>
+                </div>
+              {% endif %}
             </div>
             {# Confidence spread: where this species' backlog actually sits.
                An all-0.9+ bar means easy confirmations; a fat low band means
@@ -274,6 +285,33 @@
       <button type="submit" class="px-3 py-1.5 rounded bg-zinc-100 text-zinc-900 font-medium">apply</button>
     </div>
   </form>
+
+  {# What the model demonstrably cannot separate from this bird. Stated once
+     at the top of the queue rather than left for the reviewer to infer from
+     forty clips. #}
+  {% if queue_confusions %}
+    <div class="mx-5 mt-3 rounded border border-rose-500/30 bg-rose-500/5 px-4 py-3">
+      <div class="text-[11px] uppercase tracking-wider text-rose-300/80">
+        BirdNET cannot reliably separate this species
+      </div>
+      <div class="mt-1.5 flex flex-col gap-1">
+        {% for c in queue_confusions %}
+          <div class="text-sm text-zinc-300">
+            <span class="tabular-nums text-rose-300">{{ '%.0f'|format(c.rate * 100) }}%</span>
+            of re-analysed clips also fired
+            <a href="/review?tab=detections&label_filter=all&sci={{ c.scientific_name | urlencode }}"
+               class="text-zinc-100 hover:text-rose-200 underline underline-offset-2">{{ c.common_name }}</a>
+            <span class="text-zinc-500 text-xs tabular-nums">
+              ({{ c.clips }}/{{ c.analysed }} clips · mean {{ '%.2f'|format(c.mean_conf) }})
+            </span>
+          </div>
+        {% endfor %}
+      </div>
+      <div class="mt-2 text-[11px] text-zinc-500">
+        Confidence is not independent evidence here — compare by ear before accepting.
+      </div>
+    </div>
+  {% endif %}
 
   {% if rows %}
     <ul class="divide-y divide-zinc-800">

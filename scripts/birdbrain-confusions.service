@@ -1,0 +1,15 @@
+[Unit]
+Description=BirdBrain confusion matrix (re-analyse a sample of clips to measure what BirdNET mistakes for what)
+After=birdbrain-pipeline.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dennis/Projects/birdbrain
+# Nice + idle IO: this is a background survey competing with live capture and
+# BirdNET inference on four cores. It has no deadline; the pipeline does.
+Nice=10
+IOSchedulingClass=idle
+# Deepens the sample each week rather than rebuilding it. Clips already
+# analysed are skipped, so a run only costs what it adds, and the cap keeps a
+# single run bounded whatever the backlog has done in the meantime.
+ExecStart=/home/dennis/.local/bin/uv run birdbrain build-confusions --per-species 40 --min-detections 2 --max-clips 6000

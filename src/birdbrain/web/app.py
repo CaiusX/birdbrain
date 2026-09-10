@@ -2757,10 +2757,38 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             if active_source else None
         )
 
+        # Everything we know about what this bird gets mistaken for, in one
+        # place. The A/B panel has carried it since the matrix existed, but
+        # only for whoever opened a clip and expanded a rolldown — which is not
+        # where somebody goes to learn about a species.
+        common_by_sci = {c: n for c, n, _n2, _c2 in _species_catalog_cached()}
+        analysed_here = db.reanalysis_counts().get(scientific, 0)
+        confusion_rows = []
+        for other, (clips, mean_conf) in (_confusion_map().get(scientific) or {}).items():
+            confusion_rows.append({
+                "common_name": common_by_sci.get(other, other),
+                "scientific_name": other,
+                "clips": clips,
+                "rate": (clips / analysed_here) if analysed_here else None,
+                "mean_conf": mean_conf,
+                "same_genus": other.partition(" ")[0] == scientific.partition(" ")[0],
+            })
+        confusion_rows.sort(key=lambda r: -r["clips"])
+        sounds_like_rows = sorted(
+            (
+                {"common_name": common_by_sci.get(o, o), "scientific_name": o}
+                for o in (_sounds_like_map().get(scientific) or set())
+            ),
+            key=lambda r: r["common_name"],
+        )
+
         return TEMPLATES.TemplateResponse(
             request,
             "species_detail.html",
             {
+                "confusion_rows": confusion_rows[:8],
+                "confusion_analysed": analysed_here,
+                "sounds_like_rows": sounds_like_rows,
                 "scientific": scientific,
                 "common_name": common_name,
                 "note": note,
@@ -5039,9 +5067,30 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             }
 
         source_tz = {name: cfg.timezone for name, cfg in sources_by_name.items()}
+        # Reviewing a species the model cannot separate from another is a
+        # different job from reviewing one it can, and the reviewer should know
+        # which before they start rather than discover it clip by clip.
+        queue_confusions: list[dict] = []
+        if sci:
+            analysed = db.reanalysis_counts().get(sci, 0)
+            common_by_sci = {c_sci: c for c_sci, c, _n, _cl in _species_catalog_cached()}
+            if analysed:
+                for other, (clips, mean_conf) in (_confusion_map().get(sci) or {}).items():
+                    if clips / analysed >= 0.5:
+                        queue_confusions.append({
+                            "common_name": common_by_sci.get(other, other),
+                            "scientific_name": other,
+                            "clips": clips,
+                            "analysed": analysed,
+                            "rate": clips / analysed,
+                            "mean_conf": mean_conf,
+                        })
+                queue_confusions.sort(key=lambda c: -c["rate"])
+
         return {
             "rows": rows,
             "hidden_by_label": hidden_by_label,
+            "queue_confusions": queue_confusions[:3],
             "all_sources": all_sources,
             "all_species": all_species,
             "note_tag_by_sci": note_tag_by_sci,
@@ -5199,8 +5248,37 @@ def create_app(cfg: AppConfig | None = None) -> FastAPI:
             tagged = {n.scientific_name for n in notes if n.tag is not None}
             species = [x for x in species if x["scientific_name"] not in tagged]
         reviewed = db.reviewed_counts_by_species()
+        # The strongest measured confusion for each species, so the index can
+        # show where the model demonstrably cannot separate two birds — and be
+        # ordered by it. Labels are the scarcest thing in this system; they are
+        # worth most where a clip is genuinely ambiguous rather than where the
+        # backlog merely happens to be deep.
+        confusions = _confusion_map()
+        runs = db.reanalysis_counts()
+        common_by_sci = {sci: c for sci, c, _n, _cl in _species_catalog_cached()}
         for row in species:
-            row["reviewed"] = reviewed.get(row["scientific_name"], 0)
+            sci_name = row["scientific_name"]
+            row["reviewed"] = reviewed.get(sci_name, 0)
+            pairs = confusions.get(sci_name) or {}
+            analysed = runs.get(sci_name, 0)
+            top = max(pairs.items(), key=lambda kv: kv[1][0], default=None)
+            if top and analysed:
+                other, (clips, _mean) = top
+                row["confusion"] = {
+                    "common_name": common_by_sci.get(other, other),
+                    "clips": clips,
+                    "analysed": analysed,
+                    # How often it happens, not how often it was looked at.
+                    "rate": clips / analysed,
+                }
+            else:
+                row["confusion"] = None
+        if order == "confusable":
+            species.sort(
+                key=lambda r: (-(r["confusion"]["rate"] if r["confusion"] else 0.0),
+                               -(r["confusion"]["clips"] if r["confusion"] else 0),
+                               -r["n"])
+            )
         return {
             "species_rows": species,
             "species_total": len(species),

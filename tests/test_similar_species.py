@@ -7,6 +7,7 @@ from the other end of the country is trivia.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -527,3 +528,77 @@ class TestConfusionMatrix:
         pairs = {(a, b) for a, b, _n, _m in db.confusion_edges(min_clips=1)}
         assert ("Passer melanurus", "Passer domesticus") in pairs
         assert ("Passer domesticus", "Passer melanurus") not in pairs
+
+
+class TestSurfacingConfusions:
+    """The matrix outside the A/B popup — where somebody would actually meet it."""
+
+    def _seen(self, db, det_id, subject, pairs):
+        return db.record_reanalysis(det_id, subject, pairs)
+
+    def test_the_review_queue_warns_about_a_near_total_partner(self, tmp_path):
+        """Reviewing a species the model cannot separate is a different job
+        from reviewing one it can, and the reviewer should know before they
+        start rather than infer it clip by clip."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        _add(db, sci="Prinia maculosa", common="Karoo Prinia", source="Cam", n=3)
+        _add(db, sci="Prinia flavicans", common="Black-chested Prinia", source="Cam")
+        for i in range(3):
+            self._seen(db, 8000 + i, "Prinia maculosa", [("Prinia flavicans", 0.46)])
+
+        html = c.get("/review?tab=detections&sci=Prinia maculosa&label_filter=all").text
+        assert "cannot reliably separate" in html
+        assert "Black-chested Prinia" in html
+        assert "100%" in html
+
+    def test_no_warning_for_an_occasional_partner(self, tmp_path):
+        """Half the clips is the bar; below it this is noise on the page."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        _add(db, sci="Prinia maculosa", common="Karoo Prinia", source="Cam", n=3)
+        _add(db, sci="Prinia flavicans", common="Black-chested Prinia", source="Cam")
+        for i in range(10):
+            self._seen(db, 8100 + i, "Prinia maculosa",
+                       [("Prinia flavicans", 0.4)] if i < 2 else [])
+
+        html = c.get("/review?tab=detections&sci=Prinia maculosa&label_filter=all").text
+        assert "cannot reliably separate" not in html
+
+    def test_the_species_page_shows_both_kinds_of_evidence(self, tmp_path):
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        _add(db, sci="Prinia maculosa", common="Karoo Prinia", source="Cam", n=2)
+        _add(db, sci="Prinia flavicans", common="Black-chested Prinia", source="Cam")
+        _add(db, sci="Apalis thoracica", common="Bar-throated Apalis", source="Cam")
+        for i in range(2):
+            self._seen(db, 8200 + i, "Prinia maculosa", [("Prinia flavicans", 0.46)])
+        db.set_species_call_description(
+            "Prinia maculosa", "A buzzy trill; the Bar-throated Apalis is similar.")
+
+        html = c.get("/species/Prinia maculosa").text
+        assert "Confused with" in html
+        assert "Black-chested Prinia" in html          # measured
+        assert "Bar-throated Apalis" in html           # written
+        assert "sound-alike in the call descriptions" in html
+
+    def test_ordering_by_confusability_puts_the_ambiguous_first(self, tmp_path):
+        """THE point of the ordering: labels are scarce and worth most where
+        the model demonstrably cannot decide, not where the backlog is deepest."""
+        app, db = _app(tmp_path)
+        c = TestClient(app)
+        # Deep backlog, no measured confusion.
+        _add(db, sci="Zosterops virens", common="Cape White-eye", source="Cam", n=40)
+        # Small backlog, total confusion.
+        _add(db, sci="Prinia maculosa", common="Karoo Prinia", source="Cam", n=2)
+        _add(db, sci="Prinia flavicans", common="Black-chested Prinia", source="Cam")
+        for i in range(3):
+            self._seen(db, 8300 + i, "Prinia maculosa", [("Prinia flavicans", 0.46)])
+
+        html = c.get("/review?order=confusable").text
+        listed = re.findall(r'class="group-hover:text-emerald-300">([^<]+)<', html)
+        assert listed and listed[0] == "Karoo Prinia", listed[:3]
+        # And the default ordering still leads with the deepest backlog.
+        listed_backlog = re.findall(
+            r'class="group-hover:text-emerald-300">([^<]+)<', c.get("/review").text)
+        assert listed_backlog[0] == "Cape White-eye", listed_backlog[:3]

@@ -483,6 +483,72 @@
   </div>
 </section>
 
+{# What this bird gets mistaken for. Two different kinds of evidence, kept
+   apart: one measured by putting clips back through the model, one written
+   down by whoever described the calls. #}
+{% if confusion_rows or sounds_like_rows %}
+<section class="bg-zinc-900 border border-zinc-800 rounded-xl mt-6">
+  <div class="px-5 py-3 border-b border-zinc-800 flex items-baseline justify-between gap-3 flex-wrap">
+    <h3 class="text-sm uppercase tracking-wider text-zinc-400">Confused with</h3>
+    {% if confusion_analysed %}
+      <span class="text-[11px] text-zinc-600 tabular-nums">
+        measured over {{ confusion_analysed }} re-analysed clip{{ '' if confusion_analysed == 1 else 's' }}
+      </span>
+    {% endif %}
+  </div>
+
+  {% if confusion_rows %}
+    <table class="w-full text-sm">
+      <thead class="text-[11px] uppercase tracking-wider text-zinc-500">
+        <tr class="border-b border-zinc-800/70">
+          <th class="text-left font-medium px-5 py-2">BirdNET also proposed</th>
+          <th class="text-right font-medium px-3 py-2">on</th>
+          <th class="text-right font-medium px-5 py-2">mean conf</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in confusion_rows %}
+          <tr class="border-b border-zinc-800/40 last:border-0">
+            <td class="px-5 py-2">
+              <a href="/species/{{ c.scientific_name | urlencode }}"
+                 class="text-zinc-100 hover:text-emerald-300">{{ c.common_name }}</a>
+              {% if c.same_genus %}
+                <span class="ml-1.5 text-[10px] uppercase tracking-wider text-zinc-600">same genus</span>
+              {% endif %}
+            </td>
+            <td class="px-3 py-2 text-right tabular-nums whitespace-nowrap">
+              {% if c.rate is not none %}
+                <span class="{% if c.rate >= 0.5 %}text-rose-300{% else %}text-zinc-400{% endif %}">{{ '%.0f'|format(c.rate * 100) }}%</span>
+                <span class="text-zinc-600 text-xs">of clips</span>
+              {% else %}
+                <span class="text-zinc-400">{{ c.clips }}</span>
+              {% endif %}
+            </td>
+            <td class="px-5 py-2 text-right tabular-nums text-zinc-400">{{ '%.2f'|format(c.mean_conf) }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="px-5 py-4 text-sm text-zinc-500">
+      No clips of this species have been re-analysed yet, so nothing is measured.
+    </p>
+  {% endif %}
+
+  {% if sounds_like_rows %}
+    <div class="px-5 py-3 border-t border-zinc-800">
+      <div class="text-[11px] uppercase tracking-wider text-zinc-500">Named as a sound-alike in the call descriptions</div>
+      <div class="mt-1.5 flex flex-wrap gap-1.5">
+        {% for c in sounds_like_rows %}
+          <a href="/species/{{ c.scientific_name | urlencode }}"
+             class="px-2 py-0.5 rounded text-xs border border-amber-500/40 text-amber-300 hover:bg-amber-500/10">{{ c.common_name }}</a>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
   <div class="bg-zinc-900 border border-zinc-800 rounded-xl">
     <div class="px-5 py-3 border-b border-zinc-800">

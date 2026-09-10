@@ -1,0 +1,14 @@
+[Unit]
+Description=Deepen the BirdNET confusion matrix weekly
+
+[Timer]
+# Sunday early morning: the survey saturates a core for the better part of an
+# hour, and this is when nobody is reviewing and the cams are quietest.
+OnCalendar=Sun 03:30
+Persistent=true
+RandomizedDelaySec=20min
+AccuracySec=5min
+Unit=birdbrain-confusions.service
+
+[Install]
+WantedBy=timers.target
